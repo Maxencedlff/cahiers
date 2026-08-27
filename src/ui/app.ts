@@ -290,10 +290,14 @@ export class App {
         }, "Split"),
       );
     }
-    this.tabbar.append(el("button", {
-      title: "Recherche globale (Ctrl+K)",
-      onclick: () => void this.showSearch(),
-    }, "Rechercher"));
+    // Le menu a deja son propre bouton de recherche : deux au meme instant
+    // font doublon a l'ecran.
+    if (this.screen !== "menu") {
+      this.tabbar.append(el("button", {
+        title: "Recherche globale (Ctrl+K)",
+        onclick: () => void this.showSearch(),
+      }, "Rechercher"));
+    }
   }
 
   /* ---------------- ecran cahier ---------------- */
