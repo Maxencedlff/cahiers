@@ -8,6 +8,16 @@ export default defineConfig({
     target: "esnext",
     minify: "esbuild",
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        // mathjs et katex partent dans leurs propres morceaux : ils ne sont
+        // charges qu'a l'ouverture de la calculatrice ou d'une formule.
+        manualChunks: {
+          mathjs: ["mathjs"],
+          katex: ["katex"],
+        },
+      },
+    },
   },
   test: {
     environment: "node",

@@ -252,6 +252,25 @@ export class Repo {
     return out;
   }
 
+  /* ---------------- pieces jointes ---------------- */
+
+  /**
+   * Enregistre une image ou un PDF dans `assets/` de l'intercalaire et rend
+   * le chemin a stocker dans le bloc, relatif a la page qui le reference.
+   */
+  async writeAsset(
+    dir: string, divider: string, name: string, dataUrl: string,
+  ): Promise<string> {
+    const rel = joinPath(dir, divider, ASSETS_DIR, name);
+    await this.fs.mkdir(joinPath(dir, divider, ASSETS_DIR));
+    await this.fs.writeDataUrl(rel, dataUrl);
+    return `${ASSETS_DIR}/${name}`;
+  }
+
+  async readAsset(dir: string, divider: string, src: string): Promise<string> {
+    return this.fs.readDataUrl(joinPath(dir, divider, src));
+  }
+
   async ensureRootLayout(): Promise<void> {
     if (!(await this.fs.exists(VRAC))) {
       await this.fs.mkdir(joinPath(VRAC, "Notes"));

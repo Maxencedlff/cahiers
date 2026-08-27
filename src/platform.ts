@@ -1,4 +1,4 @@
-import { BrowserFs, TauriFs, joinPath, type FsAdapter } from "./core/storage/fs";
+import { BrowserFs, TauriFs, joinPath, splitDataUrl, type FsAdapter } from "./core/storage/fs";
 
 /**
  * Couche plateforme. L'application tourne dans deux contextes :
@@ -20,6 +20,8 @@ export interface Platform {
   rootLabel: string;
   presence: Presence | null;
   isTauri: boolean;
+  /** OCR local fourni par Windows. Absent en mode navigateur. */
+  ocr: ((dataUrl: string) => Promise<string>) | null;
 }
 
 function inTauri(): boolean {
@@ -35,6 +37,7 @@ export async function detectPlatform(): Promise<Platform> {
       rootLabel: "Mode navigateur, donnees de developpement",
       presence: null,
       isTauri: false,
+      ocr: null,
     };
   }
 
@@ -48,6 +51,10 @@ export async function detectPlatform(): Promise<Platform> {
     rootLabel,
     isTauri: true,
     presence: buildPresence(fs, machine),
+    ocr: async (dataUrl: string) => {
+      const { base64 } = splitDataUrl(dataUrl);
+      return invoke<string>("ocr_image", { base64 });
+    },
   };
 }
 

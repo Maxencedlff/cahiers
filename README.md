@@ -12,14 +12,27 @@ n'explique que la mise en route et l'organisation du code.
 ```bash
 npm install
 npm run dev        # interface dans un navigateur, donnees locales de demo
-npm test           # 82 tests du noyau
-npm run app:dev    # vraie application Tauri (necessite Rust + build tools)
+npm test           # 90 tests du noyau
+npm run app:dev    # vraie application Tauri
 npm run app:build  # produit l'installateur .exe
 ```
+
+**A lancer depuis Windows** (PowerShell), pas depuis WSL : `npm install` pose
+des binaires natifs propres a la plateforme, et une installation faite sous
+WSL ne peut pas construire l'executable Windows.
+
+Prerequis pour `app:dev` et `app:build` : Rust (`winget install Rustlang.Rustup`)
+et les Visual Studio Build Tools avec la charge de travail C++.
 
 Le mode navigateur existe pour developper et verifier l'interface sans build
 natif. Les donnees y restent dans le navigateur et ne touchent jamais le
 dossier reel.
+
+Verification de l'interface, serveur de dev lance a cote :
+
+```bash
+python3 scripts/verifier-ui.py captures
+```
 
 ## Ou sont les cahiers
 
@@ -77,6 +90,17 @@ src/
 src-tauri/src/lib.rs      acces disque controle, instance unique
 ```
 
+## Photos du tableau
+
+Bouton « Photo » de la barre d'outils. On choisit l'image, on pose les quatre
+coins du tableau, l'application redresse la perspective, passe en noir et blanc
+par seuil adaptatif, puis lit le texte avec le moteur OCR **de Windows**. Rien
+ne part sur un service externe. Le texte extrait rend la photo trouvable par la
+recherche.
+
+Si Windows n'a pas de module OCR installe, l'image est inseree quand meme et
+l'application le dit : la photo est simplement absente de la recherche.
+
 ## Reconnaissance manuscrite
 
 Elle passe par MyScript iink, dont le service est **distant**. Consequence
@@ -108,6 +132,19 @@ math restent en attente indefiniment, l'encre reste lisible.
 
 ## Etat
 
-Priorites 1 et 2 de la specification faites. La priorite 3 attend, comme le
-demande la section 12 : rien de la priorite 3 avant que la priorite 1 soit
-solide a l'usage.
+Priorites 1 et 2 de la specification faites, y compris la calculatrice, le
+split, le marqueur « pas compris » et l'import de photos avec OCR.
+
+La priorite 3 attend volontairement, comme le demande la section 12 : rien de
+la priorite 3 avant que la priorite 1 soit solide a l'usage.
+
+Deux ecarts assumes par rapport a la specification, tous deux signales :
+
+- la calculatrice a **cinq** onglets et non quatre. La section 7 annonce quatre
+  onglets puis decrit cinq rubriques : Calcul, Courbes, Matrices, Resoudre et
+  Calcul litteral. Les fusionner arbitrairement aurait ete pire ;
+- les primitives utilisent la table de formes usuelles ecrite a la main
+  (option 1). Nerdamer n'est pas branche, la question restant ouverte dans la
+  specification. Le point d'extension est `tryExternal` dans
+  `src/core/calc/integrate.ts`, et une integrale definie tombe de toute facon
+  sur un calcul numerique quand la primitive manque.

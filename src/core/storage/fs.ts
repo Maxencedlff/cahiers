@@ -19,6 +19,21 @@ export interface FsAdapter {
   rename(from: string, to: string): Promise<void>;
   /** Racine reelle, affichee a l'utilisateur. */
   rootLabel(): Promise<string>;
+
+  /**
+   * Fichiers binaires (images, PDF), echanges en data URL.
+   * Sur disque c'est un vrai PNG, lisible par n'importe quel logiciel :
+   * l'utilisateur ne doit jamais etre prisonnier de l'outil.
+   */
+  writeDataUrl(rel: string, dataUrl: string): Promise<void>;
+  readDataUrl(rel: string): Promise<string>;
+}
+
+/** "data:image/png;base64,AAA" donne ["image/png", "AAA"]. */
+export function splitDataUrl(dataUrl: string): { mime: string; base64: string } {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+  if (!m) throw new Error("data URL invalide");
+  return { mime: m[1], base64: m[2] };
 }
 
 export function joinPath(...parts: string[]): string {
@@ -48,6 +63,24 @@ export class TauriFs implements FsAdapter {
   remove(rel: string) { return this.invoke<void>("remove_path", { rel }); }
   rename(from: string, to: string) { return this.invoke<void>("rename_path", { from, to }); }
   rootLabel() { return this.invoke<string>("root_path"); }
+
+  async writeDataUrl(rel: string, dataUrl: string) {
+    const { base64 } = splitDataUrl(dataUrl);
+    await this.invoke<void>("write_binary", { rel, base64 });
+  }
+
+  async readDataUrl(rel: string) {
+    const base64 = await this.invoke<string>("read_binary", { rel });
+    return `data:${mimeOf(rel)};base64,${base64}`;
+  }
+}
+
+function mimeOf(path: string): string {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return ({
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+    webp: "image/webp", pdf: "application/pdf",
+  } as Record<string, string>)[ext] ?? "application/octet-stream";
 }
 
 /* ------------------------------------------------------------------ */
@@ -136,6 +169,9 @@ export class BrowserFs implements FsAdapter {
     }
     this.flush();
   }
+  /** En mode navigateur on garde la data URL telle quelle. */
+  async writeDataUrl(rel: string, dataUrl: string) { await this.writeText(rel, dataUrl); }
+  async readDataUrl(rel: string) { return this.readText(rel); }
   async rootLabel() { return "(navigateur, donnees locales de developpement)"; }
 }
 

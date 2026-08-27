@@ -191,7 +191,12 @@ export class RecognitionQueue {
   get size(): number { return this.jobs.size; }
 
   get online(): boolean {
-    return typeof navigator === "undefined" ? true : navigator.onLine;
+    if (typeof navigator === "undefined") return true;
+    // navigator.onLine n'existe pas partout (Node recent, WebView bridee).
+    // Inconnu vaut "on tente" : mieux vaut un envoi qui echoue et repart en
+    // file qu'une file gelee alors que le reseau est la.
+    const status = (navigator as Navigator & { onLine?: boolean }).onLine;
+    return status !== false;
   }
 
   subscribe(l: QueueListener): () => void {

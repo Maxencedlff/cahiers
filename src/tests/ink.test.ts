@@ -152,3 +152,46 @@ describe("file d'attente hors ligne", () => {
     expect(listener.mock.calls.at(-1)![0].pending).toBeGreaterThan(0);
   });
 });
+
+describe("etat du reseau", () => {
+  const backend: RecognitionBackend = {
+    name: "test", available: true,
+    async recognize() { return { value: "x", candidates: [] }; },
+  };
+
+  it("tente l'envoi quand l'etat du reseau est inconnu", async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", {
+      value: {}, configurable: true, writable: true,
+    });
+    try {
+      const done: string[] = [];
+      const q = new RecognitionQueue(backend, (k) => { done.push(k); });
+      expect(q.online).toBe(true);
+      q.enqueue({ key: "a", kind: "math", strokes: [] });
+      await q.pump();
+      expect(done).toEqual(["a"]);
+    } finally {
+      if (original) Object.defineProperty(globalThis, "navigator", original);
+    }
+  });
+
+  it("attend quand le navigateur se declare hors ligne", async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    Object.defineProperty(globalThis, "navigator", {
+      value: { onLine: false }, configurable: true, writable: true,
+    });
+    try {
+      const done: string[] = [];
+      const q = new RecognitionQueue(backend, (k) => { done.push(k); });
+      expect(q.online).toBe(false);
+      q.enqueue({ key: "a", kind: "math", strokes: [] });
+      await q.pump();
+      // Rien n'est perdu : le travail reste en file jusqu'au retour du reseau.
+      expect(done).toEqual([]);
+      expect(q.size).toBe(1);
+    } finally {
+      if (original) Object.defineProperty(globalThis, "navigator", original);
+    }
+  });
+});

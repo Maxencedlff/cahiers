@@ -1,6 +1,6 @@
-import { el, askText, toast, confirmDialog } from "./dom";
+import { el, askText, toast, confirmDialog, pick } from "./dom";
 import { InkSurface, PAGE_W, PAGE_H } from "./canvas";
-import { renderTex } from "./calculator/index";
+import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
 import { strokeBounds, unionBounds } from "../core/ink/stroke";
 import type {
@@ -275,6 +275,7 @@ export class PageView {
       const block = loaded.page.blocks.find((b) => b.id === blockId);
       if (block && block.type === "math") {
         block.latex = result.value;
+        block.candidates = result.candidates.length ? result.candidates : undefined;
         block.pending = false;
         this.paintOverlay(loaded);
         this.queueSave(loaded);
@@ -289,6 +290,7 @@ export class PageView {
       const block = page.blocks.find((b) => b.id === blockId);
       if (block && block.type === "math") {
         block.latex = result.value;
+        block.candidates = result.candidates.length ? result.candidates : undefined;
         block.pending = false;
         await this.host.repo.writePage(nb, div, pageNum, page);
       }
@@ -336,7 +338,8 @@ export class PageView {
         }
         if (block.latex) {
           box.title = block.latex;
-          box.addEventListener("dblclick", () => void this.editLatex(loaded, block));
+          box.style.cursor = "pointer";
+          box.addEventListener("click", () => void this.correctMath(loaded, block));
         }
         return place(box, block.rect);
       }
@@ -387,8 +390,15 @@ export class PageView {
         return place(box, block.rect);
       }
       case "image": {
+        const img = el("img", { style: { maxWidth: "100%", display: "block", borderRadius: "4px" } });
         const box = el("div", { class: "block-box" },
-          el("img", { src: block.src, style: { maxWidth: "100%" } }));
+          el("span", { class: "tag" }, block.ocr ? "photo, texte extrait" : "photo"),
+          img);
+        if (block.ocr) box.title = block.ocr;
+        // Le fichier est lu a l'affichage : la page JSON ne porte que le chemin.
+        void this.host.repo.readAsset(this.notebook, this.divider, block.src)
+          .then((url) => { img.src = url; })
+          .catch(() => { box.append(el("span", { class: "small muted" }, "image introuvable")); });
         return place(box, block.rect);
       }
       case "pdf":
@@ -397,9 +407,38 @@ export class PageView {
     }
   }
 
+  /**
+   * Correction en un geste (section 4). Un appui sur la formule propose les
+   * autres lectures du moteur : dx pris pour dz, a pour alpha, une apostrophe
+   * avalee. La reconnaissance ne sera jamais parfaite, la correction doit
+   * couter un geste, pas une reecriture.
+   */
+  private async correctMath(loaded: LoadedPage, block: MathBlock): Promise<void> {
+    const options = (block.candidates ?? []).map((c) => ({ value: c, label: c }));
+    options.push({ value: EDIT_SENTINEL, label: "Corriger a la main..." });
+    const choice = await pick(
+      options.length > 1 ? "Autres lectures possibles" : "Corriger la formule",
+      options,
+    );
+    if (choice === null) return;
+    if (choice === EDIT_SENTINEL) { await this.editLatex(loaded, block); return; }
+    // La lecture choisie devient la principale, l'ancienne rejoint les autres.
+    const previous = block.latex;
+    block.candidates = [
+      ...(block.candidates ?? []).filter((c) => c !== choice),
+      ...(previous && previous !== choice ? [previous] : []),
+    ];
+    block.latex = choice;
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
+  }
+
   private async editLatex(loaded: LoadedPage, block: MathBlock): Promise<void> {
     const next = await askText("Corriger la formule", "LaTeX reconnu", block.latex ?? "");
     if (next === null) return;
+    if (block.latex && block.latex !== next) {
+      block.candidates = [...(block.candidates ?? []).filter((c) => c !== next), block.latex];
+    }
     block.latex = next;
     this.paintOverlay(loaded);
     this.queueSave(loaded);
@@ -453,6 +492,31 @@ export class PageView {
     const y = 20 + loaded.page.blocks.filter((b) => b.type === "flag").length * 40;
     this.addBlock({ id: uuid(), type: "flag", note, rect: { x: PAGE_W - 62, y, w: 30, h: 30 } });
     toast("Repere pose sur la page");
+  }
+
+  /** Insere une photo redressee : le fichier part dans assets/. */
+  async addImageBlock(
+    dataUrl: string, width: number, height: number, ocr: string | null,
+  ): Promise<void> {
+    const loaded = this.activePage();
+    if (!loaded) return;
+    const id = uuid();
+    const name = `${id}.png`;
+    let src: string;
+    try {
+      src = await this.host.repo.writeAsset(this.notebook, this.divider, name, dataUrl);
+    } catch (e) {
+      toast(`Image non enregistree : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    // Largeur de page moins les marges, hauteur proportionnelle.
+    const w = Math.min(PAGE_W - 120, 640);
+    const h = Math.max(60, Math.round((height / width) * w));
+    this.addBlock({
+      id, type: "image", src, ocr,
+      rect: { x: 60, y: this.nextFreeY(), w, h },
+    });
+    toast(ocr ? "Photo inseree, texte extrait pour la recherche" : "Photo inseree");
   }
 
   addTextBlock(): void {
@@ -612,6 +676,9 @@ export class PageView {
 
   get hasUnsaved(): boolean { return this.pendingSave.size > 0; }
 }
+
+/** Valeur reservee du menu de correction, jamais un LaTeX valide. */
+const EDIT_SENTINEL = "\u0000corriger-a-la-main";
 
 /* ---------------- utilitaires ---------------- */
 

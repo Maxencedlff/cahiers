@@ -14,7 +14,7 @@ async function main() {
 
   try {
     const platform = await detectPlatform();
-    const app = new App(platform.fs, platform.rootLabel, platform.presence);
+    const app = new App(platform.fs, platform.rootLabel, platform.presence, platform.ocr);
     mount.replaceChildren(app.element);
     await app.start();
 

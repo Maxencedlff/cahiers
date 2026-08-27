@@ -2,7 +2,7 @@ import { el, clear, toast, askText, askFields, confirmDialog, pick } from "./dom
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
-import { Calculator } from "./calculator/index";
+import type { Calculator } from "./calculator/index";
 import { PALETTE } from "../core/palette";
 import type { ColorKey, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
@@ -35,7 +35,9 @@ interface Tab {
 export class App {
   private repo: Repo;
   private queue: RecognitionQueue;
-  private calculator: Calculator;
+  /** Chargee au premier appel : mathjs pese lourd et ne sert pas toujours. */
+  private calculator: Calculator | null = null;
+  private calculatorLoading: Promise<Calculator> | null = null;
   private settings: Settings;
 
   private screen: Screen = "menu";
@@ -60,6 +62,7 @@ export class App {
     fs: FsAdapter,
     private rootLabel: string,
     private presence: Presence | null,
+    private ocr: ((dataUrl: string) => Promise<string>) | null = null,
   ) {
     this.repo = new Repo(fs);
     this.settings = loadSettings();
@@ -74,24 +77,6 @@ export class App {
     this.queue = new RecognitionQueue(backend, (key, result) => this.onRecognized(key, result));
     this.queueState = this.queue.state();
     this.queue.subscribe((s) => { this.queueState = s; this.paintStatus(); });
-
-    this.calculator = new Calculator({
-      canInsert: () => this.screen === "notebook" && !!this.activeTab()?.view,
-      insertGraph: (fn, domain) => {
-        const view = this.activeTab()?.view;
-        view?.addBlock({
-          id: uuid(), type: "graph", fn, domain,
-          rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 200 },
-        });
-      },
-      insertCalc: (expr, result) => {
-        const view = this.activeTab()?.view;
-        view?.addBlock({
-          id: uuid(), type: "calc", expr, result,
-          rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 46 },
-        });
-      },
-    });
 
     this.root.append(this.tabbar, this.main, this.statusbar);
     document.addEventListener("keydown", (e) => this.onKey(e));
@@ -108,6 +93,38 @@ export class App {
   }
 
   get element(): HTMLElement { return this.root; }
+
+  /** Charge la calculatrice a la demande, une seule fois. */
+  private async loadCalculator(): Promise<Calculator> {
+    if (this.calculator) return this.calculator;
+    if (!this.calculatorLoading) {
+      this.calculatorLoading = import("./calculator/index").then(({ Calculator }) => {
+        this.calculator = new Calculator({
+          canInsert: () => this.screen === "notebook" && !!this.activeTab()?.view,
+          insertGraph: (fn, domain) => {
+            const view = this.activeTab()?.view;
+            view?.addBlock({
+              id: uuid(), type: "graph", fn, domain,
+              rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 200 },
+            });
+          },
+          insertCalc: (expr, result) => {
+            const view = this.activeTab()?.view;
+            view?.addBlock({
+              id: uuid(), type: "calc", expr, result,
+              rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 46 },
+            });
+          },
+        });
+        return this.calculator;
+      });
+    }
+    return this.calculatorLoading;
+  }
+
+  private async toggleCalculator(): Promise<void> {
+    (await this.loadCalculator()).toggle();
+  }
 
   async start(): Promise<void> {
     await this.repo.ensureRootLayout();
@@ -456,8 +473,12 @@ export class App {
       el("button", { onclick: () => view()?.redo(), title: "Retablir (Ctrl+Y)" }, "Retablir"),
       el("div", { class: "sep" }),
       el("button", { onclick: () => view()?.addTextBlock() }, "Texte"),
+      el("button", {
+        title: "Photo du tableau, redressee et lue",
+        onclick: () => void this.importImage(),
+      }, "Photo"),
       el("button", { onclick: () => view()?.addFlag(), title: "Pas compris (Ctrl+F)" }, "Pas compris"),
-      el("button", { onclick: () => this.calculator.toggle(), title: "Calculatrice (Ctrl+L)" }, "Calculatrice"),
+      el("button", { onclick: () => void this.toggleCalculator(), title: "Calculatrice (Ctrl+L)" }, "Calculatrice"),
       el("div", { class: "sep" }),
       el("button", { onclick: () => void view()?.newPage(), title: "Nouvelle page a la fin" }, "Nouvelle page"),
       el("button", { onclick: () => void view()?.newPage(true), title: "Inserer apres la page courante" }, "Inserer ici"),
@@ -489,6 +510,21 @@ export class App {
       el("button", { onclick: () => void view()?.next(), title: "Page suivante" }, "▶"),
     );
     return bar;
+  }
+
+  /**
+   * Import d'une photo prise au telephone : recadrage, redressement, OCR.
+   * Sans OCR, une photo serait un trou noir dans la recherche (section 6).
+   */
+  private async importImage(): Promise<void> {
+    const view = this.activeTab()?.view;
+    if (!view) return;
+    const { pickImage, cropDialog } = await import("./image-import");
+    const img = await pickImage();
+    if (!img) return;
+    const result = await cropDialog(img, this.ocr ? { ocr: this.ocr } : {});
+    if (!result) return;
+    await view.addImageBlock(result.dataUrl, result.width, result.height, result.ocr);
   }
 
   private paintToolbar(): void {
@@ -559,7 +595,7 @@ export class App {
   /* ---------------- raccourcis ---------------- */
 
   private onKey(e: KeyboardEvent): void {
-    if (this.calculator.handleKey(e)) { e.preventDefault(); return; }
+    if (this.calculator?.handleKey(e)) { e.preventDefault(); return; }
     const typing = ["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName);
     const view = this.activeTab()?.view;
 
@@ -567,7 +603,7 @@ export class App {
       const k = e.key.toLowerCase();
       if (k === "m") { e.preventDefault(); void (this.screen === "menu" ? this.backToWork() : this.showMenu()); return; }
       if (k === "k") { e.preventDefault(); void this.showSearch(); return; }
-      if (k === "l") { e.preventDefault(); this.calculator.toggle(); return; }
+      if (k === "l") { e.preventDefault(); void this.toggleCalculator(); return; }
       if (k === "z" && !typing) { e.preventDefault(); view?.undo(); return; }
       if (k === "y" && !typing) { e.preventDefault(); view?.redo(); return; }
       if (k === "f" && !typing) { e.preventDefault(); view?.addFlag(); return; }

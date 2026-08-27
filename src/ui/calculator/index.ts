@@ -1,5 +1,5 @@
-import katex from "katex";
 import { el, toast } from "../dom";
+import { renderTex } from "../tex";
 import { CalcEngine } from "../../core/calc/engine";
 import { derivative, nthDerivative, simplifyExpr, substitute, type DerivStep } from "../../core/calc/derive";
 import { antiderivative, definiteIntegral } from "../../core/calc/integrate";
@@ -592,16 +592,6 @@ export class Calculator {
 }
 
 /* ---------------- rendu ---------------- */
-
-export function renderTex(latex: string): HTMLElement {
-  const span = el("span", {});
-  try {
-    span.innerHTML = katex.renderToString(latex, { throwOnError: false, displayMode: false });
-  } catch {
-    span.textContent = latex;
-  }
-  return span;
-}
 
 /** Arbre des regles de derivation, replie par defaut au dela du premier niveau. */
 function renderSteps(step: DerivStep, depth = 0): HTMLElement {

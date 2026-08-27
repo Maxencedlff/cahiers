@@ -73,6 +73,8 @@ export interface MathBlock extends BlockBase {
   mode: "math";
   /** true tant que la reconnaissance n'est pas revenue (file hors ligne). */
   pending?: boolean;
+  /** Autres lectures proposees par le moteur, pour la correction en un geste. */
+  candidates?: string[];
 }
 
 export interface ImageBlock extends BlockBase {

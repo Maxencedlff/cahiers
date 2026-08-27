@@ -11,29 +11,13 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::Serialize;
 use tauri::{Manager, State};
 
 /// Racine des cahiers, resolue une fois au demarrage.
 struct Root(Mutex<PathBuf>);
 
-#[derive(Serialize)]
-struct AppError {
-    message: String,
-}
-
-impl From<std::io::Error> for AppError {
-    fn from(e: std::io::Error) -> Self {
-        AppError { message: e.to_string() }
-    }
-}
-
-impl std::fmt::Display for AppError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
+/// Les erreurs remontent au frontend en clair : c'est ce qui s'affiche dans
+/// le bandeau de statut quand une ecriture echoue.
 type Res<T> = Result<T, String>;
 
 fn fail(msg: impl Into<String>) -> String {
@@ -132,6 +116,93 @@ fn write_text(state: State<Root>, rel: String, content: String) -> Res<()> {
     fs::write(&temp, content.as_bytes()).map_err(|e| fail(e.to_string()))?;
     fs::rename(&temp, &path).map_err(|e| fail(e.to_string()))?;
     Ok(())
+}
+
+/* ------------------------------------------------------------------ */
+/* Fichiers binaires : images importees, PDF                           */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+fn write_binary(state: State<Root>, rel: String, base64: String) -> Res<()> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|e| fail(format!("image illisible : {e}")))?;
+    let path = resolve(&root_of(&state)?, &rel)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
+    }
+    let temp = path.with_extension("tmp-write");
+    fs::write(&temp, &bytes).map_err(|e| fail(e.to_string()))?;
+    fs::rename(&temp, &path).map_err(|e| fail(e.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn read_binary(state: State<Root>, rel: String) -> Res<String> {
+    use base64::Engine;
+    let path = resolve(&root_of(&state)?, &rel)?;
+    let bytes = fs::read(&path).map_err(|e| fail(format!("{rel} : {e}")))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/* ------------------------------------------------------------------ */
+/* OCR                                                                 */
+/* ------------------------------------------------------------------ */
+
+/// Lit le texte d'une image avec le moteur OCR de Windows.
+///
+/// Sans OCR, une photo de tableau est un trou noir dans la recherche
+/// (section 6). Le moteur est celui du systeme : rien ne sort de la machine.
+#[tauri::command]
+fn ocr_image(base64: String) -> Res<String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|e| fail(format!("image illisible : {e}")))?;
+    ocr_bytes(&bytes)
+}
+
+#[cfg(windows)]
+fn ocr_bytes(bytes: &[u8]) -> Res<String> {
+    use windows::core::HSTRING;
+    use windows::Globalization::Language;
+    use windows::Graphics::Imaging::BitmapDecoder;
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+    let win = |e: windows::core::Error| fail(format!("OCR Windows : {e}"));
+
+    let stream = InMemoryRandomAccessStream::new().map_err(win)?;
+    let writer = DataWriter::CreateDataWriter(&stream).map_err(win)?;
+    writer.WriteBytes(bytes).map_err(win)?;
+    writer.StoreAsync().map_err(win)?.get().map_err(win)?;
+    writer.FlushAsync().map_err(win)?.get().map_err(win)?;
+    writer.DetachStream().map_err(win)?;
+    stream.Seek(0).map_err(win)?;
+
+    let decoder = BitmapDecoder::CreateAsync(&stream).map_err(win)?.get().map_err(win)?;
+    let bitmap = decoder.GetSoftwareBitmapAsync().map_err(win)?.get().map_err(win)?;
+
+    // Le francais d'abord, puis les langues du profil utilisateur.
+    let engine = Language::CreateLanguage(&HSTRING::from("fr-FR"))
+        .ok()
+        .and_then(|lang| OcrEngine::TryCreateFromLanguage(&lang).ok())
+        .or_else(|| OcrEngine::TryCreateFromUserProfileLanguages().ok())
+        .ok_or_else(|| {
+            fail(
+                "Aucun moteur OCR disponible. Ajoute le module de reconnaissance \
+                 optique de caracteres dans Parametres, Langue et region.",
+            )
+        })?;
+
+    let result = engine.RecognizeAsync(&bitmap).map_err(win)?.get().map_err(win)?;
+    Ok(result.Text().map_err(win)?.to_string())
+}
+
+#[cfg(not(windows))]
+fn ocr_bytes(_bytes: &[u8]) -> Res<String> {
+    Err(fail("OCR disponible uniquement sous Windows"))
 }
 
 #[tauri::command]
@@ -267,6 +338,9 @@ pub fn run() {
             list_files,
             read_text,
             write_text,
+            read_binary,
+            write_binary,
+            ocr_image,
             path_exists,
             make_dir,
             remove_path,
