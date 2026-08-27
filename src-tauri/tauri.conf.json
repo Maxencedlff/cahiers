@@ -13,13 +13,14 @@
     "windows": [
       {
         "title": "Cahiers",
-        "width": 1360,
-        "height": 900,
+        "width": 1180,
+        "height": 720,
         "minWidth": 900,
         "minHeight": 620,
         "resizable": true,
         "center": true,
-        "decorations": true
+        "decorations": true,
+        "maximized": true
       }
     ],
     "security": {
@@ -28,7 +29,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -38,7 +41,9 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["French"]
+        "languages": [
+          "French"
+        ]
       }
     }
   }
