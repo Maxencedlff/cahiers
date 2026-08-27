@@ -1,0 +1,29 @@
+[package]
+name = "cahiers"
+version = "0.1.0"
+description = "Prise de notes stylet pour etudes d'ingenieur"
+authors = ["Maxence de La Fouchardiere"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "cahiers_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+
+[profile.release]
+# Une application d'encre doit demarrer vite et tenir peu de place.
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

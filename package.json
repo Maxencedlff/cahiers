@@ -1,0 +1,32 @@
+{
+  "name": "cahiers",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Prise de notes stylet pour etudes d'ingenieur ESEO",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.2.0",
+    "@tauri-apps/plugin-fs": "^2.2.0",
+    "iink-ts": "^3.1.0",
+    "katex": "^0.16.11",
+    "mathjs": "^13.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "@types/katex": "^0.16.7",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}
