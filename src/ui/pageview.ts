@@ -17,6 +17,8 @@ export interface PageViewHost {
   repo: Repo;
   /** false quand aucun moteur de reconnaissance n'est configure. */
   recognitionReady: () => boolean;
+  /** Convertir l'ecriture au fil de la plume, sans entourer de zone. */
+  autoConvert: () => boolean;
   getTool: () => ToolKind | "region" | "textregion";
   getColor: () => ColorKey;
   getWidth: () => number;
@@ -163,7 +165,9 @@ export class PageView {
     const out: Stroke[] = [];
     for (const b of page.blocks) {
       if (b.type === "ink") {
-        const hidden = this.renderMode === "clean" && b.recognized && b.rect;
+        // En rendu propre, l'encre convertie laisse la place au texte.
+        // Elle n'est pas perdue pour autant : un clic sur "Rendu" la ramene.
+        const hidden = this.renderMode === "clean" && !!b.recognized;
         if (!hidden) out.push(...b.strokes);
       }
       if (b.type === "math") {
@@ -217,6 +221,34 @@ export class PageView {
     this.pushUndo(loaded);
     this.mainInk(loaded.page).strokes.push(stroke);
     this.queueSave(loaded);
+    if (this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+  }
+
+  /**
+   * Conversion au fil de la plume (section 4). L'envoi part au lever du
+   * stylet plus une pause, jamais en flux continu : sans cela on paierait
+   * une requete par trait et la batterie avec.
+   */
+  private scheduleAutoConvert(loaded: LoadedPage): void {
+    const ink = this.mainInk(loaded.page);
+    if (ink.editedByHand) return; // ne jamais ecraser une correction clavier
+    ink.pending = true;
+    this.paintOverlay(loaded);
+    this.host.requestRecognition(
+      blockKey(this.notebook, this.divider, loaded.number, ink.id),
+      "text",
+      [...ink.strokes],
+    );
+  }
+
+  /** Relance la conversion de la page, meme apres une correction clavier. */
+  reconvert(): void {
+    const loaded = this.activePage();
+    if (!loaded) return;
+    const ink = this.mainInk(loaded.page);
+    if (ink.strokes.length === 0) { toast("Rien a convertir sur cette page", "warn"); return; }
+    ink.editedByHand = false;
+    this.scheduleAutoConvert(loaded);
   }
 
   private onErase(loaded: LoadedPage, ids: string[]): void {
@@ -287,6 +319,8 @@ export class PageView {
       const block = loaded.page.blocks.find((b) => b.id === blockId);
       if (block) {
         applyToBlock(block, result);
+        // Le rendu propre masque l'encre convertie : il faut redessiner.
+        loaded.surface?.setStrokes(this.visibleStrokes(loaded.page));
         this.paintOverlay(loaded);
         this.queueSave(loaded);
       }
@@ -424,9 +458,9 @@ export class PageView {
         return place(box, block.rect);
       }
       case "ink": {
-        // Seule une zone passee au moteur Text a un cadre : le fond de page,
-        // lui, n'est qu'un tas de traits libres.
-        if (!block.rect) return null;
+        // Le fond de page n'a pas de cadre. En rendu propre, il devient la
+        // transcription de la page, modifiable au clavier.
+        if (!block.rect) return this.renderPageTranscript(loaded, block, scale);
         const clean = this.renderMode === "clean" && !!block.recognized;
         const box = el("div", {
           class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
@@ -439,7 +473,11 @@ export class PageView {
             block.recognized!);
           box.append(line);
         }
-        if (block.recognized) box.title = block.recognized;
+        if (block.recognized) {
+          box.title = block.recognized;
+          box.style.cursor = "pointer";
+          box.addEventListener("click", () => void this.correctText(loaded, block));
+        }
         return place(box, block.rect);
       }
       case "pdf":
@@ -469,6 +507,89 @@ export class PageView {
       ...(previous && previous !== choice ? [previous] : []),
     ];
     block.latex = choice;
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
+  }
+
+  /**
+   * Transcription de la page entiere, editable au clavier.
+   *
+   * L'encre reste intacte dessous : on corrige le texte sans jamais toucher
+   * a ce qui a ete ecrit a la main.
+   */
+  private renderPageTranscript(
+    loaded: LoadedPage, block: InkBlock, scale: number,
+  ): HTMLElement | null {
+    if (this.renderMode !== "clean") {
+      if (!block.pending) return null;
+      const wait = el("div", { class: "block-box math pending" },
+        el("span", { class: "tag" },
+          this.host.recognitionReady() ? "conversion en cours" : "cles MyScript manquantes"));
+      Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
+      return wait;
+    }
+    if (!block.recognized && !block.pending) return null;
+
+    const area = el("textarea", { class: "block-text-edit", rows: "3" });
+    area.value = block.recognized ?? "";
+    area.placeholder = "Conversion en cours...";
+    const grow = () => {
+      area.style.height = "auto";
+      area.style.height = `${Math.max(60, area.scrollHeight)}px`;
+    };
+    area.addEventListener("input", () => {
+      block.recognized = area.value;
+      // A partir d'ici, la conversion automatique ne reprend plus la main.
+      block.editedByHand = true;
+      grow();
+      this.queueSave(loaded);
+    });
+    queueMicrotask(grow);
+
+    const box = el("div", { class: "block-box text" },
+      el("span", { class: "tag" },
+        block.pending ? "conversion en cours"
+          : block.editedByHand ? "texte, corrige au clavier" : "texte converti"),
+      area);
+    Object.assign(box.style, {
+      left: `${40 * scale}px`,
+      top: `${40 * scale}px`,
+      width: `${(PAGE_W - 80) * scale}px`,
+      fontSize: `${Math.max(15, 19 * scale)}px`,
+    });
+    return box;
+  }
+
+  /**
+   * Correction en un geste sur un mot. C'est la ou elle sert le plus : le
+   * francais d'un cours technique fait trebucher le moteur sur les accents,
+   * les apostrophes et les termes anglais.
+   */
+  private async correctText(loaded: LoadedPage, block: InkBlock): Promise<void> {
+    const options = (block.candidates ?? []).map((c) => ({ value: c, label: c }));
+    options.push({ value: EDIT_SENTINEL, label: "Corriger a la main..." });
+    const choice = await pick(
+      options.length > 1 ? "Autres lectures possibles" : "Corriger le texte",
+      options,
+    );
+    if (choice === null) return;
+    if (choice === EDIT_SENTINEL) {
+      const next = await askText("Corriger le texte", "Texte reconnu", block.recognized ?? "");
+      if (next === null) return;
+      if (block.recognized && block.recognized !== next) {
+        block.candidates = [
+          ...(block.candidates ?? []).filter((c) => c !== next), block.recognized,
+        ];
+      }
+      block.recognized = next;
+    } else {
+      const previous = block.recognized;
+      block.candidates = [
+        ...(block.candidates ?? []).filter((c) => c !== choice),
+        ...(previous && previous !== choice ? [previous] : []),
+      ];
+      block.recognized = choice;
+    }
     this.paintOverlay(loaded);
     this.queueSave(loaded);
   }

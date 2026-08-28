@@ -53,6 +53,8 @@ export class App {
   /** Ce que fait le doigt tant qu'aucun stylet n'a ete vu (section 3). */
   private touchWrites = true;
   private renderMode: RenderMode = "ink";
+  /** Convertir l'ecriture au fil de la plume plutot qu'a la demande. */
+  private autoConvert = false;
 
   private root = el("div", { class: "app" });
   private tabbar = el("div", { class: "tabbar" });
@@ -73,6 +75,8 @@ export class App {
     this.tool = this.settings.tool;
     this.color = this.settings.color;
     this.width = this.settings.width;
+    this.autoConvert = this.settings.autoConvert;
+    if (this.autoConvert) this.renderMode = "clean";
 
     // Les cles de la machine passent devant celles du navigateur : elles
     // survivent a un vidage du stockage local.
@@ -232,6 +236,7 @@ export class App {
     const view = new PageView({
       repo: this.repo,
       recognitionReady: () => this.queueState.backendReady,
+      autoConvert: () => this.autoConvert,
       getTool: () => this.tool,
       getColor: () => this.color,
       getWidth: () => this.width,
@@ -535,6 +540,27 @@ export class App {
       }, mode === "pages" ? "Mode pages" : "Mode defilement"),
       // Affichage double : bascule instantanee encre / rendu propre (section 4).
       el("button", {
+        class: this.autoConvert ? "on" : "",
+        title: "Convertir l'ecriture au fil de la plume (Ctrl+R)",
+        onclick: () => {
+          this.autoConvert = !this.autoConvert;
+          this.settings.autoConvert = this.autoConvert;
+          saveSettings(this.settings);
+          this.paintToolbar();
+          if (this.autoConvert) {
+            // Bascule aussitot en rendu propre : sans cela on active la
+            // conversion sans rien voir arriver.
+            this.renderMode = "clean";
+            for (const t of this.tabs) t.view?.setRenderMode(this.renderMode);
+            this.activeTab()?.view?.reconvert();
+            toast("Conversion au fil de la plume activee");
+          } else {
+            toast("Conversion a la demande : entoure une zone");
+          }
+          this.paintToolbar();
+        },
+      }, this.autoConvert ? "Auto" : "A la demande"),
+      el("button", {
         class: this.renderMode === "clean" ? "on" : "",
         title: "Encre brute ou rendu propre",
         onclick: () => {
@@ -599,7 +625,7 @@ export class App {
 
   /* ---------------- reconnaissance ---------------- */
 
-  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private warnedNoKeys = false;
 
   /**
@@ -615,10 +641,12 @@ export class App {
         "warn", 7000,
       );
     }
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => {
+    const running = this.debounceTimers.get(key);
+    if (running) clearTimeout(running);
+    this.debounceTimers.set(key, setTimeout(() => {
+      this.debounceTimers.delete(key);
       this.queue.enqueue({ key, kind, strokes });
-    }, SEND_DEBOUNCE_MS);
+    }, SEND_DEBOUNCE_MS));
   }
 
   private async onRecognized(key: string, result: import("../core/ink/recognizer").RecoResult): Promise<void> {
@@ -656,6 +684,22 @@ export class App {
       if (k === "y" && !typing) { e.preventDefault(); view?.redo(); return; }
       if (k === "f" && !typing) { e.preventDefault(); view?.addFlag(); return; }
       if (k === "t") { e.preventDefault(); view?.addTextBlock(); return; }
+      if (k === "r") {
+        e.preventDefault();
+        this.autoConvert = !this.autoConvert;
+        this.settings.autoConvert = this.autoConvert;
+        saveSettings(this.settings);
+        if (this.autoConvert) {
+          this.renderMode = "clean";
+          for (const t of this.tabs) t.view?.setRenderMode(this.renderMode);
+          view?.reconvert();
+        }
+        this.paintToolbar();
+        toast(this.autoConvert
+          ? "Conversion au fil de la plume activee"
+          : "Conversion a la demande");
+        return;
+      }
       if (k === "d" && !this.sawPen) {
         e.preventDefault();
         this.touchWrites = !this.touchWrites;

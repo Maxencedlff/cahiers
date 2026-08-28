@@ -67,6 +67,11 @@ export interface InkBlock extends BlockBase {
   /** true tant que la reconnaissance n'est pas revenue (file hors ligne). */
   pending?: boolean;
   candidates?: string[];
+  /**
+   * L'utilisateur a repris le texte au clavier : la conversion automatique
+   * ne doit plus l'ecraser, sinon elle efface une correction a chaque trait.
+   */
+  editedByHand?: boolean;
 }
 
 export interface MathBlock extends BlockBase {

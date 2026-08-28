@@ -9,6 +9,8 @@ export interface Settings {
   tool: ToolKind | "region" | "textregion";
   color: ColorKey;
   width: number;
+  /** Convertir l'ecriture au fil de la plume plutot qu'a la demande. */
+  autoConvert: boolean;
   myscript: { applicationKey: string; hmacKey: string };
 }
 
@@ -18,6 +20,7 @@ const DEFAULTS: Settings = {
   tool: "pen",
   color: "definition",
   width: 2.2,
+  autoConvert: false,
   myscript: { applicationKey: "", hmacKey: "" },
 };
 
