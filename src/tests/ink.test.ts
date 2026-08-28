@@ -195,3 +195,29 @@ describe("etat du reseau", () => {
     }
   });
 });
+
+describe("deux moteurs, un seul flux", () => {
+  it("distingue la requete math de la requete texte", () => {
+    const s = newStroke("definition", 2, "pen");
+    s.points = line(4);
+    const m = buildBatchBody("math", [s]) as any;
+    const t = buildBatchBody("text", [s]) as any;
+    expect(m.contentType).toBe("Math");
+    expect(t.contentType).toBe("Text");
+    // Le francais est demande dans les deux cas : un cours de maths est
+    // truffe de mots, et un texte de notation mathematique.
+    expect(m.configuration.lang).toBe("fr_FR");
+    expect(t.configuration.lang).toBe("fr_FR");
+  });
+
+  it("lit le texte reconnu et ses candidats", () => {
+    const r = parseJiix("text", { label: "Riemann", candidates: ["Riemann", "Riemarn"] });
+    expect(r.value).toBe("Riemann");
+    expect(r.candidates).toEqual(["Riemarn"]);
+  });
+
+  it("rend une valeur vide plutot que de casser sur une reponse inattendue", () => {
+    expect(parseJiix("text", {}).value).toBe("");
+    expect(parseJiix("math", {}).value).toBe("");
+  });
+});

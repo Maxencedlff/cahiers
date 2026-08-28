@@ -18,7 +18,7 @@ export interface InkSurfaceOptions {
   onErase: (removedIds: string[]) => void;
   /** Zone rectangulaire tracee au lasso "selection math". */
   onRegion?: (bounds: Bounds) => void;
-  getTool: () => ToolKind | "region";
+  getTool: () => ToolKind | "region" | "textregion";
   getColor: () => ColorKey;
   getWidth: () => number;
   /**
@@ -149,10 +149,12 @@ export class InkSurface {
     const p = this.toPage(e);
 
     if (tool === "eraser") { this.eraserPos = p; this.eraseAt(p); return; }
-    if (tool === "region") { this.regionStart = p; this.regionNow = p; return; }
+    if (tool === "region" || tool === "textregion") {
+      this.regionStart = p; this.regionNow = p; return;
+    }
 
     this.startedAt = e.timeStamp;
-    this.live = newStroke(this.opts.getColor(), this.opts.getWidth(), tool);
+    this.live = newStroke(this.opts.getColor(), this.opts.getWidth(), tool as Stroke["tool"]);
     this.liveLast = null;
     this.addPoint(e, p);
   };
@@ -169,7 +171,7 @@ export class InkSurface {
       this.eraseAt(p);
       return;
     }
-    if (tool === "region") {
+    if (tool === "region" || tool === "textregion") {
       this.regionNow = this.toPage(e);
       this.markDirty({ x: 0, y: 0, w: PAGE_W, h: PAGE_H });
       return;

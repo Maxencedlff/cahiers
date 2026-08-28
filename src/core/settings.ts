@@ -6,7 +6,7 @@ import type { ColorKey, ToolKind } from "./types";
  * et de provoquer des conflits.
  */
 export interface Settings {
-  tool: ToolKind | "region";
+  tool: ToolKind | "region" | "textregion";
   color: ColorKey;
   width: number;
   myscript: { applicationKey: string; hmacKey: string };

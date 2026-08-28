@@ -61,8 +61,12 @@ export interface TextBlock extends BlockBase {
 export interface InkBlock extends BlockBase {
   type: "ink";
   strokes: Stroke[];
+  /** Texte reconnu quand la zone a ete passee au moteur Text. */
   recognized: string | null;
   mode: "raw";
+  /** true tant que la reconnaissance n'est pas revenue (file hors ligne). */
+  pending?: boolean;
+  candidates?: string[];
 }
 
 export interface MathBlock extends BlockBase {

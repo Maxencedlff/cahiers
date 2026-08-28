@@ -46,7 +46,7 @@ export class App {
   /** Onglet affiche dans le panneau droit, quand le split est ouvert. */
   private splitId: string | null = null;
 
-  private tool: ToolKind | "region" = "pen";
+  private tool: ToolKind | "region" | "textregion" = "pen";
   private color: ColorKey = "definition";
   private width = 2.2;
   private sawPen = false;
@@ -449,7 +449,7 @@ export class App {
     const bar = el("div", { class: "toolbar" });
     const view = () => this.activeTab()?.view;
 
-    const toolButton = (id: ToolKind | "region", label: string, title: string) =>
+    const toolButton = (id: ToolKind | "region" | "textregion", label: string, title: string) =>
       el("button", {
         class: this.tool === id ? "on" : "",
         title,
@@ -460,7 +460,8 @@ export class App {
       toolButton("pen", "Stylo", "Ecrire"),
       toolButton("highlighter", "Surligneur", "Surligner"),
       toolButton("eraser", "Gomme", "Effacer les traits touches"),
-      toolButton("region", "Zone math", "Entourer des traits pour les convertir en formule"),
+      toolButton("region", "Zone math", "Entourer une formule manuscrite pour la convertir"),
+      toolButton("textregion", "Zone texte", "Entourer du texte manuscrit pour le convertir"),
       el("div", { class: "sep" }),
     );
 
@@ -674,8 +675,8 @@ export class App {
     const idx = PALETTE.findIndex((p) => p.shortcut === e.key);
     if (idx >= 0) { this.color = PALETTE[idx].key; this.persist(); this.paintToolbar(); return; }
 
-    const tools: Record<string, ToolKind | "region"> = {
-      s: "pen", h: "highlighter", g: "eraser", z: "region",
+    const tools: Record<string, ToolKind | "region" | "textregion"> = {
+      s: "pen", h: "highlighter", g: "eraser", z: "region", a: "textregion",
     };
     const t = tools[e.key.toLowerCase()];
     if (t) { this.tool = t; this.persist(); this.paintToolbar(); }

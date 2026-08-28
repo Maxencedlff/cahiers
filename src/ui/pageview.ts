@@ -15,7 +15,7 @@ export type RenderMode = "ink" | "clean";
 
 export interface PageViewHost {
   repo: Repo;
-  getTool: () => ToolKind | "region";
+  getTool: () => ToolKind | "region" | "textregion";
   getColor: () => ColorKey;
   getWidth: () => number;
   touchRole: () => "write" | "navigate";
@@ -142,7 +142,9 @@ export class PageView {
       touchRole: this.host.touchRole,
       onStrokeEnd: (s) => this.onStrokeEnd(loaded, s),
       onErase: (ids) => this.onErase(loaded, ids),
-      onRegion: (b) => void this.onRegion(loaded, b),
+      onRegion: (b) => void this.onRegion(
+        loaded, b, this.host.getTool() === "textregion" ? "text" : "math",
+      ),
     });
     loaded.surface = surface;
     surface.setStrokes(this.visibleStrokes(page));
@@ -158,7 +160,10 @@ export class PageView {
   private visibleStrokes(page: Page): Stroke[] {
     const out: Stroke[] = [];
     for (const b of page.blocks) {
-      if (b.type === "ink") out.push(...b.strokes);
+      if (b.type === "ink") {
+        const hidden = this.renderMode === "clean" && b.recognized && b.rect;
+        if (!hidden) out.push(...b.strokes);
+      }
       if (b.type === "math") {
         const hidden = this.renderMode === "clean" && b.latex;
         if (!hidden) out.push(...b.strokes);
@@ -238,7 +243,9 @@ export class PageView {
    * fond vers le bloc, puis envoyes a la reconnaissance. L'encre brute reste
    * dans le bloc, c'est la regle absolue de la section 2.
    */
-  private async onRegion(loaded: LoadedPage, b: Bounds): Promise<void> {
+  private async onRegion(
+    loaded: LoadedPage, b: Bounds, kind: "math" | "text",
+  ): Promise<void> {
     const ink = this.mainInk(loaded.page);
     const inside = ink.strokes.filter((s) => insideBounds(strokeBounds(s), b));
     if (inside.length === 0) {
@@ -250,18 +257,19 @@ export class PageView {
     ink.strokes = ink.strokes.filter((s) => !ids.has(s.id));
 
     const box = unionBounds(inside.map((s) => strokeBounds(s, 4)));
-    const block: MathBlock = {
-      id: uuid(), type: "math", mode: "math",
-      strokes: inside, latex: null, pending: true,
-      rect: box,
-    };
+    const id = uuid();
+    // Une zone math donne un bloc math et du LaTeX ; une zone texte donne un
+    // bloc d'encre dont le texte reconnu vit dans `recognized` (section 4).
+    const block: Block = kind === "math"
+      ? { id, type: "math", mode: "math", strokes: inside, latex: null, pending: true, rect: box }
+      : { id, type: "ink", mode: "raw", strokes: inside, recognized: null, pending: true, rect: box };
     loaded.page.blocks.push(block);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
 
     this.host.requestRecognition(
-      blockKey(this.notebook, this.divider, loaded.number, block.id),
-      "math",
+      blockKey(this.notebook, this.divider, loaded.number, id),
+      kind,
       inside,
     );
   }
@@ -275,10 +283,8 @@ export class PageView {
 
     if (loaded) {
       const block = loaded.page.blocks.find((b) => b.id === blockId);
-      if (block && block.type === "math") {
-        block.latex = result.value;
-        block.candidates = result.candidates.length ? result.candidates : undefined;
-        block.pending = false;
+      if (block) {
+        applyToBlock(block, result);
         this.paintOverlay(loaded);
         this.queueSave(loaded);
       }
@@ -290,10 +296,8 @@ export class PageView {
     try {
       const page = await this.host.repo.readPage(nb, div, pageNum);
       const block = page.blocks.find((b) => b.id === blockId);
-      if (block && block.type === "math") {
-        block.latex = result.value;
-        block.candidates = result.candidates.length ? result.candidates : undefined;
-        block.pending = false;
+      if (block) {
+        applyToBlock(block, result);
         await this.host.repo.writePage(nb, div, pageNum, page);
       }
     } catch { /* page disparue entre temps */ }
@@ -416,8 +420,25 @@ export class PageView {
           .catch(() => { box.append(el("span", { class: "small muted" }, "image introuvable")); });
         return place(box, block.rect);
       }
+      case "ink": {
+        // Seule une zone passee au moteur Text a un cadre : le fond de page,
+        // lui, n'est qu'un tas de traits libres.
+        if (!block.rect) return null;
+        const clean = this.renderMode === "clean" && !!block.recognized;
+        const box = el("div", {
+          class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
+        }, el("span", { class: "tag" },
+          block.pending ? "conversion en attente"
+            : block.recognized ? "texte" : "texte, non reconnu"));
+        if (clean) {
+          const line = el("div", { style: { fontSize: `${Math.max(14, 19 * scale)}px` } },
+            block.recognized!);
+          box.append(line);
+        }
+        if (block.recognized) box.title = block.recognized;
+        return place(box, block.rect);
+      }
       case "pdf":
-      case "ink":
         return null;
     }
   }
@@ -693,6 +714,19 @@ export class PageView {
   }
 
   get hasUnsaved(): boolean { return this.pendingSave.size > 0; }
+}
+
+/** Range le resultat la ou le bloc l'attend : LaTeX pour math, texte pour l'encre. */
+function applyToBlock(block: Block, result: RecoResult): void {
+  if (block.type === "math") {
+    block.latex = result.value;
+    block.candidates = result.candidates.length ? result.candidates : undefined;
+    block.pending = false;
+  } else if (block.type === "ink") {
+    block.recognized = result.value;
+    block.candidates = result.candidates.length ? result.candidates : undefined;
+    block.pending = false;
+  }
 }
 
 /** Valeur reservee du menu de correction, jamais un LaTeX valide. */
