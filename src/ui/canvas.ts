@@ -49,6 +49,15 @@ export class InkSurface {
   private regionStart: { x: number; y: number } | null = null;
   private regionNow: { x: number; y: number } | null = null;
   private disposed = false;
+  /**
+   * Couleur de fond peinte dans le canvas.
+   *
+   * `desynchronized: true` court-circuite le compositeur pour gagner en
+   * latence, mais sous WebView2 le canvas perd alors sa transparence et
+   * s'affiche en noir. On peint donc le fond de la page nous-memes plutot
+   * que de compter dessus : la latence est gardee, la feuille est blanche.
+   */
+  private paperColor = "#fffffe";
   /** Defilement au doigt, pris en charge ici faute de geste natif. */
   private pan: { pointerId: number; startY: number; startScroll: number } | null = null;
 
@@ -85,11 +94,18 @@ export class InkSurface {
 
   /** Redimensionne le canvas et redessine. Appele au resize du conteneur. */
   layout(cssWidth: number): void {
+    const declared = getComputedStyle(this.canvas).getPropertyValue("--page-bg").trim();
+    if (declared) this.paperColor = declared;
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.scale = cssWidth / PAGE_W;
     this.canvas.width = Math.round(cssWidth * this.dpr);
     this.canvas.height = Math.round(cssWidth * (PAGE_H / PAGE_W) * this.dpr);
     this.canvas.style.height = `${Math.round(cssWidth * (PAGE_H / PAGE_W))}px`;
+    // Peint tout de suite : sans cela, la feuille reste noire jusqu'a la
+    // premiere frame, ce qui se voit a chaque redimensionnement.
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.fillStyle = this.paperColor;
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     this.repaintAll();
   }
 
@@ -311,7 +327,9 @@ export class InkSurface {
     const h = Math.min(this.canvas.height - y, Math.ceil(d.h * k) + 4);
     if (w <= 0 || h <= 0) { ctx.restore(); return; }
 
-    ctx.clearRect(x, y, w, h);
+    // Fond opaque plutot qu'un effacement : voir paperColor.
+    ctx.fillStyle = this.paperColor;
+    ctx.fillRect(x, y, w, h);
     ctx.beginPath();
     ctx.rect(x, y, w, h);
     ctx.clip();
