@@ -249,3 +249,33 @@ describe("deux moteurs, un seul flux", () => {
     expect(parseJiix("math", {}).value).toBe("");
   });
 });
+
+describe("file sans moteur configure", () => {
+  const none: RecognitionBackend = {
+    name: "aucun", available: false,
+    async recognize() { throw new Error("jamais appele"); },
+  };
+
+  it("annonce qu'aucun moteur n'est pret", () => {
+    const q = new RecognitionQueue(none, () => {});
+    expect(q.state().backendReady).toBe(false);
+  });
+
+  it("garde le travail sans le perdre, mais ne pretend pas convertir", async () => {
+    const q = new RecognitionQueue(none, () => {});
+    q.enqueue({ key: "a", kind: "math", strokes: [] });
+    await q.pump();
+    // L'encre n'est jamais perdue ; c'est l'interface qui doit dire pourquoi
+    // rien n'avance, faute de quoi l'attente est indistinguable d'un delai.
+    expect(q.size).toBe(1);
+    expect(q.state().backendReady).toBe(false);
+  });
+
+  it("signale un moteur pret quand les cles sont la", () => {
+    const ready: RecognitionBackend = {
+      name: "MyScript", available: true,
+      async recognize() { return { value: "x", candidates: [] }; },
+    };
+    expect(new RecognitionQueue(ready, () => {}).state().backendReady).toBe(true);
+  });
+});

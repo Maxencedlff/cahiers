@@ -231,6 +231,7 @@ export class App {
     tab.view?.dispose();
     const view = new PageView({
       repo: this.repo,
+      recognitionReady: () => this.queueState.backendReady,
       getTool: () => this.tool,
       getColor: () => this.color,
       getWidth: () => this.width,
@@ -599,12 +600,21 @@ export class App {
   /* ---------------- reconnaissance ---------------- */
 
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private warnedNoKeys = false;
 
   /**
    * N'envoyer qu'au lever du stylet plus 500 ms de pause (section 4) :
    * dix fois moins d'allers-retours reseau, et de la batterie economisee.
    */
   private enqueue(key: string, kind: "math" | "text", strokes: import("../core/types").Stroke[]): void {
+    if (!this.queueState.backendReady && !this.warnedNoKeys) {
+      this.warnedNoKeys = true;
+      toast(
+        "Aucune cle MyScript : l'encre est gardee mais rien ne sera converti. " +
+        "Bouton « Cles MyScript », en bas a droite.",
+        "warn", 7000,
+      );
+    }
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
       this.queue.enqueue({ key, kind, strokes });
@@ -714,10 +724,16 @@ export class App {
         q.online ? "en ligne" : "hors ligne",
       ),
       el("span", { class: "pill" },
-        el("span", { class: `led ${q.pending ? "wait" : ""}` }),
-        q.pending
-          ? `${q.pending} conversion${q.pending > 1 ? "s" : ""} en attente`
-          : "aucune conversion en attente",
+        el("span", { class: `led ${!q.backendReady && q.pending ? "off" : q.pending ? "wait" : ""}` }),
+        // Une file qui n'ira nulle part doit le dire, sinon l'attente est
+        // indistinguable d'une conversion qui prend son temps.
+        !q.backendReady
+          ? (q.pending
+              ? `${q.pending} en attente, reconnaissance non configuree`
+              : "reconnaissance non configuree")
+          : q.pending
+            ? `${q.pending} conversion${q.pending > 1 ? "s" : ""} en attente`
+            : "aucune conversion en attente",
       ),
       el("span", { class: "pill" },
         el("span", { class: `led ${unsaved ? "wait" : ""}` }),

@@ -203,6 +203,8 @@ export interface QueueState {
   online: boolean;
   lastError: string | null;
   backendName: string;
+  /** false quand aucun moteur n'est configure : rien ne partira jamais. */
+  backendReady: boolean;
 }
 
 /**
@@ -250,6 +252,7 @@ export class RecognitionQueue {
       online: this.online,
       lastError: this.lastError,
       backendName: this.backend.name,
+      backendReady: this.backend.available,
     };
   }
 

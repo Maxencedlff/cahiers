@@ -158,7 +158,11 @@ fn myscript_keys() -> Res<serde_json::Value> {
         None => return Ok(serde_json::json!({})),
     };
     match fs::read_to_string(&file) {
-        Ok(raw) => Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))),
+        // Un fichier ecrit par un editeur Windows commence souvent par un BOM,
+        // que le parseur JSON refuse. Le retirer evite des cles ignorees en
+        // silence, et donc une file de conversion bloquee sans explication.
+        Ok(raw) => Ok(serde_json::from_str(raw.trim_start_matches('\u{feff}').trim())
+            .unwrap_or_else(|_| serde_json::json!({}))),
         Err(_) => Ok(serde_json::json!({})),
     }
 }

@@ -15,6 +15,8 @@ export type RenderMode = "ink" | "clean";
 
 export interface PageViewHost {
   repo: Repo;
+  /** false quand aucun moteur de reconnaissance n'est configure. */
+  recognitionReady: () => boolean;
   getTool: () => ToolKind | "region" | "textregion";
   getColor: () => ColorKey;
   getWidth: () => number;
@@ -335,7 +337,8 @@ export class PageView {
         const box = el("div", {
           class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
         }, el("span", { class: "tag" },
-          block.pending ? "conversion en attente"
+          block.pending
+            ? (this.host.recognitionReady() ? "conversion en attente" : "cles MyScript manquantes")
             : block.latex ? "math" : "math, non reconnu"));
         if (clean) {
           const tex = renderTex(block.latex!);
@@ -428,7 +431,8 @@ export class PageView {
         const box = el("div", {
           class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
         }, el("span", { class: "tag" },
-          block.pending ? "conversion en attente"
+          block.pending
+            ? (this.host.recognitionReady() ? "conversion en attente" : "cles MyScript manquantes")
             : block.recognized ? "texte" : "texte, non reconnu"));
         if (clean) {
           const line = el("div", { style: { fontSize: `${Math.max(14, 19 * scale)}px` } },
