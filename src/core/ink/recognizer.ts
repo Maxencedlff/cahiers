@@ -51,16 +51,38 @@ export class MyScriptBackend implements RecognitionBackend {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/vnd.myscript.jiix",
+        "Accept": acceptFor(kind),
         "applicationKey": this.keys.applicationKey,
         "hmac": hmac,
       },
       body,
     });
-    if (!res.ok) throw new Error(`MyScript ${res.status} ${res.statusText}`);
-    const jiix = await res.json();
-    return parseJiix(kind, jiix);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`MyScript ${res.status} ${res.statusText}${detail ? ` : ${detail.slice(0, 160)}` : ""}`);
+    }
+    if (kind === "math") {
+      // Le JIIX des maths ne porte AUCUN champ latex : le LaTeX ne s'obtient
+      // qu'en le demandant explicitement, et arrive en texte brut.
+      return { value: (await res.text()).trim(), candidates: [] };
+    }
+    return parseJiix(kind, await res.json());
   }
+}
+
+/**
+ * Format demande a MyScript.
+ *
+ * Math : LaTeX direct. Le JIIX math ne contient pas de champ latex, seulement
+ * un arbre d'expressions, donc le demander reviendrait a le reconstruire.
+ * Consequence assumee : pas de candidats alternatifs sur une formule, la
+ * correction se fait a la main.
+ *
+ * Texte : JIIX, qui porte a la fois le libelle et les candidats par mot,
+ * ce qui donne la correction en un geste de la section 4.
+ */
+export function acceptFor(kind: RecoKind): string {
+  return kind === "math" ? "application/x-latex" : "application/vnd.myscript.jiix";
 }
 
 /** Corps de requete batch v4. Les traits partent en colonnes x[], y[], t[], p[]. */
@@ -106,18 +128,35 @@ function round(v: number): number { return Math.round(v * 100) / 100; }
 
 export function parseJiix(kind: RecoKind, jiix: any): RecoResult {
   if (kind === "math") {
+    // Chemin de secours : si un jour le JIIX porte un latex, on le prend.
     const expressions: string[] = Array.isArray(jiix?.expressions)
       ? jiix.expressions.map((e: any) => e?.latex).filter(Boolean)
       : [];
     const value = jiix?.latex ?? expressions[0] ?? "";
     return { value, candidates: expressions.filter((c) => c !== value) };
   }
+
   const label: string = jiix?.label ?? "";
-  const candidates: string[] = Array.isArray(jiix?.candidates) ? jiix.candidates : [];
+  // Les candidats vivent par mot. Sur un mot unique, ils s'appliquent tels
+  // quels ; sur une phrase, proposer des variantes entieres n'aurait pas
+  // de sens, on s'en tient a la correction manuelle.
+  const words: any[] = Array.isArray(jiix?.words) ? jiix.words : [];
+  const candidates: string[] = words.length === 1 && Array.isArray(words[0]?.candidates)
+    ? words[0].candidates
+    : Array.isArray(jiix?.candidates) ? jiix.candidates : [];
   return { value: label, candidates: candidates.filter((c) => c !== label) };
 }
 
 async function computeHmac(key: string, message: string): Promise<string> {
+  // crypto.subtle n'existe qu'en contexte securise. L'application installee
+  // en est un ; une page servie en HTTP sur une IP, non. Sans ce controle,
+  // l'echec remonte en "Cannot read properties of undefined".
+  if (typeof crypto === "undefined" || !crypto.subtle) {
+    throw new Error(
+      "Signature impossible : le contexte n'est pas securise. " +
+      "Ouvre l'application installee, ou sers la page en https ou sur localhost.",
+    );
+  }
   const enc = new TextEncoder();
   const cryptoKey = await crypto.subtle.importKey(
     "raw", enc.encode(key), { name: "HMAC", hash: "SHA-512" }, false, ["sign"],

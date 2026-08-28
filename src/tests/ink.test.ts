@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { newStroke, simplify, strokeBounds, unionBounds, boundsIntersect, widthAt, strokeHitsCircle } from "../core/ink/stroke";
-import { RecognitionQueue, buildBatchBody, parseJiix, type RecognitionBackend } from "../core/ink/recognizer";
+import { RecognitionQueue, buildBatchBody, parseJiix, acceptFor, type RecognitionBackend } from "../core/ink/recognizer";
 import type { InkPoint, Stroke } from "../core/types";
 
 function line(n: number, y = 0): InkPoint[] {
@@ -78,6 +78,34 @@ describe("requete MyScript", () => {
     const r = parseJiix("math", { latex: "x^2", expressions: [{ latex: "x^2" }, { latex: "x^z" }] });
     expect(r.value).toBe("x^2");
     expect(r.candidates).toEqual(["x^z"]);
+  });
+
+  it("demande le bon format a chaque moteur", () => {
+    // Verifie sur le service reel : le JIIX des maths ne contient aucun
+    // champ latex, donc le demander en JIIX rendrait des blocs vides.
+    expect(acceptFor("math")).toBe("application/x-latex");
+    expect(acceptFor("text")).toBe("application/vnd.myscript.jiix");
+  });
+
+  it("lit le texte et ses candidats dans le JIIX reel", () => {
+    // Forme exacte renvoyee par cloud.myscript.com.
+    const r = parseJiix("text", {
+      type: "Text", label: "Riemann",
+      words: [{ label: "Riemann", candidates: ["Riemann", "Riemarn", "Riemonn"] }],
+    });
+    expect(r.value).toBe("Riemann");
+    expect(r.candidates).toEqual(["Riemarn", "Riemonn"]);
+  });
+
+  it("ne propose pas de candidats sur une phrase de plusieurs mots", () => {
+    const r = parseJiix("text", {
+      label: "critere de Riemann",
+      words: [{ label: "critere", candidates: ["critere", "critene"] },
+              { label: "de", candidates: ["de"] },
+              { label: "Riemann", candidates: ["Riemann"] }],
+    });
+    expect(r.value).toBe("critere de Riemann");
+    expect(r.candidates).toEqual([]);
   });
 });
 

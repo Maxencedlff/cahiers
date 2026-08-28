@@ -65,6 +65,8 @@ export class App {
     private rootLabel: string,
     private presence: Presence | null,
     private ocr: ((dataUrl: string) => Promise<string>) | null = null,
+    private machineKeys: { applicationKey: string; hmacKey: string } | null = null,
+    private saveKeys: ((a: string, h: string) => Promise<void>) | null = null,
   ) {
     this.repo = new Repo(fs);
     this.settings = loadSettings();
@@ -72,8 +74,11 @@ export class App {
     this.color = this.settings.color;
     this.width = this.settings.width;
 
-    const backend: RecognitionBackend = this.settings.myscript.applicationKey
-      ? new MyScriptBackend(this.settings.myscript)
+    // Les cles de la machine passent devant celles du navigateur : elles
+    // survivent a un vidage du stockage local.
+    const active = machineKeys?.applicationKey ? machineKeys : this.settings.myscript;
+    const backend: RecognitionBackend = active.applicationKey
+      ? new MyScriptBackend(active)
       : new NoBackend();
 
     this.queue = new RecognitionQueue(backend, (key, result) => this.onRecognized(key, result));
@@ -739,12 +744,17 @@ export class App {
 
   private async editKeys(): Promise<void> {
     const r = await askFields("Reconnaissance manuscrite", [
-      { name: "app", label: "applicationKey MyScript", value: this.settings.myscript.applicationKey },
-      { name: "hmac", label: "hmacKey MyScript", value: this.settings.myscript.hmacKey },
+      { name: "app", label: "applicationKey MyScript",
+        value: this.machineKeys?.applicationKey || this.settings.myscript.applicationKey },
+      { name: "hmac", label: "hmacKey MyScript",
+        value: this.machineKeys?.hmacKey || this.settings.myscript.hmacKey },
     ], "Enregistrer");
     if (!r) return;
     this.settings.myscript = { applicationKey: r.app, hmacKey: r.hmac };
     saveSettings(this.settings);
+    if (this.saveKeys) {
+      try { await this.saveKeys(r.app, r.hmac); } catch { /* stockage local indisponible */ }
+    }
     toast("Cles enregistrees. Relance l'application pour les activer.");
   }
 

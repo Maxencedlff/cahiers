@@ -22,6 +22,9 @@ export interface Platform {
   isTauri: boolean;
   /** OCR local fourni par Windows. Absent en mode navigateur. */
   ocr: ((dataUrl: string) => Promise<string>) | null;
+  /** Cles MyScript retenues par la machine, si elles ont ete enregistrees. */
+  keys: { applicationKey: string; hmacKey: string } | null;
+  saveKeys: ((applicationKey: string, hmacKey: string) => Promise<void>) | null;
 }
 
 function inTauri(): boolean {
@@ -38,6 +41,8 @@ export async function detectPlatform(): Promise<Platform> {
       presence: null,
       isTauri: false,
       ocr: null,
+      keys: null,
+      saveKeys: null,
     };
   }
 
@@ -45,6 +50,14 @@ export async function detectPlatform(): Promise<Platform> {
   const fs = new TauriFs(invoke as never);
   const rootLabel = await fs.rootLabel();
   const machine = await invoke<string>("machine_name");
+
+  let keys: { applicationKey: string; hmacKey: string } | null = null;
+  try {
+    const stored = await invoke<{ applicationKey?: string; hmacKey?: string }>("myscript_keys");
+    if (stored?.applicationKey && stored?.hmacKey) {
+      keys = { applicationKey: stored.applicationKey, hmacKey: stored.hmacKey };
+    }
+  } catch { /* pas de cles enregistrees */ }
 
   return {
     fs,
@@ -55,6 +68,9 @@ export async function detectPlatform(): Promise<Platform> {
       const { base64 } = splitDataUrl(dataUrl);
       return invoke<string>("ocr_image", { base64 });
     },
+    keys,
+    saveKeys: (applicationKey: string, hmacKey: string) =>
+      invoke<void>("set_myscript_keys", { applicationKey, hmacKey }),
   };
 }
 

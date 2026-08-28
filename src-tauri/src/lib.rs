@@ -146,6 +146,38 @@ fn read_binary(state: State<Root>, rel: String) -> Res<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+/// Cles MyScript rangees a cote de la preference de racine, dans les donnees
+/// locales de l'application.
+///
+/// Volontairement HORS du dossier synchronise : des cles d'API n'ont rien a
+/// faire dans OneDrive, et elles restent valables quelle que soit la machine.
+#[tauri::command]
+fn myscript_keys() -> Res<serde_json::Value> {
+    let file = match preference_file() {
+        Some(p) => p.with_file_name("myscript.json"),
+        None => return Ok(serde_json::json!({})),
+    };
+    match fs::read_to_string(&file) {
+        Ok(raw) => Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))),
+        Err(_) => Ok(serde_json::json!({})),
+    }
+}
+
+#[tauri::command]
+fn set_myscript_keys(application_key: String, hmac_key: String) -> Res<()> {
+    let file = preference_file()
+        .map(|p| p.with_file_name("myscript.json"))
+        .ok_or_else(|| fail("emplacement de configuration introuvable"))?;
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
+    }
+    let body = serde_json::json!({
+        "applicationKey": application_key,
+        "hmacKey": hmac_key,
+    });
+    fs::write(&file, body.to_string()).map_err(|e| fail(e.to_string()))
+}
+
 /* ------------------------------------------------------------------ */
 /* OCR                                                                 */
 /* ------------------------------------------------------------------ */
@@ -341,6 +373,8 @@ pub fn run() {
             read_binary,
             write_binary,
             ocr_image,
+            myscript_keys,
+            set_myscript_keys,
             path_exists,
             make_dir,
             remove_path,
