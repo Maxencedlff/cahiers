@@ -18,7 +18,7 @@ export interface PageViewHost {
   getTool: () => ToolKind | "region";
   getColor: () => ColorKey;
   getWidth: () => number;
-  penSeen: () => boolean;
+  touchRole: () => "write" | "navigate";
   /** Demande la reconnaissance d'un bloc math ou texte manuscrit. */
   requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
   onDirty: () => void;
@@ -53,6 +53,8 @@ export class PageView {
   private undoStack: { number: number; blocks: string }[] = [];
   private redoStack: { number: number; blocks: string }[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bloc texte a mettre au clavier des qu'il est rendu. */
+  private focusBlockId: string | null = null;
   private pendingSave = new Map<number, Page>();
   private resizeObserver: ResizeObserver;
 
@@ -137,7 +139,7 @@ export class PageView {
       getTool: this.host.getTool,
       getColor: this.host.getColor,
       getWidth: this.host.getWidth,
-      penSeen: this.host.penSeen,
+      touchRole: this.host.touchRole,
       onStrokeEnd: (s) => this.onStrokeEnd(loaded, s),
       onErase: (ids) => this.onErase(loaded, ids),
       onRegion: (b) => void this.onRegion(loaded, b),
@@ -345,13 +347,26 @@ export class PageView {
       }
       case "text": {
         const box = el("div", { class: "block-box text" });
-        const area = el("textarea", { class: "block-text-edit", rows: "2" });
+        const area = el("textarea", { class: "block-text-edit", rows: "1" });
         area.value = block.content;
+        // La zone grandit avec le texte : on ecrit sans jamais gerer une
+        // barre de defilement dans un bloc de cours.
+        const grow = () => {
+          area.style.height = "auto";
+          area.style.height = `${area.scrollHeight}px`;
+          if (block.rect) block.rect.h = Math.max(40, area.scrollHeight / scale);
+        };
         area.addEventListener("input", () => {
           block.content = area.value;
+          grow();
           this.queueSave(loaded);
         });
         box.append(area);
+        queueMicrotask(grow);
+        if (this.focusBlockId === block.id) {
+          this.focusBlockId = null;
+          queueMicrotask(() => area.focus());
+        }
         return place(box, block.rect ?? { x: 40, y: 40, w: PAGE_W - 80, h: 60 });
       }
       case "calc": {
@@ -519,11 +534,14 @@ export class PageView {
     toast(ocr ? "Photo inseree, texte extrait pour la recherche" : "Photo inseree");
   }
 
+  /** Ajoute un bloc de texte et met le curseur dedans : on tape aussitot. */
   addTextBlock(): void {
     if (!this.activePage()) return;
+    const id = uuid();
+    this.focusBlockId = id;
     this.addBlock({
-      id: uuid(), type: "text", content: "",
-      rect: { x: 60, y: this.nextFreeY(), w: PAGE_W - 120, h: 70 },
+      id, type: "text", content: "",
+      rect: { x: 60, y: this.nextFreeY(), w: PAGE_W - 120, h: 44 },
     });
   }
 

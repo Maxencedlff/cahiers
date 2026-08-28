@@ -50,6 +50,8 @@ export class App {
   private color: ColorKey = "definition";
   private width = 2.2;
   private sawPen = false;
+  /** Ce que fait le doigt tant qu'aucun stylet n'a ete vu (section 3). */
+  private touchWrites = true;
   private renderMode: RenderMode = "ink";
 
   private root = el("div", { class: "app" });
@@ -93,6 +95,15 @@ export class App {
   }
 
   get element(): HTMLElement { return this.root; }
+
+  /**
+   * Un stylet detecte impose la separation : le doigt navigue, la paume ne
+   * trace plus. Sans stylet, c'est l'utilisateur qui decide.
+   */
+  private touchRole(): "write" | "navigate" {
+    if (this.sawPen) return "navigate";
+    return this.touchWrites ? "write" : "navigate";
+  }
 
   /** Charge la calculatrice a la demande, une seule fois. */
   private async loadCalculator(): Promise<Calculator> {
@@ -218,7 +229,7 @@ export class App {
       getTool: () => this.tool,
       getColor: () => this.color,
       getWidth: () => this.width,
-      penSeen: () => this.sawPen,
+      touchRole: () => this.touchRole(),
       requestRecognition: (key, kind, strokes) => this.enqueue(key, kind, strokes),
       onDirty: () => this.paintStatus(),
       openLink: (target) => void this.followLink(target),
@@ -476,7 +487,24 @@ export class App {
       el("button", { onclick: () => view()?.undo(), title: "Annuler (Ctrl+Z)" }, "Annuler"),
       el("button", { onclick: () => view()?.redo(), title: "Retablir (Ctrl+Y)" }, "Retablir"),
       el("div", { class: "sep" }),
-      el("button", { onclick: () => view()?.addTextBlock() }, "Texte"),
+      ...(this.sawPen ? [] : [
+        el("button", {
+          class: this.touchWrites ? "on" : "",
+          title: "Ce que fait le doigt, faute de stylet (Ctrl+D)",
+          onclick: () => {
+            this.touchWrites = !this.touchWrites;
+            this.paintToolbar();
+            toast(this.touchWrites
+              ? "Le doigt ecrit"
+              : "Le doigt fait defiler la page");
+          },
+        }, this.touchWrites ? "Doigt : ecrit" : "Doigt : navigue"),
+        el("div", { class: "sep" }),
+      ]),
+      el("button", {
+        onclick: () => view()?.addTextBlock(),
+        title: "Bloc de texte au clavier (Ctrl+T)",
+      }, "Texte"),
       el("button", {
         title: "Photo du tableau, redressee et lue",
         onclick: () => void this.importImage(),
@@ -611,6 +639,14 @@ export class App {
       if (k === "z" && !typing) { e.preventDefault(); view?.undo(); return; }
       if (k === "y" && !typing) { e.preventDefault(); view?.redo(); return; }
       if (k === "f" && !typing) { e.preventDefault(); view?.addFlag(); return; }
+      if (k === "t") { e.preventDefault(); view?.addTextBlock(); return; }
+      if (k === "d" && !this.sawPen) {
+        e.preventDefault();
+        this.touchWrites = !this.touchWrites;
+        this.paintToolbar();
+        toast(this.touchWrites ? "Le doigt ecrit" : "Le doigt fait defiler la page");
+        return;
+      }
       if (k === "n") { e.preventDefault(); void view?.newPage(); return; }
       if (k === "w") { e.preventDefault(); if (this.activeId) void this.closeTab(this.activeId); return; }
       if (e.key === "\\") { e.preventDefault(); void this.toggleSplit(); return; }
@@ -683,7 +719,11 @@ export class App {
       ),
       el("span", { class: "pill" },
         el("span", { class: `led ${this.sawPen ? "" : "off"}` }),
-        this.sawPen ? "stylet actif" : "stylet non detecte, le doigt ecrit",
+        this.sawPen
+          ? "stylet actif, le doigt navigue"
+          : this.touchWrites
+            ? "pas de stylet, le doigt ecrit"
+            : "pas de stylet, le doigt navigue",
       ),
       el("div", { class: "spacer" }),
       ...(q.lastError ? [el("span", { class: "pill" }, `derniere erreur : ${q.lastError}`)] : []),

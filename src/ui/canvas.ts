@@ -21,8 +21,12 @@ export interface InkSurfaceOptions {
   getTool: () => ToolKind | "region";
   getColor: () => ColorKey;
   getWidth: () => number;
-  /** Vrai quand un stylet a deja ete vu : le doigt ne dessine plus. */
-  penSeen: () => boolean;
+  /**
+   * Ce que fait le doigt. Deduit automatiquement quand un stylet a ete vu
+   * (il navigue alors), reglable a la main sinon : c'est le chemin de
+   * secours de la section 3, pour une machine sans stylet.
+   */
+  touchRole: () => Exclude<PointerRole, "ignore">;
 }
 
 /**
@@ -119,7 +123,7 @@ export class InkSurface {
   roleOf(e: PointerEvent): PointerRole {
     if (e.pointerType === "pen") return "write";
     if (e.pointerType === "mouse") return "write";
-    if (e.pointerType === "touch") return this.opts.penSeen() ? "navigate" : "write";
+    if (e.pointerType === "touch") return this.opts.touchRole();
     return "ignore";
   }
 
@@ -139,7 +143,7 @@ export class InkSurface {
     if (this.activePointer !== null) return; // un seul pointeur ecrit a la fois
     const tool = this.opts.getTool();
     this.activePointer = e.pointerId;
-    this.canvas.setPointerCapture(e.pointerId);
+    this.capture(e.pointerId);
     e.preventDefault();
 
     const p = this.toPage(e);
@@ -183,16 +187,12 @@ export class InkSurface {
   private onUp = (e: PointerEvent) => {
     if (this.pan && e.pointerId === this.pan.pointerId) {
       this.pan = null;
-      if (this.canvas.hasPointerCapture(e.pointerId)) {
-        this.canvas.releasePointerCapture(e.pointerId);
-      }
+      this.release(e.pointerId);
       return;
     }
     if (e.pointerId !== this.activePointer) return;
     this.activePointer = null;
-    if (this.canvas.hasPointerCapture(e.pointerId)) {
-      this.canvas.releasePointerCapture(e.pointerId);
-    }
+    this.release(e.pointerId);
 
     if (this.regionStart && this.regionNow) {
       const b = rectOf(this.regionStart, this.regionNow);
@@ -236,8 +236,21 @@ export class InkSurface {
   private startPan(e: PointerEvent) {
     const box = this.scroller();
     if (!box) return;
-    this.canvas.setPointerCapture(e.pointerId);
+    this.capture(e.pointerId);
     this.pan = { pointerId: e.pointerId, startY: e.clientY, startScroll: box.scrollTop };
+  }
+
+  /** La capture est un confort, pas une condition : elle ne doit rien casser. */
+  private capture(pointerId: number): void {
+    try { this.canvas.setPointerCapture(pointerId); } catch { /* pointeur deja relache */ }
+  }
+
+  private release(pointerId: number): void {
+    try {
+      if (this.canvas.hasPointerCapture(pointerId)) {
+        this.canvas.releasePointerCapture(pointerId);
+      }
+    } catch { /* deja relache */ }
   }
 
   private movePan(e: PointerEvent) {

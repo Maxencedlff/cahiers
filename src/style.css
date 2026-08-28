@@ -223,12 +223,20 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .block-box.math { border-color: #cbd5e1; background: transparent; }
 .block-box.math.clean { background: rgba(255,255,255,.94); }
 .block-box.math.pending { border-color: #f0b429; background: rgba(255,251,240,.28); }
-.block-box.text { -webkit-user-select: text; user-select: text; }
+.block-box.text {
+  -webkit-user-select: text; user-select: text;
+  border-color: transparent; background: rgba(255,255,255,.6);
+}
+.block-box.text:focus-within { border-color: var(--accent); background: #fff; }
 .block-box .tag {
   position: absolute; top: -10px; left: 6px; font-size: 10px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted);
 }
-.block-text-edit { width: 100%; border: none; background: transparent; min-height: 30px; padding: 4px 6px; }
+.block-text-edit {
+  width: 100%; border: none; background: transparent;
+  min-height: 30px; padding: 4px 6px; overflow: hidden; resize: none;
+  font-size: 16px; line-height: 1.45;
+}
 
 .flag-pin {
   position: absolute; width: 30px; height: 30px; border-radius: 50%;
