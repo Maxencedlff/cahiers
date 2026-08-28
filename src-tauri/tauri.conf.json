@@ -20,7 +20,8 @@
         "resizable": true,
         "center": true,
         "decorations": true,
-        "maximized": true
+        "maximized": true,
+        "theme": "Light"
       }
     ],
     "security": {

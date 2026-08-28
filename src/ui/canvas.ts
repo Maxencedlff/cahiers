@@ -49,6 +49,8 @@ export class InkSurface {
   private regionStart: { x: number; y: number } | null = null;
   private regionNow: { x: number; y: number } | null = null;
   private disposed = false;
+  /** Defilement au doigt, pris en charge ici faute de geste natif. */
+  private pan: { pointerId: number; startY: number; startScroll: number } | null = null;
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -116,6 +118,7 @@ export class InkSurface {
   /* ---------------- evenements ---------------- */
 
   private onDown = (e: PointerEvent) => {
+    if (this.roleOf(e) === "navigate") { this.startPan(e); return; }
     if (this.roleOf(e) !== "write") return;
     if (this.activePointer !== null) return; // un seul pointeur ecrit a la fois
     const tool = this.opts.getTool();
@@ -135,6 +138,7 @@ export class InkSurface {
   };
 
   private onMove = (e: PointerEvent) => {
+    if (this.pan && e.pointerId === this.pan.pointerId) { this.movePan(e); return; }
     if (e.pointerId !== this.activePointer) return;
     const tool = this.opts.getTool();
     e.preventDefault();
@@ -161,6 +165,13 @@ export class InkSurface {
   };
 
   private onUp = (e: PointerEvent) => {
+    if (this.pan && e.pointerId === this.pan.pointerId) {
+      this.pan = null;
+      if (this.canvas.hasPointerCapture(e.pointerId)) {
+        this.canvas.releasePointerCapture(e.pointerId);
+      }
+      return;
+    }
     if (e.pointerId !== this.activePointer) return;
     this.activePointer = null;
     if (this.canvas.hasPointerCapture(e.pointerId)) {
@@ -196,6 +207,29 @@ export class InkSurface {
     this.strokes.push(stroke);
     this.opts.onStrokeEnd(stroke);
   };
+
+  /**
+   * Le canvas porte `touch-action: none` pour qu'un trait de stylet ne fasse
+   * jamais defiler la page. Le doigt perd donc le defilement natif : on le
+   * refait ici, sur le conteneur des pages.
+   */
+  private scroller(): HTMLElement | null {
+    return this.canvas.closest(".pages");
+  }
+
+  private startPan(e: PointerEvent) {
+    const box = this.scroller();
+    if (!box) return;
+    this.canvas.setPointerCapture(e.pointerId);
+    this.pan = { pointerId: e.pointerId, startY: e.clientY, startScroll: box.scrollTop };
+  }
+
+  private movePan(e: PointerEvent) {
+    const box = this.scroller();
+    if (!box || !this.pan) return;
+    e.preventDefault();
+    box.scrollTop = this.pan.startScroll - (e.clientY - this.pan.startY);
+  }
 
   private addPoint(e: PointerEvent, p: { x: number; y: number }) {
     if (!this.live) return;

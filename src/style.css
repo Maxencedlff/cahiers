@@ -13,8 +13,12 @@
   --touch: 44px;
   --page-bg: #fffffe;
   --rule: #e3e7ef;
-  color-scheme: light;
+  /* "only light" interdit a la WebView d'inverser les couleurs quand Windows
+     est en theme sombre. Un cahier a un fond blanc, point. */
+  color-scheme: only light;
 }
+
+html { color-scheme: only light; background: var(--bg); }
 
 * { box-sizing: border-box; }
 
@@ -204,8 +208,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .sheet {
   background: var(--page-bg); border: 1px solid var(--line); border-radius: 4px;
   box-shadow: var(--shadow); position: relative; overflow: hidden;
-  touch-action: pan-y pinch-zoom;
 }
+/* Aucun geste natif sur la zone d'encre : ecrire ne doit jamais faire
+   defiler la page. Le defilement au doigt est gere dans InkSurface. */
+.sheet canvas { touch-action: none; }
 .sheet canvas { display: block; width: 100%; height: 100%; }
 .sheet .overlay { position: absolute; inset: 0; pointer-events: none; }
 .sheet .overlay > * { pointer-events: auto; }
@@ -245,7 +251,12 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .calc-head.dragging { cursor: grabbing; }
 .calc-tabs { display: flex; gap: 4px; padding: 8px 8px 0; }
 .calc-tabs button { height: 38px; min-height: 38px; border-radius: 8px 8px 0 0; flex: 1; padding: 0 6px; }
-.calc-body { padding: 10px; display: flex; flex-direction: column; gap: 10px; max-height: 62vh; overflow: auto; }
+.calc-body {
+  padding: 10px; display: flex; flex-direction: column; gap: 10px;
+  /* Assez de place pour tout le pave sans defilement interne : ce sont des
+     touches, on doit les voir toutes d'un coup. */
+  max-height: calc(100vh - 190px); overflow: auto;
+}
 
 .calc-screen {
   background: #0f1420; color: #e8edf7; border-radius: 8px; padding: 10px 12px;
