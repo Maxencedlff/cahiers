@@ -9,6 +9,11 @@ import type {
 import { uuid } from "../core/id";
 import type { Repo } from "../core/storage/repo";
 import type { RecoResult } from "../core/ink/recognizer";
+import {
+  carryEdits, convertedStrokeIds, dropStrokes, joinWords, layoutWords,
+  LINE_HEIGHT, type PlacedWord,
+} from "../core/ink/words";
+import { colorOf } from "../core/palette";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -41,6 +46,8 @@ interface LoadedPage {
   wrap: HTMLElement;
   overlay: HTMLElement;
   sheet: HTMLElement;
+  /** Derniere mise en page des mots tapes, pour retrouver le mot touche. */
+  placed?: PlacedWord[];
 }
 
 /**
@@ -151,7 +158,8 @@ export class PageView {
       ),
     });
     loaded.surface = surface;
-    surface.setStrokes(this.visibleStrokes(page));
+    this.paintStrokes(loaded);
+    this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
     return loaded;
   }
@@ -161,22 +169,103 @@ export class PageView {
    * deja reconnu laissent la place a la formule : bascule instantanee, aucune
    * donnee perdue (section 4).
    */
-  private visibleStrokes(page: Page): Stroke[] {
+  private visibleStrokes(page: Page): { visible: Stroke[]; hidden: Stroke[] } {
     const out: Stroke[] = [];
+    const hiddenOut: Stroke[] = [];
+    const clean = this.renderMode === "clean";
     for (const b of page.blocks) {
       if (b.type === "ink") {
+        if (clean && !b.rect && b.words?.length) {
+          // Mot a mot : seuls les traits deja convertis s'effacent devant le
+          // mot tape. Ce qui vient d'etre ecrit reste a l'encre jusqu'a la
+          // prochaine pause, comme sur iPad.
+          const done = convertedStrokeIds(b.words);
+          for (const st of b.strokes) (done.has(st.id) ? hiddenOut : out).push(st);
+          continue;
+        }
         // En rendu propre, l'encre convertie laisse la place au texte.
         // Elle n'est pas perdue pour autant : un clic sur "Rendu" la ramene.
-        const hidden = this.renderMode === "clean" && !!b.recognized;
+        const hidden = clean && !!b.recognized;
         if (!hidden) out.push(...b.strokes);
       }
       if (b.type === "math") {
-        const hidden = this.renderMode === "clean" && b.latex;
+        const hidden = clean && b.latex;
         if (!hidden) out.push(...b.strokes);
       }
       if (b.type === "pdf") out.push(...b.annotations);
     }
-    return out;
+    return { visible: out, hidden: hiddenOut };
+  }
+
+  private paintStrokes(loaded: LoadedPage): void {
+    const { visible, hidden } = this.visibleStrokes(loaded.page);
+    loaded.surface?.setStrokes(visible, hidden);
+  }
+
+  /**
+   * Correction d'un mot tape : appui au doigt, ou clic droit a la souris.
+   * Le stylet reste reserve a l'ecriture, le mot tape ne capte jamais le
+   * trait : on peut ecrire par-dessus sans gene.
+   */
+  private watchWordTaps(loaded: LoadedPage): void {
+    let down: { id: number; x: number; y: number; t: number } | null = null;
+    const hit = (e: MouseEvent) => {
+      if (this.renderMode !== "clean" || !loaded.placed?.length) return null;
+      const r = loaded.sheet.getBoundingClientRect();
+      const scale = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+      const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
+      const measure = measurer();
+      return loaded.placed.find((p) =>
+        x >= p.x - 4 && x <= p.x + measure(p.word.label, p.fontSize) + 4
+        && y >= p.y - 4 && y <= p.y + p.fontSize * LINE_HEIGHT + 4) ?? null;
+    };
+    loaded.sheet.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "touch") down = { id: e.pointerId, x: e.clientX, y: e.clientY, t: e.timeStamp };
+    });
+    loaded.sheet.addEventListener("pointerup", (e) => {
+      const d = down;
+      down = null;
+      if (!d || d.id !== e.pointerId) return;
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || e.timeStamp - d.t > 500) return;
+      const p = hit(e);
+      if (p) void this.correctWord(loaded, p.index);
+    });
+    loaded.sheet.addEventListener("contextmenu", (e) => {
+      const p = hit(e);
+      if (!p) return;
+      e.preventDefault();
+      void this.correctWord(loaded, p.index);
+    });
+  }
+
+  /** Correction en un geste sur un mot tape (section 4). */
+  private async correctWord(loaded: LoadedPage, index: number): Promise<void> {
+    const ink = this.mainInk(loaded.page);
+    const word = ink.words?.[index];
+    if (!word) return;
+    const options = (word.candidates ?? []).map((c) => ({ value: c, label: c }));
+    options.push({ value: EDIT_SENTINEL, label: "Corriger a la main..." });
+    const choice = await pick(
+      options.length > 1 ? `Autres lectures de « ${word.label} »` : `Corriger « ${word.label} »`,
+      options,
+    );
+    if (choice === null) return;
+    let next = choice;
+    if (choice === EDIT_SENTINEL) {
+      const typed = await askText("Corriger le mot", "Mot reconnu", word.label);
+      if (typed === null || !typed.trim()) return;
+      next = typed.trim();
+    }
+    if (next === word.label) return;
+    this.pushUndo(loaded);
+    word.candidates = [
+      ...(word.candidates ?? []).filter((c) => c !== next), word.label,
+    ];
+    word.label = next;
+    word.edited = true;
+    ink.recognized = joinWords(ink.words!);
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
   }
 
   private relayout(): void {
@@ -231,7 +320,9 @@ export class PageView {
    */
   private scheduleAutoConvert(loaded: LoadedPage): void {
     const ink = this.mainInk(loaded.page);
-    if (ink.editedByHand) return; // ne jamais ecraser une correction clavier
+    // Ancienne transcription pleine page reprise au clavier : ne pas l'ecraser.
+    // En mot a mot, les corrections sont reportees mot par mot (carryEdits).
+    if (ink.editedByHand && !ink.words) return;
     ink.pending = true;
     this.paintOverlay(loaded);
     this.host.requestRecognition(
@@ -255,7 +346,13 @@ export class PageView {
     this.pushUndo(loaded);
     const set = new Set(ids);
     for (const b of loaded.page.blocks) {
-      if (b.type === "ink") b.strokes = b.strokes.filter((s) => !set.has(s.id));
+      if (b.type === "ink") {
+        b.strokes = b.strokes.filter((s) => !set.has(s.id));
+        if (b.words) {
+          b.words = dropStrokes(b.words, set);
+          b.recognized = joinWords(b.words) || null;
+        }
+      }
       if (b.type === "math") {
         const before = b.strokes.length;
         b.strokes = b.strokes.filter((s) => !set.has(s.id));
@@ -320,7 +417,7 @@ export class PageView {
       if (block) {
         applyToBlock(block, result);
         // Le rendu propre masque l'encre convertie : il faut redessiner.
-        loaded.surface?.setStrokes(this.visibleStrokes(loaded.page));
+        this.paintStrokes(loaded);
         this.paintOverlay(loaded);
         this.queueSave(loaded);
       }
@@ -528,7 +625,16 @@ export class PageView {
       Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
       return wait;
     }
-    if (!block.recognized && !block.pending) return null;
+    if (block.words?.length) return this.renderWords(loaded, block, scale);
+    loaded.placed = undefined;
+    // Premiere conversion en route : l'encre reste visible, rien a afficher.
+    if (!block.recognized) {
+      if (!block.pending || this.host.recognitionReady()) return null;
+      const wait = el("div", { class: "block-box math pending" },
+        el("span", { class: "tag" }, "cles MyScript manquantes"));
+      Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
+      return wait;
+    }
 
     const area = el("textarea", { class: "block-text-edit", rows: "3" });
     area.value = block.recognized ?? "";
@@ -558,6 +664,40 @@ export class PageView {
       fontSize: `${Math.max(15, 19 * scale)}px`,
     });
     return box;
+  }
+
+  /**
+   * Mots tapes poses a la place de l'encre (facon Scribble). La couche ne
+   * capte aucun pointeur : le stylet ecrit a travers, la gomme efface le mot
+   * en frottant dessus, le doigt le corrige (watchWordTaps).
+   */
+  private renderWords(loaded: LoadedPage, block: InkBlock, scale: number): HTMLElement {
+    const colors = new Map(block.strokes.map((st) => [st.id, colorOf(st.color, st.tool)]));
+    const placed = layoutWords(block.words!, measurer());
+    loaded.placed = placed;
+    const layer = el("div", { class: "word-layer" });
+    // Inline : la regle ".overlay > *" rendrait la couche cliquable et
+    // bloquerait le stylet.
+    Object.assign(layer.style, { position: "absolute", inset: "0", pointerEvents: "none" });
+    for (const p of placed) {
+      const span = el("span", { class: `typed-word${p.word.edited ? " edited" : ""}` }, p.word.label);
+      Object.assign(span.style, {
+        left: `${p.x * scale}px`,
+        top: `${p.y * scale}px`,
+        fontSize: `${p.fontSize * scale}px`,
+        lineHeight: String(LINE_HEIGHT),
+        fontFamily: WORD_FONT,
+        color: colors.get(p.word.strokeIds[0]) ?? "#16181d",
+      });
+      layer.append(span);
+    }
+    if (block.pending && !this.host.recognitionReady()) {
+      const wait = el("div", { class: "block-box math pending" },
+        el("span", { class: "tag" }, "cles MyScript manquantes"));
+      Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
+      layer.append(wait);
+    }
+    return layer;
   }
 
   /**
@@ -757,7 +897,7 @@ export class PageView {
   setRenderMode(mode: RenderMode): void {
     this.renderMode = mode;
     for (const p of this.list) {
-      p.surface?.setStrokes(this.visibleStrokes(p.page));
+      this.paintStrokes(p);
       this.paintOverlay(p);
     }
   }
@@ -805,7 +945,7 @@ export class PageView {
     if (!loaded) return;
     to.push({ number: entry.number, blocks: JSON.stringify(loaded.page.blocks) });
     loaded.page.blocks = JSON.parse(entry.blocks) as Block[];
-    loaded.surface?.setStrokes(this.visibleStrokes(loaded.page));
+    this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
   }
@@ -847,11 +987,35 @@ function applyToBlock(block: Block, result: RecoResult): void {
     block.latex = result.value;
     block.candidates = result.candidates.length ? result.candidates : undefined;
     block.pending = false;
+  } else if (block.type === "ink" && !block.rect && result.words) {
+    // Mot a mot. Un trait gomme pendant l'aller-retour reseau ne doit pas
+    // ressusciter dans un mot : on ne garde que les traits encore la.
+    const alive = new Set(block.strokes.map((st) => st.id));
+    const gone = new Set(result.words.flatMap((w) => w.strokeIds).filter((id) => !alive.has(id)));
+    block.words = dropStrokes(carryEdits(block.words, result.words), gone);
+    block.recognized = joinWords(block.words) || null;
+    block.candidates = undefined;
+    block.pending = false;
   } else if (block.type === "ink") {
     block.recognized = result.value;
     block.candidates = result.candidates.length ? result.candidates : undefined;
     block.pending = false;
   }
+}
+
+/** Police des mots tapes. La meme sert a les mesurer et a les afficher. */
+const WORD_FONT = '"Segoe UI", system-ui, sans-serif';
+
+let measureCtx: CanvasRenderingContext2D | null = null;
+/** Largeur d'un texte tape, dans l'unite de la taille de police donnee. */
+function measurer(): (text: string, fontSize: number) => number {
+  measureCtx ??= document.createElement("canvas").getContext("2d");
+  const ctx = measureCtx;
+  return (text, fontSize) => {
+    if (!ctx) return text.length * fontSize * 0.5;
+    ctx.font = `${fontSize}px ${WORD_FONT}`;
+    return ctx.measureText(text).width;
+  };
 }
 
 /** Valeur reservee du menu de correction, jamais un LaTeX valide. */

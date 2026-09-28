@@ -232,6 +232,8 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   position: absolute; top: -10px; left: 6px; font-size: 10px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted);
 }
+/* Mot tape pose a la place de l'encre (conversion mot a mot). */
+.typed-word { position: absolute; white-space: pre; letter-spacing: .01em; }
 .block-text-edit {
   width: 100%; border: none; background: transparent;
   min-height: 30px; padding: 4px 6px; overflow: hidden; resize: none;

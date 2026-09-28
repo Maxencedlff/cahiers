@@ -41,6 +41,11 @@ export interface InkSurfaceOptions {
 export class InkSurface {
   private ctx: CanvasRenderingContext2D;
   private strokes: Stroke[] = [];
+  /**
+   * Traits caches sous un mot tape (rendu propre). Invisibles, mais la gomme
+   * les atteint : frotter le mot tape efface son encre, donc le mot.
+   */
+  private hidden: Stroke[] = [];
   private live: Stroke | null = null;
   private liveLast: InkPoint | null = null;
   private startedAt = 0;
@@ -91,8 +96,9 @@ export class InkSurface {
     this.canvas.removeEventListener("pointerleave", this.onUp);
   }
 
-  setStrokes(strokes: Stroke[]): void {
+  setStrokes(strokes: Stroke[], hidden: Stroke[] = []): void {
     this.strokes = strokes;
+    this.hidden = hidden;
     this.repaintAll();
   }
 
@@ -140,6 +146,8 @@ export class InkSurface {
   private onDown = (e: PointerEvent) => {
     if (this.roleOf(e) === "navigate") { this.startPan(e); return; }
     if (this.roleOf(e) !== "write") return;
+    // Clic droit ou molette : jamais un trait. Le clic droit corrige un mot.
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     if (this.activePointer !== null) return; // un seul pointeur ecrit a la fois
     const tool = this.opts.getTool();
     this.activePointer = e.pointerId;
@@ -294,8 +302,12 @@ export class InkSurface {
       }
       return true;
     });
+    this.hidden = this.hidden.filter((s) => {
+      if (strokeHitsCircle(s, p.x, p.y, radius)) { removed.push(s.id); return false; }
+      return true;
+    });
     if (removed.length) {
-      this.markDirty(unionBounds(boxes));
+      if (boxes.length) this.markDirty(unionBounds(boxes));
       this.opts.onErase(removed);
     }
     this.markDirty({ x: p.x - radius - 2, y: p.y - radius - 2, w: 2 * radius + 4, h: 2 * radius + 4 });

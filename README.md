@@ -12,7 +12,7 @@ n'explique que la mise en route et l'organisation du code.
 ```bash
 npm install
 npm run dev        # interface dans un navigateur, donnees locales de demo
-npm test           # 90 tests du noyau
+npm test           # 112 tests du noyau
 npm run app:dev    # vraie application Tauri
 npm run app:build  # produit l'installateur .exe
 ```
@@ -107,6 +107,21 @@ Elle passe par MyScript iink, dont le service est **distant**. Consequence
 assumee : en amphi sans reseau, les traits sont captures et empiles, la
 conversion part au retour de la connexion. L'ecriture n'est jamais bloquee et
 l'encre brute n'est jamais jetee, meme apres conversion.
+
+### Conversion mot a mot (mode « Auto »)
+
+En mode « Auto » avec le rendu propre, chaque mot manuscrit se transforme en
+texte tape **a sa place**, facon Scribble sur iPad : meme endroit, meme
+couleur, une taille et un axe communs par ligne. Le mot en cours d'ecriture
+reste a l'encre jusqu'a la pause de 500 ms, puis se convertit.
+
+- MyScript renvoie la boite de chaque mot sur l'encre d'origine (requete
+  sans `DIGITAL_EDIT`, qui remettrait le texte en page) ; chaque trait est
+  rattache au mot dont la boite le contient (`src/core/ink/words.ts`).
+- L'encre reste dans la page : « Encre » la ramene, la gomme efface un mot
+  tape en frottant dessus.
+- Correction : appui au doigt ou clic droit sur un mot. Une correction est
+  reportee sur les conversions suivantes au lieu d'etre ecrasee.
 
 Les cles se saisissent dans l'application, en bas a droite, bouton
 « Cles MyScript ». Sans cles, tout fonctionne sauf la conversion : les blocs

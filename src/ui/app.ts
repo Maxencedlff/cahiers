@@ -723,6 +723,9 @@ export class App {
     }
 
     if (typing) return;
+    // Une fenetre de dialogue ouverte garde le clavier : Echap la ferme, et
+    // ne doit pas en plus renvoyer au menu.
+    if (document.querySelector(".backdrop")) return;
 
     if (e.key === "Escape" && this.screen !== "menu") { e.preventDefault(); void this.showMenu(); return; }
     if (this.screen !== "notebook") return;

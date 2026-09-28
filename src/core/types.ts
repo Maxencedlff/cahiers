@@ -72,6 +72,24 @@ export interface InkBlock extends BlockBase {
    * ne doit plus l'ecraser, sinon elle efface une correction a chaque trait.
    */
   editedByHand?: boolean;
+  /**
+   * Mots reconnus, chacun a sa place sur la page et avec ses traits.
+   * En rendu propre, ils remplacent l'encre mot a mot (facon Scribble).
+   */
+  words?: InkWord[];
+}
+
+/** Un mot reconnu (ou un separateur " " / "\n", sans boite ni traits). */
+export interface InkWord {
+  label: string;
+  /** Position du mot manuscrit, en unites de page. */
+  box?: { x: number; y: number; w: number; h: number };
+  /** Traits qui composent le mot : ceux que le mot tape remplace. */
+  strokeIds: string[];
+  /** Autres lectures du moteur, pour la correction en un geste. */
+  candidates?: string[];
+  /** Corrige a la main : une reconversion ne doit pas l'ecraser. */
+  edited?: boolean;
 }
 
 export interface MathBlock extends BlockBase {

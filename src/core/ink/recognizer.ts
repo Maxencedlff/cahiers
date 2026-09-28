@@ -1,4 +1,5 @@
-import type { Stroke } from "../types";
+import type { InkWord, Stroke } from "../types";
+import { RECO_DPI, wordsFromJiix } from "./words";
 
 /**
  * Reconnaissance manuscrite (section 4).
@@ -15,6 +16,8 @@ export interface RecoResult {
   value: string;
   /** Candidats alternatifs, pour la correction en un geste. */
   candidates: string[];
+  /** Texte seulement : chaque mot avec sa position et ses traits. */
+  words?: InkWord[];
 }
 
 export interface RecognitionBackend {
@@ -66,7 +69,7 @@ export class MyScriptBackend implements RecognitionBackend {
       // qu'en le demandant explicitement, et arrive en texte brut.
       return { value: (await res.text()).trim(), candidates: [] };
     }
-    return parseJiix(kind, await res.json());
+    return parseJiix(kind, await res.json(), strokes);
   }
 }
 
@@ -103,12 +106,17 @@ export function buildBatchBody(kind: RecoKind, strokes: Stroke[]) {
         // utile pour du francais truffe de termes techniques anglais.
         margin: { top: 0, left: 0, right: 0 },
       },
-      export: { jiix: { "bounding-box": false, strokes: false, text: { chars: false, words: true } } },
+      // Les boites des mots servent a poser le texte tape a la place de
+      // l'encre. Les traits eux-memes ne sont pas renvoyes : on les a deja.
+      export: { jiix: { "bounding-box": kind === "text", strokes: false, text: { chars: false, words: true } } },
     },
-    xDPI: 96,
-    yDPI: 96,
+    xDPI: RECO_DPI,
+    yDPI: RECO_DPI,
     contentType: kind === "math" ? "Math" : "Text",
-    conversionState: "DIGITAL_EDIT",
+    // Verifie sur le service reel : en DIGITAL_EDIT, MyScript remet le texte
+    // en page et les boites ne correspondent plus a l'encre. Sans conversion,
+    // elles tombent exactement sur les mots ecrits.
+    ...(kind === "math" ? { conversionState: "DIGITAL_EDIT" } : {}),
     strokeGroups: [
       {
         strokes: strokes.map((s) => ({
@@ -126,7 +134,7 @@ export function buildBatchBody(kind: RecoKind, strokes: Stroke[]) {
 
 function round(v: number): number { return Math.round(v * 100) / 100; }
 
-export function parseJiix(kind: RecoKind, jiix: any): RecoResult {
+export function parseJiix(kind: RecoKind, jiix: any, strokes: Stroke[] = []): RecoResult {
   if (kind === "math") {
     // Chemin de secours : si un jour le JIIX porte un latex, on le prend.
     const expressions: string[] = Array.isArray(jiix?.expressions)
@@ -144,7 +152,9 @@ export function parseJiix(kind: RecoKind, jiix: any): RecoResult {
   const candidates: string[] = words.length === 1 && Array.isArray(words[0]?.candidates)
     ? words[0].candidates
     : Array.isArray(jiix?.candidates) ? jiix.candidates : [];
-  return { value: label, candidates: candidates.filter((c) => c !== label) };
+  const result: RecoResult = { value: label, candidates: candidates.filter((c) => c !== label) };
+  if (words.some((w) => w?.["bounding-box"])) result.words = wordsFromJiix(jiix, strokes);
+  return result;
 }
 
 async function computeHmac(key: string, message: string): Promise<string> {

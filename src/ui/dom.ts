@@ -114,7 +114,11 @@ export async function askText(
 
 export function confirmDialog(title: string, message: string, okLabel = "Confirmer"): Promise<boolean> {
   return new Promise((resolve) => {
-    const close = (v: boolean) => { backdrop.remove(); resolve(v); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(false); } };
+    const close = (v: boolean) => {
+      backdrop.remove(); document.removeEventListener("keydown", onKey); resolve(v);
+    };
+    document.addEventListener("keydown", onKey);
     const backdrop = el("div", { class: "backdrop" },
       el("div", { class: "modal" },
         el("header", {}, title),
@@ -133,7 +137,11 @@ export function confirmDialog(title: string, message: string, okLabel = "Confirm
 /** Choix dans une liste, au doigt. */
 export function pick(title: string, options: { value: string; label: string }[]): Promise<string | null> {
   return new Promise((resolve) => {
-    const close = (v: string | null) => { backdrop.remove(); resolve(v); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(null); } };
+    const close = (v: string | null) => {
+      backdrop.remove(); document.removeEventListener("keydown", onKey); resolve(v);
+    };
+    document.addEventListener("keydown", onKey);
     const list = el("div", { class: "hits" },
       ...options.map((o) =>
         el("button", { class: "hit", onclick: () => close(o.value) }, o.label)),
