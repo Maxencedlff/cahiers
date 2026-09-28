@@ -142,6 +142,9 @@ export interface PlacedWord {
 
 export const LINE_HEIGHT = 1.2;
 
+/** Au-dela de cet ecart manuscrit (en tailles de police), le blanc est voulu. */
+const WIDE_GAP = 4;
+
 /**
  * Pose les mots tapes a la place de l'encre.
  *
@@ -176,10 +179,20 @@ export function layoutWords(
     const y = median(centers) - (fontSize * LINE_HEIGHT) / 2;
     const space = measure(" ", fontSize);
     let right = -Infinity;
+    let prevInkEnd = -Infinity;
     for (const { word, index } of [...line].sort((a, b) => a.word.box!.x - b.word.box!.x)) {
-      const x = Math.max(word.box!.x, right + space);
+      const box = word.box!;
+      // Le texte tape est plus etroit que l'ecriture : reprendre l'abscisse
+      // manuscrite de chaque mot laisserait des trous. Les mots s'enchainent
+      // avec une espace normale ; seul un vrai blanc volontaire (colonne,
+      // alinea) garde sa position d'origine.
+      const gap = box.x - prevInkEnd;
+      const x = right === -Infinity || gap > fontSize * WIDE_GAP
+        ? Math.max(box.x, right + space)
+        : right + space;
       placed.push({ word, index, x, y, fontSize });
       right = x + measure(word.label, fontSize);
+      prevInkEnd = box.x + box.w;
     }
   }
   return placed;

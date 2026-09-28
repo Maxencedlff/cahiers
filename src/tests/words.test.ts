@@ -139,4 +139,23 @@ describe("conversion mot a mot", () => {
     const first = placed[0];
     expect(placed[1].x).toBeGreaterThanOrEqual(first.x + measure("abcdefghij", first.fontSize));
   });
+
+  it("enchaine les mots avec une espace normale, sans reprendre les trous de l'ecriture", () => {
+    const placed = layoutWords([
+      { label: "le", box: { x: 100, y: 100, w: 60, h: 40 }, strokeIds: ["a"] },
+      { label: " ", strokeIds: [] },
+      { label: "cours", box: { x: 200, y: 100, w: 140, h: 40 }, strokeIds: ["b"] },
+    ], measure);
+    const f = placed[0].fontSize;
+    expect(placed[1].x).toBeCloseTo(placed[0].x + measure("le", f) + measure(" ", f));
+  });
+
+  it("garde un grand blanc volontaire, comme une colonne", () => {
+    const placed = layoutWords([
+      { label: "x", box: { x: 100, y: 100, w: 30, h: 40 }, strokeIds: ["a"] },
+      { label: " ", strokeIds: [] },
+      { label: "y", box: { x: 600, y: 100, w: 30, h: 40 }, strokeIds: ["b"] },
+    ], measure);
+    expect(placed[1].x).toBe(600);
+  });
 });
