@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  absorbTextBoxes, docPlainText, normalizeTokens, parseDoc, serializeDoc, trailingOperand,
+  absorbTextBoxes, docImageIds, docPlainText, normalizeTokens, parseDoc, serializeDoc, trailingOperand,
   type DocToken,
 } from "../core/text/doc";
 
@@ -88,5 +88,24 @@ describe("anciennes zones Texte", () => {
 
   it("page sans zone : rien ne bouge", () => {
     expect(absorbTextBoxes([{ id: "b", type: "text", content: "x" }], () => "n")).toBe(false);
+  });
+});
+
+describe("photos dans le texte", () => {
+  it("aller-retour avec texte autour", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "avant" }, { kind: "br" },
+      { kind: "image", id: "ab-12" }, { kind: "br" },
+      { kind: "text", text: "apres" },
+    ];
+    expect(serializeDoc(t)).toBe("avant\n![](img:ab-12)\napres");
+    expect(round(t)).toEqual(t);
+    expect(docImageIds(serializeDoc(t))).toEqual(["ab-12"]);
+    expect(docPlainText(serializeDoc(t))).toBe("avant\n\napres");
+  });
+
+  it("un ![ tape dans le texte reste du texte", () => {
+    const t: DocToken[] = [{ kind: "text", text: "voir ![](img:x) ici !" }];
+    expect(round(t)).toEqual(t);
   });
 });

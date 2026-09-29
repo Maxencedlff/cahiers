@@ -108,6 +108,11 @@ export interface ImageBlock extends BlockBase {
   type: "image";
   src: string;
   ocr: string | null;
+  /**
+   * Largeur en unites de page quand la photo est posee dans le texte
+   * (sans rect) : elle suit alors le texte, comme une image dans Word.
+   */
+  width?: number;
 }
 
 export interface PdfBlock extends BlockBase {

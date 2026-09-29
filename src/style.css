@@ -458,3 +458,21 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .side-tools .page-nav button { flex: 1; }
 @media (max-width: 1500px) { .side-calc { width: 340px; } .side-tools { width: 236px; } }
 .side-tools .mathbar .mathkey { font-size: 17px; }
+
+/* Photo posee dans le texte : sa propre ligne, largeur en unites de page. */
+.text-doc .doc-img {
+  display: block; position: relative; margin: .4em 0;
+  width: min(100%, calc(var(--w, 640) * 1px * var(--k, 1)));
+  cursor: grab; border-radius: 4px; outline: 1px solid transparent;
+}
+.text-doc .doc-img:hover { outline-color: #c7d6f5; }
+.text-doc .doc-img.dragging { opacity: .4; }
+.text-doc .doc-img.flash { outline: 2px solid var(--accent); }
+.text-doc .doc-img.missing { min-height: 40px; background: #f3f4f6; }
+.text-doc .doc-img img { display: block; width: 100%; height: auto; pointer-events: none; }
+.text-doc .doc-img-grip {
+  position: absolute; right: -6px; bottom: -6px; width: 18px; height: 18px;
+  border-radius: 4px; background: #fff; border: 2px solid var(--accent);
+  cursor: nwse-resize; opacity: 0;
+}
+.text-doc .doc-img:hover .doc-img-grip { opacity: 1; }

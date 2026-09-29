@@ -3,8 +3,10 @@
  *
  * Stocke dans le `content` d'un bloc `text` sans `rect`, en markdown
  * restreint pour rester lisible dans le JSON (section 1) :
- *   **gras**, *italique*, $formule LaTeX$, retour a la ligne = "\n".
- * Les caracteres speciaux du texte (\ $ *) sont echappes par un antislash.
+ *   **gras**, *italique*, $formule LaTeX$, retour a la ligne = "\n",
+ *   ![](img:<id>) = photo posee dans le texte (bloc image de meme id).
+ * Les caracteres speciaux du texte (\ $ * et ! devant [) sont echappes par
+ * un antislash.
  *
  * Module sans DOM : l'interface lit et ecrit des jetons, pas du markdown.
  */
@@ -12,7 +14,10 @@
 export type DocToken =
   | { kind: "text"; text: string; bold?: boolean; italic?: boolean }
   | { kind: "math"; latex: string }
+  | { kind: "image"; id: string }
   | { kind: "br" };
+
+const IMG_OPEN = "![](img:";
 
 const ESCAPED = /[\\$*]/g;
 
@@ -20,6 +25,7 @@ export function serializeDoc(tokens: DocToken[]): string {
   let out = "";
   for (const t of normalizeTokens(tokens)) {
     if (t.kind === "br") { out += "\n"; continue; }
+    if (t.kind === "image") { out += `${IMG_OPEN}${t.id})`; continue; }
     // Le LaTeX passe tel quel : un $ n'y apparait jamais seul, toujours en \$.
     if (t.kind === "math") { out += `$${t.latex.replace(/(^|[^\\])\$/g, "$1\\$")}$`; continue; }
     // Les retours a la ligne d'un texte deviennent des jetons br a la lecture.
@@ -27,7 +33,7 @@ export function serializeDoc(tokens: DocToken[]): string {
     parts.forEach((part, i) => {
       if (i > 0) out += "\n";
       if (!part) return;
-      let s = part.replace(ESCAPED, (c) => `\\${c}`);
+      let s = part.replace(ESCAPED, (c) => `\\${c}`).replace(/!(?=\[)/g, "\\!");
       if (t.italic) s = `*${s}*`;
       if (t.bold) s = `**${s}**`;
       out += s;
@@ -49,6 +55,15 @@ export function parseDoc(src: string): DocToken[] {
     const c = src[i];
     if (c === "\\" && i + 1 < src.length) { buf += src[++i]; continue; }
     if (c === "\n") { flush(); out.push({ kind: "br" }); continue; }
+    if (c === "!" && src.startsWith(IMG_OPEN, i)) {
+      const end = src.indexOf(")", i + IMG_OPEN.length);
+      if (end !== -1) {
+        flush();
+        out.push({ kind: "image", id: src.slice(i + IMG_OPEN.length, end) });
+        i = end;
+        continue;
+      }
+    }
     if (c === "$") {
       // Formule jusqu'au prochain $ non echappe. Les \x du LaTeX passent
       // tels quels, \$ compris.
@@ -99,9 +114,14 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
 }
 
 /** Texte brut pour la recherche : les formules gardent leur LaTeX. */
+/** Ids des photos posees dans le texte. */
+export function docImageIds(src: string): string[] {
+  return parseDoc(src).flatMap((t) => (t.kind === "image" ? [t.id] : []));
+}
+
 export function docPlainText(src: string): string {
   return parseDoc(src).map((t) =>
-    t.kind === "br" ? "\n" : t.kind === "math" ? t.latex : t.text).join("");
+    t.kind === "br" ? "\n" : t.kind === "math" ? t.latex : t.kind === "image" ? "" : t.text).join("");
 }
 
 /**

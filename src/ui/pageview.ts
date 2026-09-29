@@ -4,7 +4,7 @@ import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
 import { strokeBounds, unionBounds } from "../core/ink/stroke";
 import type {
-  Block, ColorKey, InkBlock, MathBlock, Page, Stroke, TextBlock, ToolKind,
+  Block, ColorKey, ImageBlock, InkBlock, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
 import { uuid } from "../core/id";
 import type { Repo } from "../core/storage/repo";
@@ -142,8 +142,26 @@ export class PageView {
     const migrated = absorbTextBoxes(page.blocks as never[], uuid);
     const canvas = el("canvas");
     const overlay = el("div", { class: "overlay" });
+    const imageOf = (id: string) =>
+      page.blocks.find((b): b is ImageBlock => b.type === "image" && b.id === id);
     const doc = new TextDoc(this.bodyText(page)?.content ?? "", (content) => {
       this.setBodyText(loaded, content);
+    }, {
+      lookup: (id) => {
+        const b = imageOf(id);
+        if (!b) return null;
+        return {
+          url: this.host.repo.readAsset(this.notebook, this.divider, b.src),
+          width: b.width ?? Math.min(PAGE_W - 128, 640),
+          ocr: b.ocr,
+        };
+      },
+      resized: (id, width) => {
+        const b = imageOf(id);
+        if (!b) return;
+        b.width = width;
+        this.queueSave(loaded);
+      },
     });
     const sheet = el("div", { class: "sheet" }, canvas, doc.root, overlay);
     // Les numeros de page restent affiches dans les deux modes (section 5).
@@ -167,6 +185,8 @@ export class PageView {
     });
     loaded.surface = surface;
     this.routePointers(loaded);
+    // Une photo qui finit de charger allonge le texte : la feuille suit.
+    new ResizeObserver(() => this.fitSheet(loaded)).observe(doc.root);
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
@@ -210,6 +230,34 @@ export class PageView {
       e.preventDefault();
       loaded.surface?.forwardDown(e);
     });
+  }
+
+  /**
+   * Anciennes photos posees par-dessus la page : elles cachaient le texte et
+   * ne bougeaient pas. Chacune rejoint le texte avant la ligne qui passait
+   * sous son bord haut. De la plus basse a la plus haute, pour qu'une photo
+   * rangee ne decale pas la position des suivantes.
+   */
+  private adoptFloatingImages(loaded: LoadedPage): void {
+    const floating = loaded.page.blocks
+      .filter((b): b is ImageBlock => b.type === "image" && !!b.rect)
+      .sort((a, b) => b.rect!.y - a.rect!.y);
+    if (!floating.length) return;
+    const sheet = loaded.sheet.getBoundingClientRect();
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    // La couche des blocs gene le reperage du texte sous le point : on la
+    // retire le temps de la mesure.
+    loaded.overlay.style.display = "none";
+    for (const b of floating) {
+      const r = b.rect!;
+      b.width = Math.max(120, Math.min(PAGE_W - 128, Math.round(r.w)));
+      delete b.rect;
+      loaded.doc.adoptImage(b.id, sheet.left + 70 * k, sheet.top + (r.y + 4) * k);
+    }
+    loaded.overlay.style.display = "";
+    this.setBodyText(loaded, loaded.doc.content);
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
   }
 
   /** La feuille s'allonge quand le texte depasse le bas de la page. */
@@ -340,6 +388,9 @@ export class PageView {
       p.sheet.style.setProperty("--k", String(width / PAGE_W));
       p.surface?.layout(width);
       this.fitSheet(p);
+      // Il faut la page reellement a l'ecran pour savoir quelle ligne passe
+      // sous chaque ancienne photo : c'est le cas au premier relayout visible.
+      if (this.root.isConnected && this.root.clientWidth > 0) this.adoptFloatingImages(p);
       this.paintOverlay(p);
     }
   }
@@ -611,6 +662,8 @@ export class PageView {
         return place(box, block.rect);
       }
       case "image": {
+        // Posee dans le texte : c'est TextDoc qui l'affiche.
+        if (!block.rect) return null;
         const img = el("img", { style: { maxWidth: "100%", display: "block", borderRadius: "4px" } });
         const box = el("div", { class: "block-box" },
           el("span", { class: "tag" }, block.ocr ? "photo, texte extrait" : "photo"),
@@ -865,7 +918,7 @@ export class PageView {
 
   /** Insere une photo redressee : le fichier part dans assets/. */
   async addImageBlock(
-    dataUrl: string, width: number, height: number, ocr: string | null,
+    dataUrl: string, width: number, _height: number, ocr: string | null,
   ): Promise<void> {
     const loaded = this.activePage();
     if (!loaded) return;
@@ -878,13 +931,14 @@ export class PageView {
       toast(`Image non enregistree : ${(e as Error).message}`, "err", 6000);
       return;
     }
-    // Largeur de page moins les marges, hauteur proportionnelle.
-    const w = Math.min(PAGE_W - 120, 640);
-    const h = Math.max(60, Math.round((height / width) * w));
-    this.addBlock({
-      id, type: "image", src, ocr,
-      rect: { x: 60, y: this.nextFreeY(), w, h },
+    // Posee dans le texte, au curseur : le texte passe au-dessus et en
+    // dessous, comme une image dans Word.
+    loaded.page.blocks.push({
+      // Une petite image n'est pas etiree.
+      id, type: "image", src, ocr, width: Math.max(120, Math.min(PAGE_W - 128, 640, width)),
     });
+    loaded.doc.insertImage(id);
+    this.fitSheet(loaded);
     toast(ocr ? "Photo inseree, texte extrait pour la recherche" : "Photo inseree");
   }
 
@@ -976,6 +1030,7 @@ export class PageView {
     const loaded = this.list.find((p) => p.number === pageNumber);
     if (!loaded) return;
     const block = loaded.page.blocks.find((b) => b.id === blockId);
+    if (block?.type === "image" && !block.rect && loaded.doc.revealImage(blockId)) return;
     if (!block?.rect) { loaded.wrap.scrollIntoView({ block: "center" }); return; }
     loaded.wrap.scrollIntoView({ block: "center" });
     const scale = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;

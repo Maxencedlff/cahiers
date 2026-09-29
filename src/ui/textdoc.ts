@@ -44,12 +44,27 @@ window.addEventListener("keydown", (e) => {
  * au pointerdown et renvoyes a l'encre (voir PageView), la souris place le
  * curseur et selectionne.
  */
+/** Ce que la page sait d'une photo posee dans le texte. */
+export interface DocImages {
+  /** Fichier de la photo et sa largeur, null si le bloc n'existe plus. */
+  lookup: (id: string) => { url: Promise<string>; width: number; ocr: string | null } | null;
+  /** Largeur choisie a la poignee, en unites de page. */
+  resized: (id: string, width: number) => void;
+}
+
+/** Type de glisser-deposer interne : une photo deplacee dans le texte. */
+const DRAG_TYPE = "application/x-cahiers-image";
+
 export class TextDoc {
   readonly root: HTMLElement;
   private savedRange: Range | null = null;
   private field: MathfieldElement | null = null;
 
-  constructor(content: string, private onChange: (content: string) => void) {
+  constructor(
+    content: string,
+    private onChange: (content: string) => void,
+    private images?: DocImages,
+  ) {
     this.root = el("div", {
       class: "text-doc",
       contenteditable: "true",
@@ -69,6 +84,24 @@ export class TextDoc {
       if (!sel?.rangeCount) return;
       const r = sel.getRangeAt(0);
       if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
+    });
+    // Photo glissee a la souris : elle se pose la ou on la lache, dans le
+    // texte, qui se remet en page autour d'elle.
+    this.root.addEventListener("dragover", (e) => {
+      if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+    });
+    this.root.addEventListener("drop", (e) => {
+      const id = e.dataTransfer?.getData(DRAG_TYPE);
+      if (!id) return;
+      e.preventDefault();
+      const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+      const range = document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (!fig || !range || !this.root.contains(range.startContainer) || fig.contains(range.startContainer)) return;
+      range.insertNode(fig);
+      if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
+      this.emit();
     });
     // Coller du texte brut : un copier-coller depuis le web ne doit pas
     // amener ses polices et ses couleurs dans le cahier.
@@ -92,6 +125,7 @@ export class TextDoc {
     for (const t of tokens) {
       if (t.kind === "br") { this.root.append(el("br")); continue; }
       if (t.kind === "math") { this.root.append(makeEq(t.latex), anchor()); continue; }
+      if (t.kind === "image") { this.root.append(this.makeImage(t.id), anchor()); continue; }
       let node: Node = document.createTextNode(t.text);
       if (t.italic) node = el("i", {}, node);
       if (t.bold) node = el("b", {}, node);
@@ -115,6 +149,10 @@ export class TextDoc {
           continue;
         }
         if (!(child instanceof HTMLElement)) continue;
+        if (child.classList.contains("doc-img")) {
+          out.push({ kind: "image", id: child.dataset.id ?? "" });
+          continue;
+        }
         if (child.classList.contains("eq")) {
           out.push({ kind: "math", latex: child.dataset.latex ?? "" });
           continue;
@@ -178,6 +216,105 @@ export class TextDoc {
     sel?.removeAllRanges();
     sel?.addRange(r);
     this.savedRange = r.cloneRange();
+  }
+
+  /* ---------------- photos ---------------- */
+
+  /**
+   * Photo posee dans le texte, comme une image "alignee sur le texte" de
+   * Word : elle occupe sa ligne, le texte passe au-dessus et en dessous. On
+   * la deplace en la glissant a la souris, on la retaille par son coin.
+   */
+  private makeImage(id: string): HTMLElement {
+    const info = this.images?.lookup(id) ?? null;
+    const img = el("img", { alt: "photo", draggable: "false" });
+    const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
+    const fig = el("span", {
+      class: "doc-img", contenteditable: "false", draggable: "true",
+      dataset: { id }, title: info?.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour deplacer",
+    }, img, grip);
+    fig.style.setProperty("--w", String(info?.width ?? 640));
+    if (info) {
+      void info.url.then((u) => { img.src = u; }).catch(() => fig.classList.add("missing"));
+    } else {
+      fig.classList.add("missing");
+    }
+    fig.addEventListener("dragstart", (e) => {
+      if (!e.dataTransfer) return;
+      e.dataTransfer.setData(DRAG_TYPE, id);
+      e.dataTransfer.effectAllowed = "move";
+      fig.classList.add("dragging");
+    });
+    fig.addEventListener("dragend", () => fig.classList.remove("dragging"));
+
+    // Retaille a la souris par le coin bas droit.
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "mouse" || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      fig.draggable = false;
+      grip.setPointerCapture(e.pointerId);
+      const k = Number(getComputedStyle(this.root).getPropertyValue("--k")) || 1;
+      const startX = e.clientX;
+      const startW = Number(fig.style.getPropertyValue("--w")) || 640;
+      const move = (m: PointerEvent) => {
+        const w = Math.round(Math.max(120, Math.min(772, startW + (m.clientX - startX) / k)));
+        fig.style.setProperty("--w", String(w));
+      };
+      const up = () => {
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        fig.draggable = true;
+        this.images?.resized(id, Number(fig.style.getPropertyValue("--w")));
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+    });
+    return fig;
+  }
+
+  /** Pose une nouvelle photo au curseur, ou a la fin du texte. */
+  insertImage(id: string): void {
+    if (this.field) this.commit(null);
+    const fig = this.makeImage(id);
+    const r = this.savedRange;
+    if (r && this.root.contains(r.startContainer)) {
+      r.collapse(true);
+      r.insertNode(fig);
+    } else {
+      this.root.append(fig);
+    }
+    if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
+    this.emit();
+  }
+
+  /**
+   * Range dans le texte une photo qui flottait par-dessus la page (ancien
+   * format) : elle se place avant la ligne qui passait sous son bord haut.
+   */
+  adoptImage(id: string, clientX: number, clientY: number): void {
+    const all = document.createRange();
+    all.selectNodeContents(this.root);
+    // Sous tout le texte : a la fin, pas avant la derniere ligne.
+    const below = !this.root.textContent?.trim() || clientY > all.getBoundingClientRect().bottom;
+    const range = below ? null : document.caretRangeFromPoint(clientX, clientY);
+    const fig = this.makeImage(id);
+    if (range && this.root.contains(range.startContainer)) {
+      range.insertNode(fig);
+    } else {
+      this.root.append(fig);
+    }
+    if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
+  }
+
+  /** Amene une photo a l'ecran (resultat de recherche sur son texte lu). */
+  revealImage(id: string): boolean {
+    const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+    if (!fig) return false;
+    fig.scrollIntoView({ block: "center" });
+    fig.classList.add("flash");
+    setTimeout(() => fig.classList.remove("flash"), 1800);
+    return true;
   }
 
   /* ---------------- formules ---------------- */
