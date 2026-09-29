@@ -414,3 +414,47 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .text-doc .eq { display: inline-block; padding: 0 2px; border-radius: 4px; cursor: pointer; user-select: none; }
 .text-doc .eq:hover { background: #f1f5ff; }
 .text-doc .eq .katex { font-size: 1.08em; }
+
+/* ---------------- colonnes : outils a gauche, calculatrice a droite ---------------- */
+/* Toute la hauteur de l'ecran revient a la feuille. */
+.work { flex: 1; min-height: 0; display: flex; }
+.work .panes { min-width: 0; }
+
+.side-tools {
+  flex: none; width: 262px; overflow-y: auto; overflow-x: hidden;
+  background: var(--panel); border-right: 1px solid var(--line);
+  scrollbar-width: thin;
+}
+.side-tools .toolbar {
+  flex-wrap: wrap; gap: 5px; padding: 8px; border-bottom: none;
+}
+.side-tools .toolbar > button:not(.swatch) { flex: 1 1 calc(50% - 5px); padding: 0 6px; font-size: 14px; }
+.side-tools .toolbar .sep { flex-basis: 100%; width: auto; height: 1px; margin: 3px 0; }
+.side-tools .toolbar .spacer { display: none; }
+.side-tools .toolbar .swatch { flex: 1 1 0; min-width: 0; }
+.side-tools .toolbar > .small { flex: none; }
+
+.side-tools .mathbar {
+  flex-wrap: wrap; overflow: visible; gap: 4px; padding: 8px;
+  border-top: 1px solid var(--line); border-bottom: none;
+}
+.side-tools .mathbar .sep { flex-basis: 100%; width: auto; height: 1px; margin: 3px 0; align-self: auto; }
+.side-tools .mathbar .mathkey { flex: 0 0 44px; padding: 0 2px; }
+.side-tools .mathbar .mathkey.eq { flex: 1 1 100%; }
+
+.side-calc {
+  flex: none; width: 400px; display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--line); background: var(--panel);
+}
+.side-calc.closed { display: none; }
+.calc.docked {
+  position: static; width: auto; flex: 1; min-height: 0;
+  border: none; border-radius: 0; box-shadow: none; z-index: auto;
+}
+.calc.docked .calc-head { cursor: default; }
+.calc.docked .calc-body { max-height: none; flex: 1; min-height: 0; }
+.side-tools .toolbar + .toolbar { border-top: 1px solid var(--line); }
+.side-tools .page-nav { flex-basis: 100%; display: flex; align-items: center; gap: 6px; }
+.side-tools .page-nav button { flex: 1; }
+@media (max-width: 1500px) { .side-calc { width: 340px; } .side-tools { width: 236px; } }
+.side-tools .mathbar .mathkey { font-size: 17px; }

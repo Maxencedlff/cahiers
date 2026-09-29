@@ -123,6 +123,11 @@ export class App {
       this.calculatorLoading = import("./calculator/index").then(({ Calculator }) => {
         this.calculator = new Calculator({
           canInsert: () => this.screen === "notebook" && !!this.activeTab()?.view,
+          onVisibility: (visible) => {
+            this.settings.calcOpen = visible;
+            saveSettings(this.settings);
+            this.main.querySelector(".side-calc")?.classList.toggle("closed", !visible);
+          },
           insertGraph: (fn, domain) => {
             const view = this.activeTab()?.view;
             view?.addBlock({
@@ -335,11 +340,16 @@ export class App {
 
     clear(this.main);
     const dividers = await this.repo.listDividers(tab.notebook);
-    this.main.append(
-      this.buildDividerBar(tab, dividers),
-      this.buildToolbar(),
-      buildMathBar(() => this.activeTab()?.view?.activeDoc),
-    );
+    // Outils a gauche, calculatrice a droite : la hauteur de l'ecran reste
+    // a la feuille.
+    const tools = this.buildToolbar();
+    const calcSide = el("aside", { class: `side-calc${this.settings.calcOpen ? "" : " closed"}` });
+    const work = el("div", { class: "work" });
+    this.main.append(this.buildDividerBar(tab, dividers), work);
+    void this.loadCalculator().then((calc) => {
+      calc.dock(calcSide);
+      if (this.settings.calcOpen && !calc.isVisible) calc.show();
+    });
 
     const panes = el("div", { class: "panes" });
     panes.append(this.buildPane(tab, false));
@@ -352,7 +362,7 @@ export class App {
         this.splitId = null;
       }
     }
-    this.main.append(panes);
+    work.append(tools, panes, calcSide);
     this.paintStatus();
 
     if (tab.view) tab.host.append(tab.view.root);
@@ -519,6 +529,17 @@ export class App {
         }, this.touchWrites ? "Doigt : ecrit" : "Doigt : navigue"),
         el("div", { class: "sep" }),
       ]),
+    );
+
+    // Seconde moitie de la colonne, sous le ruban Maths : ce qui sert moins
+    // souvent qu'ecrire.
+    const more = el("div", { class: "toolbar" },
+      el("div", { class: "page-nav" },
+        el("button", { onclick: () => void view()?.prev(), title: "Page precedente (PageUp)" }, "◀"),
+        el("span", { class: "small muted" }, `p. ${view()?.pageNumber ?? 1}`),
+        el("button", { onclick: () => void view()?.next(), title: "Page suivante (PageDown)" }, "▶"),
+      ),
+      el("div", { class: "sep" }),
       el("button", {
         title: "Photo du tableau, redressee et lue",
         onclick: () => void this.importImage(),
@@ -529,12 +550,12 @@ export class App {
       el("button", { onclick: () => void view()?.newPage(), title: "Nouvelle page a la fin" }, "Nouvelle page"),
       el("button", { onclick: () => void view()?.newPage(true), title: "Inserer apres la page courante" }, "Inserer ici"),
       el("button", { onclick: () => void view()?.deleteCurrentPage() }, "Supprimer la page"),
-      el("div", { class: "spacer" }),
+      el("div", { class: "sep" }),
     );
 
     // Bascule pages / defilement, a tout moment (section 5).
     const mode = view()?.mode ?? "pages";
-    bar.append(
+    more.append(
       el("button", {
         class: mode === "scroll" ? "on" : "",
         title: "Bascule pages / defilement",
@@ -571,12 +592,13 @@ export class App {
           this.paintToolbar();
         },
       }, this.renderMode === "ink" ? "Encre" : "Rendu"),
-      el("div", { class: "sep" }),
-      el("button", { onclick: () => void view()?.prev(), title: "Page precedente" }, "◀"),
-      el("span", { class: "small muted" }, `p. ${view()?.pageNumber ?? 1}`),
-      el("button", { onclick: () => void view()?.next(), title: "Page suivante" }, "▶"),
     );
-    return bar;
+    // Outils a gauche : la hauteur de l'ecran reste a la feuille.
+    return el("aside", { class: "side-tools" },
+      bar,
+      buildMathBar(() => this.activeTab()?.view?.activeDoc),
+      more,
+    );
   }
 
   /**
@@ -595,8 +617,11 @@ export class App {
   }
 
   private paintToolbar(): void {
-    const old = this.main.querySelector(".toolbar");
-    if (old) old.replaceWith(this.buildToolbar());
+    const old = this.main.querySelector(".side-tools");
+    if (!old) return;
+    const next = this.buildToolbar();
+    old.replaceWith(next);
+    next.scrollTop = old.scrollTop;
   }
 
   private async setViewMode(mode: ViewMode): Promise<void> {

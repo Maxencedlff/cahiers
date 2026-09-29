@@ -23,6 +23,8 @@ export interface CalculatorHost {
   /** Insere un bloc calc vivant dans la page courante. */
   insertCalc: (expr: string, result: string) => void;
   canInsert: () => boolean;
+  /** Ouverture ou fermeture, pour replier la colonne qui l'accueille. */
+  onVisibility?: (visible: boolean) => void;
 }
 
 export class Calculator {
@@ -35,6 +37,12 @@ export class Calculator {
   private lastError: string | null = null;
   private body: HTMLElement;
   private visible = false;
+  /**
+   * Le pave ne prend le clavier qu'apres un appui dedans. Ancree a cote de
+   * la page, la calculatrice reste visible en permanence : sans cela elle
+   * volerait chaque lettre tapee dans le cours.
+   */
+  private armed = false;
 
   constructor(private host: CalculatorHost) {
     this.body = el("div", { class: "calc-body" });
@@ -44,7 +52,21 @@ export class Calculator {
       this.body,
     );
     document.body.append(this.root);
+    document.addEventListener("pointerdown", (e) => {
+      this.armed = this.root.contains(e.target as Node);
+    }, { capture: true });
+    document.addEventListener("focusin", (e) => {
+      if (!this.root.contains(e.target as Node)) this.armed = false;
+    });
     this.render();
+  }
+
+  /** Pose la calculatrice dans une colonne fixe au lieu d'une fenetre flottante. */
+  dock(container: HTMLElement): void {
+    this.root.classList.add("docked");
+    this.root.style.left = "";
+    this.root.style.top = "";
+    container.append(this.root);
   }
 
   /* ---------------- fenetre ---------------- */
@@ -54,13 +76,20 @@ export class Calculator {
   show(): void {
     this.visible = true;
     this.root.style.display = "flex";
+    this.host.onVisibility?.(true);
+    if (this.root.classList.contains("docked")) return;
     // Toujours ramenee dans l'ecran : elle a pu etre laissee hors champ.
     const r = this.root.getBoundingClientRect();
     if (r.left + r.width > window.innerWidth) this.root.style.left = `${Math.max(8, window.innerWidth - r.width - 20)}px`;
     if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 20)}px`;
   }
 
-  hide(): void { this.visible = false; this.root.style.display = "none"; }
+  hide(): void {
+    this.visible = false;
+    this.armed = false;
+    this.root.style.display = "none";
+    this.host.onVisibility?.(false);
+  }
 
   get isVisible(): boolean { return this.visible; }
 
@@ -74,6 +103,7 @@ export class Calculator {
     let start: { x: number; y: number; left: number; top: number } | null = null;
     head.addEventListener("pointerdown", (e) => {
       if ((e.target as HTMLElement).tagName === "BUTTON") return;
+      if (this.root.classList.contains("docked")) return;
       head.setPointerCapture(e.pointerId);
       head.classList.add("dragging");
       const r = this.root.getBoundingClientRect();
@@ -231,7 +261,7 @@ export class Calculator {
 
   /** Saisie au clavier quand la calculatrice a le focus. */
   handleKey(e: KeyboardEvent): boolean {
-    if (!this.visible || this.tab !== "calcul") return false;
+    if (!this.visible || !this.armed || this.tab !== "calcul") return false;
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return false;
 

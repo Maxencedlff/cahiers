@@ -11,6 +11,8 @@ export interface Settings {
   width: number;
   /** Convertir l'ecriture au fil de la plume plutot qu'a la demande. */
   autoConvert: boolean;
+  /** Calculatrice ouverte dans la colonne de droite. */
+  calcOpen: boolean;
   myscript: { applicationKey: string; hmacKey: string };
 }
 
@@ -21,6 +23,7 @@ const DEFAULTS: Settings = {
   color: "definition",
   width: 2.2,
   autoConvert: false,
+  calcOpen: true,
   myscript: { applicationKey: "", hmacKey: "" },
 };
 
