@@ -4,26 +4,50 @@
  * Stocke dans le `content` d'un bloc `text` sans `rect`, en markdown
  * restreint pour rester lisible dans le JSON (section 1) :
  *   **gras**, *italique*, $formule LaTeX$, retour a la ligne = "\n",
- *   ![](img:<id>) = photo posee dans le texte (bloc image de meme id).
- * Les caracteres speciaux du texte (\ $ * et ! devant [) sont echappes par
- * un antislash.
+ *   ![](img:<id>) = photo posee dans le texte (bloc image de meme id),
+ *   [texte en couleur]{.theoreme} = une des 5 couleurs de la palette.
+ * Les caracteres speciaux du texte (\ $ * [ ]) sont echappes par un
+ * antislash.
  *
  * Module sans DOM : l'interface lit et ecrit des jetons, pas du markdown.
  */
 
+import type { ColorKey } from "../types";
+import { PALETTE } from "../palette";
+
 export type DocToken =
-  | { kind: "text"; text: string; bold?: boolean; italic?: boolean }
-  | { kind: "math"; latex: string }
+  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; color?: ColorKey }
+  | { kind: "math"; latex: string; color?: ColorKey }
   | { kind: "image"; id: string }
   | { kind: "br" };
 
 const IMG_OPEN = "![](img:";
 
-const ESCAPED = /[\\$*]/g;
+const ESCAPED = /[\\$*[\]]/g;
+const COLOR_KEYS = new Set<string>(PALETTE.map((p) => p.key));
+
+function colorOfToken(t: DocToken): ColorKey | undefined {
+  return t.kind === "text" || t.kind === "math" ? t.color : undefined;
+}
 
 export function serializeDoc(tokens: DocToken[]): string {
+  // Les suites de meme couleur forment un seul groupe [..]{.couleur}.
   let out = "";
-  for (const t of normalizeTokens(tokens)) {
+  const list = normalizeTokens(tokens);
+  for (let i = 0; i < list.length;) {
+    const color = colorOfToken(list[i]);
+    let j = i;
+    while (j < list.length && colorOfToken(list[j]) === color) j++;
+    const body = serializePlain(list.slice(i, j));
+    out += color ? `[${body}]{.${color}}` : body;
+    i = j;
+  }
+  return out;
+}
+
+function serializePlain(tokens: DocToken[]): string {
+  let out = "";
+  for (const t of tokens) {
     if (t.kind === "br") { out += "\n"; continue; }
     if (t.kind === "image") { out += `${IMG_OPEN}${t.id})`; continue; }
     // Le LaTeX passe tel quel : un $ n'y apparait jamais seul, toujours en \$.
@@ -33,7 +57,7 @@ export function serializeDoc(tokens: DocToken[]): string {
     parts.forEach((part, i) => {
       if (i > 0) out += "\n";
       if (!part) return;
-      let s = part.replace(ESCAPED, (c) => `\\${c}`).replace(/!(?=\[)/g, "\\!");
+      let s = part.replace(ESCAPED, (c) => `\\${c}`);
       if (t.italic) s = `*${s}*`;
       if (t.bold) s = `**${s}**`;
       out += s;
@@ -55,6 +79,17 @@ export function parseDoc(src: string): DocToken[] {
     const c = src[i];
     if (c === "\\" && i + 1 < src.length) { buf += src[++i]; continue; }
     if (c === "\n") { flush(); out.push({ kind: "br" }); continue; }
+    if (c === "[") {
+      const group = colorGroup(src, i);
+      if (group) {
+        flush();
+        for (const t of parseDoc(src.slice(i + 1, group.innerEnd))) {
+          out.push(t.kind === "text" || t.kind === "math" ? { ...t, color: group.color } : t);
+        }
+        i = group.end - 1;
+        continue;
+      }
+    }
     if (c === "!" && src.startsWith(IMG_OPEN, i)) {
       const end = src.indexOf(")", i + IMG_OPEN.length);
       if (end !== -1) {
@@ -93,6 +128,29 @@ export function parseDoc(src: string): DocToken[] {
   return normalizeTokens(out);
 }
 
+/**
+ * Groupe de couleur ouvert en `start` : [ ... ]{.cle}. Les formules $..$ et
+ * les caracteres echappes a l'interieur sont sautes. null si ce [ n'ouvre
+ * pas de groupe (un crochet ancien, tape avant les couleurs).
+ */
+function colorGroup(src: string, start: number): { innerEnd: number; end: number; color: ColorKey } | null {
+  for (let j = start + 1; j < src.length; j++) {
+    const c = src[j];
+    if (c === "\\") { j++; continue; }
+    if (c === "$") {
+      let k = j + 1;
+      while (k < src.length && src[k] !== "$") k += src[k] === "\\" ? 2 : 1;
+      if (k < src.length) j = k;
+      continue;
+    }
+    if (c === "]") {
+      const m = /^\]\{\.([a-z]+)\}/.exec(src.slice(j));
+      if (m && COLOR_KEYS.has(m[1])) return { innerEnd: j, end: j + m[0].length, color: m[1] as ColorKey };
+    }
+  }
+  return null;
+}
+
 /** Fusionne les textes voisins de meme style, retire les textes et formules vides. */
 export function normalizeTokens(tokens: DocToken[]): DocToken[] {
   const out: DocToken[] = [];
@@ -100,14 +158,23 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
     if (t.kind === "text") {
       if (!t.text) continue;
       const prev = out[out.length - 1];
-      if (prev?.kind === "text" && !!prev.bold === !!t.bold && !!prev.italic === !!t.italic) {
+      if (prev?.kind === "text" && !!prev.bold === !!t.bold && !!prev.italic === !!t.italic
+          && prev.color === t.color) {
         out[out.length - 1] = { ...prev, text: prev.text + t.text };
         continue;
       }
-      out.push({ kind: "text", text: t.text, ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}) });
+      out.push({
+        kind: "text", text: t.text,
+        ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}),
+        ...(t.color ? { color: t.color } : {}),
+      });
       continue;
     }
-    if (t.kind === "math" && !t.latex.trim()) continue;
+    if (t.kind === "math") {
+      if (!t.latex.trim()) continue;
+      out.push({ kind: "math", latex: t.latex, ...(t.color ? { color: t.color } : {}) });
+      continue;
+    }
     out.push(t);
   }
   return out;

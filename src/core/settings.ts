@@ -11,6 +11,8 @@ export interface Settings {
   width: number;
   /** Convertir l'ecriture au fil de la plume plutot qu'a la demande. */
   autoConvert: boolean;
+  /** Couleur du texte tape, null = noir. L'encre garde toujours une couleur. */
+  textColor: ColorKey | null;
   /** Calculatrice ouverte dans la colonne de droite. */
   calcOpen: boolean;
   myscript: { applicationKey: string; hmacKey: string };
@@ -24,6 +26,7 @@ const DEFAULTS: Settings = {
   width: 2.2,
   autoConvert: false,
   calcOpen: true,
+  textColor: null,
   myscript: { applicationKey: "", hmacKey: "" },
 };
 

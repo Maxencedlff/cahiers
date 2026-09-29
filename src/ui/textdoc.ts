@@ -2,6 +2,8 @@ import { MathfieldElement } from "mathlive";
 import "mathlive/fonts.css";
 import katex from "katex";
 import { el } from "./dom";
+import { colorOf } from "../core/palette";
+import type { ColorKey } from "../core/types";
 import { normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken } from "../core/text/doc";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
@@ -52,6 +54,18 @@ export interface DocImages {
   resized: (id: string, width: number) => void;
 }
 
+/**
+ * Couleur du texte tape ensuite : une des 5 couleurs de la palette, ou null
+ * pour le texte normal (noir). Reglee par la barre d'outils.
+ */
+let typingColor: ColorKey | null = null;
+
+export function setTypingColor(color: ColorKey | null): void {
+  typingColor = color;
+  // Texte selectionne : il prend la couleur, comme dans Word.
+  lastDoc?.colorSelection(color);
+}
+
 /** Type de glisser-deposer interne : une photo deplacee dans le texte. */
 const DRAG_TYPE = "application/x-cahiers-image";
 
@@ -73,6 +87,22 @@ export class TextDoc {
     });
     this.setContent(content);
     this.root.addEventListener("input", () => this.emit());
+    // Frappe dans la couleur choisie : si le curseur n'est pas deja dans un
+    // texte de cette couleur, le caractere part dans un nouveau segment.
+    this.root.addEventListener("beforeinput", (e) => {
+      if (this.field || e.inputType !== "insertText" || !e.data) return;
+      const sel = document.getSelection();
+      if (!sel?.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      if (!this.root.contains(range.startContainer)) return;
+      if (colorAt(range.startContainer, this.root) === typingColor) return;
+      e.preventDefault();
+      range.deleteContents();
+      const text = document.createTextNode(e.data);
+      range.insertNode(colorSpan(typingColor, text));
+      sel.collapse(text, text.length);
+      this.emit();
+    });
     this.root.addEventListener("keydown", (e) => this.onKey(e));
     this.root.addEventListener("focusin", () => { lastDoc = this; });
     this.root.addEventListener("click", (e) => {
@@ -124,11 +154,16 @@ export class TextDoc {
     const tokens = parseDoc(content);
     for (const t of tokens) {
       if (t.kind === "br") { this.root.append(el("br")); continue; }
-      if (t.kind === "math") { this.root.append(makeEq(t.latex), anchor()); continue; }
+      if (t.kind === "math") {
+        const eq = makeEq(t.latex);
+        this.root.append(t.color ? colorSpan(t.color, eq) : eq, anchor());
+        continue;
+      }
       if (t.kind === "image") { this.root.append(this.makeImage(t.id), anchor()); continue; }
       let node: Node = document.createTextNode(t.text);
       if (t.italic) node = el("i", {}, node);
       if (t.bold) node = el("b", {}, node);
+      if (t.color) node = colorSpan(t.color, node);
       this.root.append(node);
     }
     // Sans <br> final, une derniere ligne vide ne s'affiche pas.
@@ -137,15 +172,15 @@ export class TextDoc {
 
   private read(): DocToken[] {
     const out: DocToken[] = [];
-    const walk = (node: Node, bold: boolean, italic: boolean) => {
+    const walk = (node: Node, bold: boolean, italic: boolean, color?: ColorKey) => {
       for (const child of Array.from(node.childNodes)) {
         if (child.nodeType === Node.TEXT_NODE) {
-          const text = (child.textContent ?? "").replace(/ /g, " ").replace(/​/g, "");
-          out.push({ kind: "text", text, bold, italic });
+          const text = (child.textContent ?? "").replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+          out.push({ kind: "text", text, bold, italic, color });
           continue;
         }
         if (child instanceof MathfieldElement) {
-          out.push({ kind: "math", latex: child.getValue("latex") });
+          out.push({ kind: "math", latex: child.getValue("latex"), color });
           continue;
         }
         if (!(child instanceof HTMLElement)) continue;
@@ -154,7 +189,12 @@ export class TextDoc {
           continue;
         }
         if (child.classList.contains("eq")) {
-          out.push({ kind: "math", latex: child.dataset.latex ?? "" });
+          out.push({ kind: "math", latex: child.dataset.latex ?? "", color });
+          continue;
+        }
+        if (child.classList.contains("tc")) {
+          const c = child.dataset.c;
+          walk(child, bold, italic, c && c !== "none" ? c as ColorKey : undefined);
           continue;
         }
         const tag = child.tagName;
@@ -164,7 +204,7 @@ export class TextDoc {
         if (block && out.length && out[out.length - 1].kind !== "br") out.push({ kind: "br" });
         const b = bold || tag === "B" || tag === "STRONG" || Number(child.style.fontWeight) >= 600;
         const i = italic || tag === "I" || tag === "EM" || child.style.fontStyle === "italic";
-        walk(child, b, i);
+        walk(child, b, i, color);
       }
     };
     walk(this.root, false, false);
@@ -202,7 +242,7 @@ export class TextDoc {
     const r = document.createRange();
     const next = node.nextSibling;
     if (after && next?.nodeType === Node.TEXT_NODE) {
-      r.setStart(next, (next.textContent ?? "").startsWith("​") ? 1 : 0);
+      r.setStart(next, (next.textContent ?? "").startsWith("\u200b") ? 1 : 0);
     } else if (after) {
       const a = anchor();
       node.parentNode?.insertBefore(a, next);
@@ -216,6 +256,25 @@ export class TextDoc {
     sel?.removeAllRanges();
     sel?.addRange(r);
     this.savedRange = r.cloneRange();
+  }
+
+  /** Colore le texte selectionne dans ce document, s'il y en a. */
+  colorSelection(color: ColorKey | null): void {
+    if (this.field) return;
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    if (!this.root.contains(range.commonAncestorContainer)) return;
+    const frag = range.extractContents();
+    // Les anciennes couleurs de la selection s'effacent devant la nouvelle.
+    frag.querySelectorAll(".tc").forEach((c) => c.replaceWith(...Array.from(c.childNodes)));
+    const span = colorSpan(color, frag);
+    range.insertNode(span);
+    sel.removeAllRanges();
+    const r = document.createRange();
+    r.selectNodeContents(span);
+    sel.addRange(r);
+    this.emit();
   }
 
   /* ---------------- photos ---------------- */
@@ -465,7 +524,7 @@ export class TextDoc {
     else if (template.includes("#@")) {
       const node = range.startContainer;
       if (node.nodeType === Node.TEXT_NODE) {
-        const before = (node.textContent ?? "").slice(0, range.startOffset).replace(/​/g, "");
+        const before = (node.textContent ?? "").slice(0, range.startOffset).replace(/\u200b/g, "");
         taken = trailingOperand(before);
         if (taken) {
           const text = node.textContent ?? "";
@@ -545,9 +604,31 @@ function sinkFocused(mf: MathfieldElement): boolean {
   return document.activeElement === mf && !!mf.shadowRoot?.activeElement;
 }
 
+/**
+ * Segment de couleur. "none" remet le texte en noir a l'interieur d'un
+ * segment colore : les segments s'emboitent, le plus proche l'emporte.
+ */
+function colorSpan(color: ColorKey | null, ...children: Node[]): HTMLElement {
+  const span = el("span", { class: "tc", dataset: { c: color ?? "none" } }, ...children);
+  span.style.color = color ? colorOf(color) : "var(--text-ink, #16181d)";
+  return span;
+}
+
+/** Couleur du texte a cet endroit (segment le plus proche), null = noir. */
+function colorAt(node: Node, root: HTMLElement): ColorKey | null {
+  let n: Node | null = node;
+  while (n && n !== root) {
+    if (n instanceof HTMLElement && n.classList.contains("tc")) {
+      return n.dataset.c && n.dataset.c !== "none" ? n.dataset.c as ColorKey : null;
+    }
+    n = n.parentNode;
+  }
+  return null;
+}
+
 /** Point d'ancrage invisible : le curseur a toujours un texte ou se poser. */
 function anchor(): Text {
-  return document.createTextNode("​");
+  return document.createTextNode("\u200b");
 }
 
 function insertInField(mf: MathfieldElement, template: string): void {
@@ -562,7 +643,7 @@ function neighbour(r: Range, forward: boolean): Node | null {
   if (c.nodeType === Node.TEXT_NODE) {
     const text = (c.textContent ?? "");
     const rest = forward ? text.slice(o) : text.slice(0, o);
-    if (rest.replace(/​/g, "")) return null;
+    if (rest.replace(/\u200b/g, "")) return null;
     return forward ? c.nextSibling : c.previousSibling;
   }
   return forward ? c.childNodes[o] ?? null : c.childNodes[o - 1] ?? null;

@@ -3,7 +3,7 @@ import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
-import { insertMathTemplate, isEditingDoc } from "./textdoc";
+import { insertMathTemplate, isEditingDoc, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE } from "../core/palette";
 import type { ColorKey, ToolKind } from "../core/types";
@@ -50,6 +50,8 @@ export class App {
 
   private tool: ToolKind | "region" | "textregion" = "pen";
   private color: ColorKey = "definition";
+  /** Couleur du texte tape ; null = noir, le texte normal. */
+  private textColor: ColorKey | null = null;
   private width = 2.2;
   private sawPen = false;
   /** Ce que fait le doigt tant qu'aucun stylet n'a ete vu (section 3). */
@@ -76,6 +78,8 @@ export class App {
     this.settings = loadSettings();
     this.tool = this.settings.tool;
     this.color = this.settings.color;
+    this.textColor = this.settings.textColor;
+    setTypingColor(this.textColor);
     this.width = this.settings.width;
     this.autoConvert = this.settings.autoConvert;
     if (this.autoConvert) this.renderMode = "clean";
@@ -493,12 +497,26 @@ export class App {
     );
 
     // Palette fermee a 5 couleurs a semantique fixe (section 8).
+    // La couleur choisie vaut pour l'encre et pour le texte tape ; le noir
+    // ne vaut que pour le texte (l'encre garde une des 5 couleurs).
+    // Pas de focus sur la pastille : la selection du texte reste, et prend
+    // la couleur.
+    const keep = (b: HTMLElement) => {
+      b.addEventListener("mousedown", (e) => e.preventDefault());
+      b.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") e.preventDefault(); });
+      return b;
+    };
+    bar.append(keep(el("button", {
+      class: `swatch${this.textColor === null ? " on" : ""}`,
+      title: "Texte normal, en noir (Alt+0). L'encre garde sa couleur.",
+      onclick: () => this.pickColor(null),
+    }, el("i", { style: { background: "#16181d" } }))));
     for (const p of PALETTE) {
-      bar.append(el("button", {
+      bar.append(keep(el("button", {
         class: `swatch${this.color === p.key ? " on" : ""}`,
-        title: `${p.label} (Alt+${p.shortcut})`,
-        onclick: () => { this.color = p.key; this.persist(); this.paintToolbar(); },
-      }, el("i", { style: { background: p.ink } })));
+        title: `${p.label} (Alt+${p.shortcut}) : encre et texte tape`,
+        onclick: () => this.pickColor(p.key),
+      }, el("i", { style: { background: p.ink } }))));
     }
 
     const widths: [string, number][] = [["Fin", 1.4], ["Moyen", 2.2], ["Epais", 3.6]];
@@ -797,7 +815,8 @@ export class App {
     // la rangee du haut donne & e " ' ( sans Maj.
     const digit = /^Digit([1-5])$/.exec(e.code)?.[1];
     const idx = digit ? PALETTE.findIndex((p) => p.shortcut === digit) : -1;
-    if (idx >= 0) { this.color = PALETTE[idx].key; this.persist(); this.paintToolbar(); return true; }
+    if (idx >= 0) { this.pickColor(PALETTE[idx].key); return true; }
+    if (e.code === "Digit0") { this.pickColor(null); return true; }
 
     const tools: Record<string, ToolKind | "region" | "textregion"> = {
       KeyE: "pen", KeyH: "highlighter", KeyG: "eraser", KeyZ: "region", KeyT: "textregion",
@@ -814,7 +833,17 @@ export class App {
 
   /* ---------------- etat et statut ---------------- */
 
+  /** Couleur choisie : l'encre (si c'en est une) et le texte tape. */
+  private pickColor(key: ColorKey | null): void {
+    if (key) this.color = key;
+    this.textColor = key;
+    setTypingColor(key);
+    this.persist();
+    this.paintToolbar();
+  }
+
   private persist(): void {
+    this.settings.textColor = this.textColor;
     this.settings.tool = this.tool;
     this.settings.color = this.color;
     this.settings.width = this.width;

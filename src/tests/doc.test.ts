@@ -109,3 +109,24 @@ describe("photos dans le texte", () => {
     expect(round(t)).toEqual(t);
   });
 });
+
+describe("texte en couleur", () => {
+  it("groupes de couleur, formule comprise", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "Def " },
+      { kind: "text", text: "Theoreme", color: "theoreme", bold: true },
+      { kind: "text", text: " : ", color: "theoreme" },
+      { kind: "math", latex: "\\sqrt[3]{x}", color: "theoreme" },
+      { kind: "br" },
+      { kind: "text", text: "fin" },
+    ];
+    expect(serializeDoc(t)).toBe("Def [**Theoreme** : $\\sqrt[3]{x}$]{.theoreme}\nfin");
+    expect(round(t)).toEqual(t);
+  });
+
+  it("crochets du texte echappes, anciens crochets relus tels quels", () => {
+    const t: DocToken[] = [{ kind: "text", text: "[a,+b[ et x]{.theoreme}" }];
+    expect(round(t)).toEqual(t);
+    expect(parseDoc("[a, b] et ]{.inconnu}")).toEqual([{ kind: "text", text: "[a, b] et ]{.inconnu}" }]);
+  });
+});
