@@ -391,7 +391,9 @@ function makeEq(latex: string): HTMLElement {
   try {
     // \displaystyle : une fraction dans la phrase reste lisible, comme dans
     // le champ d'edition, au lieu de tomber en corps 7.
-    eq.innerHTML = katex.renderToString(`\\displaystyle ${latex || "\\square"}`, { throwOnError: false });
+    // Une case laissee vide reste visible, en gris, pour qu'on la voie a remplir.
+    const shown = (latex || "\\placeholder{}").replace(/\\placeholder\{\}/g, "{\\color{#9aa3b2}\\square}");
+    eq.innerHTML = katex.renderToString(`\\displaystyle ${shown}`, { throwOnError: false });
   } catch {
     eq.textContent = latex;
   }

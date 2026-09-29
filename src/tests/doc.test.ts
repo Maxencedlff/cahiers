@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  docPlainText, normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken,
+  absorbTextBoxes, docPlainText, normalizeTokens, parseDoc, serializeDoc, trailingOperand,
+  type DocToken,
 } from "../core/text/doc";
 
 const round = (tokens: DocToken[]) => parseDoc(serializeDoc(tokens));
@@ -64,5 +65,28 @@ describe("texte de page au clavier", () => {
     expect(trailingOperand("vaut 2,5")).toBe("2,5");
     expect(trailingOperand("fin. ")).toBe("");
     expect(trailingOperand("")).toBe("");
+  });
+});
+
+describe("anciennes zones Texte", () => {
+  it("vides : retirees ; pleines : versees dans le texte de la page", () => {
+    const blocks: any[] = [
+      { id: "a", type: "text", content: "", rect: { x: 60, y: 60, w: 780, h: 40 } },
+      { id: "b", type: "text", content: "debut" },
+      { id: "c", type: "text", content: "second *", rect: { x: 60, y: 300, w: 780, h: 40 } },
+      { id: "d", type: "text", content: "premier", rect: { x: 60, y: 200, w: 780, h: 40 } },
+      { id: "e", type: "ink", strokes: [] },
+    ];
+    expect(absorbTextBoxes(blocks, () => "n")).toBe(true);
+    expect(blocks.map((b) => b.id)).toEqual(["b", "e"]);
+    expect(parseDoc(blocks[0].content)).toEqual([
+      { kind: "text", text: "debut" }, { kind: "br" },
+      { kind: "text", text: "premier" }, { kind: "br" },
+      { kind: "text", text: "second *" },
+    ]);
+  });
+
+  it("page sans zone : rien ne bouge", () => {
+    expect(absorbTextBoxes([{ id: "b", type: "text", content: "x" }], () => "n")).toBe(false);
   });
 });

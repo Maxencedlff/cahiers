@@ -15,6 +15,7 @@ import {
 } from "../core/ink/words";
 import { colorOf } from "../core/palette";
 import { TextDoc } from "./textdoc";
+import { absorbTextBoxes } from "../core/text/doc";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -138,6 +139,7 @@ export class PageView {
   }
 
   private buildPage(n: number, page: Page): LoadedPage {
+    const migrated = absorbTextBoxes(page.blocks as never[], uuid);
     const canvas = el("canvas");
     const overlay = el("div", { class: "overlay" });
     const doc = new TextDoc(this.bodyText(page)?.content ?? "", (content) => {
@@ -168,6 +170,7 @@ export class PageView {
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
+    if (migrated) this.queueSave(loaded);
     return loaded;
   }
 

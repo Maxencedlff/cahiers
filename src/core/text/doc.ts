@@ -114,3 +114,29 @@ export function trailingOperand(text: string): string {
   // Un point ou une virgule en fin de phrase ne fait pas partie du nombre.
   return m[0].replace(/^[.,]+/, "").replace(/[.,]+$/, "");
 }
+
+/**
+ * Anciennes zones "Texte" (blocs text avec rect) : elles se posaient
+ * par-dessus la page et cachent desormais le texte tape dessous. Leur
+ * contenu rejoint le texte de la page, dans l'ordre de haut en bas ; les
+ * zones vides disparaissent. Rien n'est perdu. Renvoie true si la page a change.
+ */
+export function absorbTextBoxes(
+  blocks: { type: string; rect?: { y: number }; content?: string; id: string }[],
+  newId: () => string,
+): boolean {
+  const boxes = blocks.filter((b) => b.type === "text" && b.rect);
+  if (!boxes.length) return false;
+  const texts = boxes
+    .sort((a, b) => a.rect!.y - b.rect!.y)
+    .map((b) => (b.content ?? "").trim())
+    .filter(Boolean)
+    .map((t) => serializeDoc([{ kind: "text", text: t }]));
+  for (const b of boxes) blocks.splice(blocks.indexOf(b), 1);
+  if (texts.length) {
+    let body = blocks.find((b) => b.type === "text" && !b.rect);
+    if (!body) { body = { id: newId(), type: "text", content: "" }; blocks.push(body); }
+    body.content = [body.content, ...texts].filter(Boolean).join("\n");
+  }
+  return true;
+}
