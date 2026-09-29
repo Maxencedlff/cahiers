@@ -371,3 +371,46 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 }
 .probe-readout div { background: #f6f7f9; border-radius: 6px; padding: 6px 10px; }
 .probe-readout b { color: var(--accent); }
+
+/* ---------------- texte de la page, facon traitement de texte ---------------- */
+/* --k : echelle de la page (largeur affichee / 900), posee par PageView. */
+.text-doc {
+  position: absolute; left: 0; top: 0; right: 0; min-height: 100%;
+  padding: calc(56px * var(--k, 1)) calc(64px * var(--k, 1));
+  font: calc(19px * var(--k, 1)) / 1.55 "Segoe UI", system-ui, sans-serif;
+  color: #16181d; white-space: pre-wrap; overflow-wrap: anywhere;
+  outline: none; cursor: text; caret-color: var(--accent);
+  -webkit-user-select: text; user-select: text;
+  /* Le doigt et le stylet sont rendus au canvas (PageView.routePointers). */
+  touch-action: none;
+}
+.text-doc math-field {
+  display: inline-block; vertical-align: middle;
+  font-size: 1.05em; padding: 0 2px; margin: 0 1px;
+  border: none; border-radius: 4px; background: transparent;
+  --caret-color: var(--accent); --selection-background-color: #dbe7ff;
+  --contains-highlight-background-color: transparent;
+  --primary: var(--accent);
+}
+.text-doc math-field:focus-within { background: #eef3ff; outline: 1px solid #c7d6f5; }
+.text-doc math-field::part(menu-toggle),
+.text-doc math-field::part(virtual-keyboard-toggle) { display: none; }
+.text-doc math-field::part(content) { padding: 1px 0; }
+
+.mathbar {
+  display: flex; align-items: center; gap: 3px; flex-wrap: nowrap; overflow-x: auto;
+  padding: 3px 8px; background: #fafbfc; border-bottom: 1px solid var(--line);
+  scrollbar-width: thin;
+}
+.mathbar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+.mathbar .mathkey {
+  flex: none; min-width: 44px; min-height: 44px; padding: 0 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px;
+}
+.mathbar .mathkey:hover { border-color: var(--accent); background: #f3f7ff; }
+.mathbar .mathkey.eq { font-weight: 600; color: var(--accent); }
+.mathbar .mathkey .katex { font-size: 1em; }
+.text-doc .eq { display: inline-block; padding: 0 2px; border-radius: 4px; cursor: pointer; user-select: none; }
+.text-doc .eq:hover { background: #f1f5ff; }
+.text-doc .eq .katex { font-size: 1.08em; }

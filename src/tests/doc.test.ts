@@ -1,0 +1,68 @@
+import { describe, expect, it } from "vitest";
+import {
+  docPlainText, normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken,
+} from "../core/text/doc";
+
+const round = (tokens: DocToken[]) => parseDoc(serializeDoc(tokens));
+
+describe("texte de page au clavier", () => {
+  it("texte simple et retours a la ligne", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "Definition" }, { kind: "br" }, { kind: "text", text: "suite" },
+    ];
+    expect(serializeDoc(t)).toBe("Definition\nsuite");
+    expect(round(t)).toEqual(t);
+  });
+
+  it("formule en ligne", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "on a " },
+      { kind: "math", latex: "\\frac{1}{2}+\\int_0^{+\\infty}e^{-x}\\,dx" },
+      { kind: "text", text: " donc" },
+    ];
+    expect(serializeDoc(t)).toBe("on a $\\frac{1}{2}+\\int_0^{+\\infty}e^{-x}\\,dx$ donc");
+    expect(round(t)).toEqual(t);
+  });
+
+  it("echappe les caracteres speciaux du texte", () => {
+    const t: DocToken[] = [{ kind: "text", text: "prix 3$ * 2 \\ fin" }];
+    expect(round(t)).toEqual(t);
+  });
+
+  it("dollar dans une formule", () => {
+    const t: DocToken[] = [{ kind: "math", latex: "\\$5" }];
+    expect(round(t)).toEqual(t);
+  });
+
+  it("gras et italique", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "Theoreme", bold: true },
+      { kind: "text", text: " de " },
+      { kind: "text", text: "Rolle", italic: true },
+    ];
+    expect(serializeDoc(t)).toBe("**Theoreme** de *Rolle*");
+    expect(round(t)).toEqual(t);
+  });
+
+  it("un $ isole reste du texte", () => {
+    expect(parseDoc("5 $ par mois")).toEqual([{ kind: "text", text: "5 $ par mois" }]);
+  });
+
+  it("fusionne et nettoie", () => {
+    expect(normalizeTokens([
+      { kind: "text", text: "a" }, { kind: "text", text: "b" },
+      { kind: "math", latex: " " }, { kind: "text", text: "" },
+    ])).toEqual([{ kind: "text", text: "ab" }]);
+  });
+
+  it("texte brut pour la recherche", () => {
+    expect(docPlainText("**Aire** $\\pi r^2$")).toBe("Aire \\pi r^2");
+  });
+
+  it("numerateur repris avant Alt+F", () => {
+    expect(trailingOperand("on pose 3x")).toBe("3x");
+    expect(trailingOperand("vaut 2,5")).toBe("2,5");
+    expect(trailingOperand("fin. ")).toBe("");
+    expect(trailingOperand("")).toBe("");
+  });
+});

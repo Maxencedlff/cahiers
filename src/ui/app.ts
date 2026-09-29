@@ -2,6 +2,8 @@ import { el, clear, toast, askText, askFields, confirmDialog, pick } from "./dom
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
+import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
+import { insertMathTemplate, isEditingDoc } from "./textdoc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE } from "../core/palette";
 import type { ColorKey, ToolKind } from "../core/types";
@@ -333,7 +335,11 @@ export class App {
 
     clear(this.main);
     const dividers = await this.repo.listDividers(tab.notebook);
-    this.main.append(this.buildDividerBar(tab, dividers), this.buildToolbar());
+    this.main.append(
+      this.buildDividerBar(tab, dividers),
+      this.buildToolbar(),
+      buildMathBar(() => this.activeTab()?.view?.activeDoc),
+    );
 
     const panes = el("div", { class: "panes" });
     panes.append(this.buildPane(tab, false));
@@ -468,11 +474,11 @@ export class App {
       }, label);
 
     bar.append(
-      toolButton("pen", "Stylo", "Ecrire"),
-      toolButton("highlighter", "Surligneur", "Surligner"),
-      toolButton("eraser", "Gomme", "Effacer les traits touches"),
-      toolButton("region", "Zone math", "Entourer une formule manuscrite pour la convertir"),
-      toolButton("textregion", "Zone texte", "Entourer du texte manuscrit pour le convertir"),
+      toolButton("pen", "Stylo", "Ecrire (Alt+E). La souris tape du texte."),
+      toolButton("highlighter", "Surligneur", "Surligner (Alt+H)"),
+      toolButton("eraser", "Gomme", "Effacer les traits touches (Alt+G)"),
+      toolButton("region", "Zone math", "Entourer une formule manuscrite pour la convertir (Alt+Z)"),
+      toolButton("textregion", "Zone texte", "Entourer du texte manuscrit pour le convertir (Alt+T)"),
       el("div", { class: "sep" }),
     );
 
@@ -480,7 +486,7 @@ export class App {
     for (const p of PALETTE) {
       bar.append(el("button", {
         class: `swatch${this.color === p.key ? " on" : ""}`,
-        title: `${p.label} (${p.shortcut})`,
+        title: `${p.label} (Alt+${p.shortcut})`,
         onclick: () => { this.color = p.key; this.persist(); this.paintToolbar(); },
       }, el("i", { style: { background: p.ink } })));
     }
@@ -513,10 +519,6 @@ export class App {
         }, this.touchWrites ? "Doigt : ecrit" : "Doigt : navigue"),
         el("div", { class: "sep" }),
       ]),
-      el("button", {
-        onclick: () => view()?.addTextBlock(),
-        title: "Bloc de texte au clavier (Ctrl+T)",
-      }, "Texte"),
       el("button", {
         title: "Photo du tableau, redressee et lue",
         onclick: () => void this.importImage(),
@@ -672,8 +674,16 @@ export class App {
 
   private onKey(e: KeyboardEvent): void {
     if (this.calculator?.handleKey(e)) { e.preventDefault(); return; }
-    const typing = ["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName);
+    const inDoc = isEditingDoc(e.target);
+    const typing = inDoc || ["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName);
     const view = this.activeTab()?.view;
+
+    // Alt : formules, outils et couleurs. Les lettres seules tapent du texte,
+    // comme dans Word ; les raccourcis passent donc tous par Alt.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && this.screen === "notebook"
+        && !document.querySelector(".backdrop")) {
+      if (this.onAltKey(e, inDoc)) { e.preventDefault(); return; }
+    }
 
     if (e.ctrlKey || e.metaKey) {
       const k = e.key.toLowerCase();
@@ -683,7 +693,6 @@ export class App {
       if (k === "z" && !typing) { e.preventDefault(); view?.undo(); return; }
       if (k === "y" && !typing) { e.preventDefault(); view?.redo(); return; }
       if (k === "f" && !typing) { e.preventDefault(); view?.addFlag(); return; }
-      if (k === "t") { e.preventDefault(); view?.addTextBlock(); return; }
       if (k === "r") {
         e.preventDefault();
         this.autoConvert = !this.autoConvert;
@@ -722,6 +731,8 @@ export class App {
       return;
     }
 
+    // Echap dans le texte rend la main a la page ; un second Echap va au menu.
+    if (inDoc && e.key === "Escape") { (document.activeElement as HTMLElement | null)?.blur(); return; }
     if (typing) return;
     // Une fenetre de dialogue ouverte garde le clavier : Echap la ferme, et
     // ne doit pas en plus renvoyer au menu.
@@ -730,18 +741,45 @@ export class App {
     if (e.key === "Escape" && this.screen !== "menu") { e.preventDefault(); void this.showMenu(); return; }
     if (this.screen !== "notebook") return;
 
-    if (e.key === "PageDown" || e.key === "ArrowRight") { e.preventDefault(); void view?.next(); return; }
-    if (e.key === "PageUp" || e.key === "ArrowLeft") { e.preventDefault(); void view?.prev(); return; }
+    if (e.key === "PageDown") { e.preventDefault(); void view?.next(); return; }
+    if (e.key === "PageUp") { e.preventDefault(); void view?.prev(); return; }
 
-    // Couleurs 1 a 5, dans l'ordre de la palette.
-    const idx = PALETTE.findIndex((p) => p.shortcut === e.key);
-    if (idx >= 0) { this.color = PALETTE[idx].key; this.persist(); this.paintToolbar(); return; }
+    // Taper n'importe ou : le clavier va au texte de la page, sans cliquer
+    // ni inserer de zone. La touche continue sa route vers le texte.
+    if (!e.altKey && (e.key.length === 1 || e.key === "Enter" || e.key === "Backspace")) {
+      view?.focusText();
+      if (e.key === "Enter") { e.preventDefault(); document.execCommand("insertLineBreak"); }
+    }
+  }
+
+  /** Raccourcis Alt. Renvoie true si la touche a ete prise. */
+  private onAltKey(e: KeyboardEvent, inDoc: boolean): boolean {
+    const view = this.activeTab()?.view;
+    // Alt+= : nouvelle formule, comme l'equation de Word.
+    if (e.key === "=" && !e.shiftKey) {
+      if (!inDoc) view?.focusText();
+      insertMathTemplate("", view?.activeDoc);
+      return true;
+    }
+    const k = e.key.toLowerCase();
+    const tpl = MATH_TEMPLATES.find((t) => t.key === k);
+    if (tpl) {
+      if (!inDoc) view?.focusText();
+      insertMathTemplate(tpl.insert, view?.activeDoc);
+      return true;
+    }
+    // Couleurs Alt+1 a 5, dans l'ordre de la palette. e.code : en AZERTY
+    // la rangee du haut donne & e " ' ( sans Maj.
+    const digit = /^Digit([1-5])$/.exec(e.code)?.[1];
+    const idx = digit ? PALETTE.findIndex((p) => p.shortcut === digit) : -1;
+    if (idx >= 0) { this.color = PALETTE[idx].key; this.persist(); this.paintToolbar(); return true; }
 
     const tools: Record<string, ToolKind | "region" | "textregion"> = {
-      s: "pen", h: "highlighter", g: "eraser", z: "region", a: "textregion",
+      KeyE: "pen", KeyH: "highlighter", KeyG: "eraser", KeyZ: "region", KeyT: "textregion",
     };
-    const t = tools[e.key.toLowerCase()];
-    if (t) { this.tool = t; this.persist(); this.paintToolbar(); }
+    const t = tools[e.code];
+    if (t) { this.tool = t; this.persist(); this.paintToolbar(); return true; }
+    return false;
   }
 
   /** Retour au meme endroit apres un passage par le menu (section 5). */

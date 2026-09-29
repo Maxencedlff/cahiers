@@ -4,7 +4,7 @@ import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
 import { strokeBounds, unionBounds } from "../core/ink/stroke";
 import type {
-  Block, ColorKey, InkBlock, MathBlock, Page, Stroke, ToolKind,
+  Block, ColorKey, InkBlock, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
 import { uuid } from "../core/id";
 import type { Repo } from "../core/storage/repo";
@@ -14,6 +14,7 @@ import {
   LINE_HEIGHT, type PlacedWord,
 } from "../core/ink/words";
 import { colorOf } from "../core/palette";
+import { TextDoc } from "./textdoc";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -48,6 +49,8 @@ interface LoadedPage {
   sheet: HTMLElement;
   /** Derniere mise en page des mots tapes, pour retrouver le mot touche. */
   placed?: PlacedWord[];
+  /** Texte tape au clavier, toujours present sur la page. */
+  doc: TextDoc;
 }
 
 /**
@@ -137,14 +140,17 @@ export class PageView {
   private buildPage(n: number, page: Page): LoadedPage {
     const canvas = el("canvas");
     const overlay = el("div", { class: "overlay" });
-    const sheet = el("div", { class: "sheet" }, canvas, overlay);
+    const doc = new TextDoc(this.bodyText(page)?.content ?? "", (content) => {
+      this.setBodyText(loaded, content);
+    });
+    const sheet = el("div", { class: "sheet" }, canvas, doc.root, overlay);
     // Les numeros de page restent affiches dans les deux modes (section 5).
     const wrap = el("div", { class: "page-wrap", dataset: { page: String(n) } },
       sheet,
       el("div", { class: "page-num" }, `${this.divider} p. ${n}`),
     );
 
-    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet };
+    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet, doc };
 
     const surface = new InkSurface(canvas, {
       getTool: this.host.getTool,
@@ -158,10 +164,65 @@ export class PageView {
       ),
     });
     loaded.surface = surface;
+    this.routePointers(loaded);
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
     return loaded;
+  }
+
+  /* ---------------- texte au clavier ---------------- */
+
+  /** Le texte tape de la page : un bloc `text` sans cadre. */
+  private bodyText(page: Page): TextBlock | undefined {
+    return page.blocks.find((b): b is TextBlock => b.type === "text" && !b.rect);
+  }
+
+  private setBodyText(loaded: LoadedPage, content: string): void {
+    let body = this.bodyText(loaded.page);
+    if (!body) {
+      if (!content) return;
+      body = { id: uuid(), type: "text", content: "" };
+      loaded.page.blocks.push(body);
+    }
+    if (body.content === content) return;
+    body.content = content;
+    this.fitSheet(loaded);
+    this.queueSave(loaded);
+  }
+
+  /**
+   * La couche texte couvre la page et passe devant l'encre. La souris y
+   * place le curseur ; le stylet et le doigt sont rendus au canvas, sinon
+   * on ne pourrait plus ecrire ni defiler sur une page qui contient du texte.
+   * Les outils autres que le stylo (gomme, surligneur, zones) gardent la
+   * souris pour l'encre.
+   */
+  private routePointers(loaded: LoadedPage): void {
+    loaded.doc.root.addEventListener("pointerdown", (e) => {
+      const tool = this.host.getTool();
+      const toInk = e.pointerType === "pen" || e.pointerType === "touch"
+        || (e.pointerType === "mouse" && e.button === 0 && tool !== "pen");
+      if (!toInk) return;
+      e.preventDefault();
+      loaded.surface?.forwardDown(e);
+    });
+  }
+
+  /** La feuille s'allonge quand le texte depasse le bas de la page. */
+  private fitSheet(loaded: LoadedPage): void {
+    const pageH = (loaded.sheet.clientWidth || PAGE_W) * (PAGE_H / PAGE_W);
+    loaded.sheet.style.minHeight = `${Math.max(pageH, loaded.doc.root.scrollHeight)}px`;
+  }
+
+  /** Donne le clavier au texte de la page en cours. */
+  focusText(): void {
+    this.activePage()?.doc.focus();
+  }
+
+  /** Texte de la page en cours, pour poser une formule depuis le ruban. */
+  get activeDoc(): TextDoc | undefined {
+    return this.activePage()?.doc;
   }
 
   /**
@@ -272,8 +333,10 @@ export class PageView {
     const width = Math.min(900, Math.max(280, this.root.clientWidth - 36));
     for (const p of this.list) {
       p.wrap.style.maxWidth = `${width}px`;
-      p.sheet.style.height = `${Math.round(width * (PAGE_H / PAGE_W))}px`;
+      p.sheet.style.height = "";
+      p.sheet.style.setProperty("--k", String(width / PAGE_W));
       p.surface?.layout(width);
+      this.fitSheet(p);
       this.paintOverlay(p);
     }
   }
@@ -484,6 +547,8 @@ export class PageView {
         return place(box, block.rect);
       }
       case "text": {
+        // Le texte de la page vit dans sa propre couche (TextDoc).
+        if (!block.rect) return null;
         const box = el("div", { class: "block-box text" });
         const area = el("textarea", { class: "block-text-edit", rows: "1" });
         area.value = block.content;
@@ -944,7 +1009,12 @@ export class PageView {
     const loaded = this.list.find((p) => p.number === entry.number);
     if (!loaded) return;
     to.push({ number: entry.number, blocks: JSON.stringify(loaded.page.blocks) });
-    loaded.page.blocks = JSON.parse(entry.blocks) as Block[];
+    // Le texte tape a son propre Ctrl+Z (celui de l'editeur) : annuler un
+    // trait ne doit pas ramener le texte d'il y a cinq minutes.
+    const body = this.bodyText(loaded.page);
+    loaded.page.blocks = (JSON.parse(entry.blocks) as Block[])
+      .filter((b) => !(b.type === "text" && !b.rect));
+    if (body) loaded.page.blocks.push(body);
     this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);

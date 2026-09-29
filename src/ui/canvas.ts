@@ -143,6 +143,15 @@ export class InkSurface {
 
   /* ---------------- evenements ---------------- */
 
+  /**
+   * Pointeur recu par une couche posee au-dessus (le texte de la page) et
+   * rendu a l'encre. La capture bascule sur le canvas : la suite du trait
+   * y arrive directement.
+   */
+  forwardDown(e: PointerEvent): void {
+    this.onDown(e);
+  }
+
   private onDown = (e: PointerEvent) => {
     if (this.roleOf(e) === "navigate") { this.startPan(e); return; }
     if (this.roleOf(e) !== "write") return;
