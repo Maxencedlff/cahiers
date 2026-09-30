@@ -325,6 +325,17 @@ class Parser {
 }
 
 /**
+ * Calcul sans variable ("3/2", "2^10", "5 * 3 = 15") : garde seulement
+ * s'il a une fraction, une puissance, un produit ou une relation, et si ce
+ * n'est pas une date ("30/09", "29/09/2026") ni un simple "1 - 2".
+ */
+function numericOk(src: string, tex: string): boolean {
+  const s = src.replace(/\s+/g, "");
+  if (/^\d+\/\d+\/\d+$/.test(s) || /^\d{2}\/\d{2}$/.test(s) || /^0\d\//.test(s)) return false;
+  return /\\frac|\^|\\cdot|=|<|>|\\leq|\\geq|\\approx|\\neq|\\ll|\\gg|\\to|Rightarrow/.test(tex);
+}
+
+/**
  * Formules d'une ligne de texte brut, de gauche a droite, sans
  * chevauchement. Une formule a au moins un operateur et une variable.
  */
@@ -340,10 +351,10 @@ export function findFormulas(line: string): FoundFormula[] {
     if (t.t === "op" && (t.s === "-" || t.s === "−") && prev && (prev.t === "id" || prev.t === "num")) { k++; continue; }
     const p = new Parser(toks, k);
     const node = p.relation();
-    if (node && node.ops >= 1 && node.vars >= 1) {
+    let last = p.pos - 1;
+    while (last > k && toks[last].t === "sp") last--;
+    if (node && node.ops >= 1 && (node.vars >= 1 || numericOk(line.slice(t.a, toks[last].b), node.tex))) {
       // Fin = dernier jeton non blanc consomme.
-      let last = p.pos - 1;
-      while (last > k && toks[last].t === "sp") last--;
       const end = toks[last].b;
       // Un point final de phrase reste du texte.
       out.push({ start: t.a, end, latex: node.tex.replace(/\s+/g, " ").trim() });

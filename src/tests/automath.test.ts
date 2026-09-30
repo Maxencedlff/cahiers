@@ -60,6 +60,15 @@ describe("formules automatiques", () => {
     expect(one("Pertes = Pf − Pu").src).toBe("Pf − Pu");
   });
 
+  it("calculs sans variable", () => {
+    expect(one("3/2").tex).toBe("\\frac{3}{2}");
+    expect(one("donc 1/2 = 0,5").tex).toBe("\\frac{1}{2} = 0{,}5");
+    expect(one("2^10 = 1024").tex).toBe("2^{10} = 1024");
+    for (const line of ["Séance du 30/09", "le 29/09/2026", "pages 1 - 2", "en 1991"]) {
+      expect(findFormulas(line), line).toEqual([]);
+    }
+  });
+
   it("symboles deja tapes et grecs", () => {
     expect(one("η = Pu / Pf < 1").tex).toBe("\\eta = \\frac{P_u}{P_f} < 1");
     expect(one("Ru >> R").tex).toBe("R_u \\gg R");
