@@ -37,7 +37,7 @@ const SYMBOLS: [string, string][] = [
   ["\\to", "\\to"], ["\\Rightarrow", "\\Rightarrow"], ["\\Leftrightarrow", "\\Leftrightarrow"],
   ["\\leq", "\\leq"], ["\\geq", "\\geq"], ["\\neq", "\\neq"], ["\\approx", "\\approx"],
   ["\\in", "\\in"], ["\\forall", "\\forall"], ["\\exists", "\\exists"], ["\\mathbb{R}", "\\mathbb{R}"],
-  ["\\times", "\\times"], ["\\pm", "\\pm"], ["\\partial", "\\partial"],
+  ["\\times", "\\times"], ["\\pm", "\\pm"], ["\\partial", "\\partial"], ["\\Omega", "\\Omega"], ["\\eta", "\\eta"],
 ];
 
 /**
