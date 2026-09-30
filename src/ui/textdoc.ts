@@ -5,6 +5,7 @@ import { el } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import { normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken } from "../core/text/doc";
+import { findFormulas } from "../core/text/automath";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
 // fonctionne hors ligne et en amphi.
@@ -59,6 +60,10 @@ export interface DocImages {
  * pour le texte normal (noir). Reglee par la barre d'outils.
  */
 let typingColor: ColorKey | null = null;
+
+/** Formules reperees et mises en forme a chaque retour a la ligne. */
+let autoMath = true;
+export function setAutoMath(on: boolean): void { autoMath = on; }
 
 export function setTypingColor(color: ColorKey | null): void {
   typingColor = color;
@@ -548,12 +553,48 @@ export class TextDoc {
 
   /* ---------------- clavier ---------------- */
 
+  /**
+   * Formules de la ligne qu'on vient de taper, mises en forme : le texte
+   * "Vs = Vz - Vbe" devient la formule V_s = V_z - V_{be}. Seul le texte
+   * avant le curseur est lu, le reste de la phrase ne bouge pas.
+   */
+  private convertLine(): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return;
+    if (node.parentElement?.closest(".eq")) return;
+    const text = node.textContent ?? "";
+    const before = text.slice(0, r.startOffset);
+    const found = findFormulas(before);
+    if (!found.length) return;
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    for (const f of found) {
+      if (f.start > pos) frag.append(before.slice(pos, f.start));
+      frag.append(makeEq(f.latex), anchor());
+      pos = f.end;
+    }
+    const rest = before.slice(pos) + text.slice(r.startOffset);
+    const tail = document.createTextNode(rest || "\u200b");
+    frag.append(tail);
+    node.parentNode?.replaceChild(frag, node);
+    const caret = document.createRange();
+    caret.setStart(tail, rest ? before.length - pos : 1);
+    caret.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+    this.emit();
+  }
+
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
     // Retour a la ligne simple : pas de <div> par ligne, le texte reste plat
     // et se relit sans surprise.
     if (e.key === "Enter") {
       e.preventDefault();
+      if (autoMath) this.convertLine();
       document.execCommand("insertLineBreak");
       return;
     }

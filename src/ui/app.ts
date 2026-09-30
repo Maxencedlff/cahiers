@@ -3,7 +3,7 @@ import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
-import { insertMathTemplate, isEditingDoc, setTypingColor } from "./textdoc";
+import { insertMathTemplate, isEditingDoc, setAutoMath, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE } from "../core/palette";
 import type { ColorKey, ToolKind } from "../core/types";
@@ -82,6 +82,7 @@ export class App {
     setTypingColor(this.textColor);
     this.width = this.settings.width;
     this.autoConvert = this.settings.autoConvert;
+    setAutoMath(this.settings.autoMath);
     if (this.autoConvert) this.renderMode = "clean";
 
     // Les cles de la machine passent devant celles du navigateur : elles
@@ -564,6 +565,17 @@ export class App {
       }, "Photo"),
       el("button", { onclick: () => view()?.addFlag(), title: "Pas compris (Ctrl+F)" }, "Pas compris"),
       el("button", { onclick: () => void this.toggleCalculator(), title: "Calculatrice (Ctrl+L)" }, "Calculatrice"),
+      el("button", {
+        class: this.settings.autoMath ? "on" : "",
+        title: "Formules tapees (Vs = Vz - Vbe, a/b, beta...) mises en forme a chaque Entree",
+        onclick: () => {
+          this.settings.autoMath = !this.settings.autoMath;
+          setAutoMath(this.settings.autoMath);
+          saveSettings(this.settings);
+          this.paintToolbar();
+          toast(this.settings.autoMath ? "Formules automatiques activees" : "Formules automatiques coupees");
+        },
+      }, "Formules auto"),
       el("button", {
         onclick: () => void view()?.exportPdf(),
         title: "Toutes les pages de l'intercalaire, puis « Enregistrer au format PDF »",

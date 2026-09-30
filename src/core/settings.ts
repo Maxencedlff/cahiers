@@ -15,6 +15,8 @@ export interface Settings {
   textColor: ColorKey | null;
   /** Calculatrice ouverte dans la colonne de droite. */
   calcOpen: boolean;
+  /** Formules tapees au clavier mises en forme a chaque retour a la ligne. */
+  autoMath: boolean;
   myscript: { applicationKey: string; hmacKey: string };
 }
 
@@ -26,6 +28,7 @@ const DEFAULTS: Settings = {
   width: 2.2,
   autoConvert: false,
   calcOpen: true,
+  autoMath: true,
   textColor: null,
   myscript: { applicationKey: "", hmacKey: "" },
 };
