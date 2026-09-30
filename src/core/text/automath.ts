@@ -30,7 +30,7 @@ type Tok =
 
 const GREEK_NAMES: Record<string, string> = {
   alpha: "\\alpha", beta: "\\beta", gamma: "\\gamma", delta: "\\delta",
-  epsilon: "\\varepsilon", eta: "\\eta", theta: "\\theta", lambda: "\\lambda",
+  epsilon: "\\varepsilon", eps: "\\varepsilon", eta: "\\eta", theta: "\\theta", lambda: "\\lambda",
   mu: "\\mu", pi: "\\pi", rho: "\\rho", sigma: "\\sigma", tau: "\\tau",
   phi: "\\varphi", omega: "\\omega",
   Gamma: "\\Gamma", Delta: "\\Delta", Theta: "\\Theta", Lambda: "\\Lambda",
@@ -261,6 +261,16 @@ class Parser {
     const base = this.atom();
     if (!base) return null;
     const t = this.toks[this.i];
+    // Entrees d'AOP : "V+", "V-" colles et suivis d'un blanc, d'une
+    // relation ou de la fin s'ecrivent en exposant (V^+, V^-).
+    if (t?.t === "op" && (t.s === "+" || t.s === "-" || t.s === "−") && base.vars === 1) {
+      const n = this.toks[this.i + 1];
+      const ends = !n || n.t === "sp" || n.t === "other" || (n.t === "op" && (n.s in REL || n.s === ")"));
+      if (ends) {
+        this.i++;
+        return { tex: `${base.tex}^{${t.s === "+" ? "+" : "-"}}`, ops: base.ops + 1, vars: base.vars };
+      }
+    }
     if (t?.t === "op" && (t.s === "²" || t.s === "³")) {
       this.i++;
       return { tex: `${base.tex}^${t.s === "²" ? 2 : 3}`, ops: base.ops + 1, vars: base.vars };

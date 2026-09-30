@@ -69,6 +69,14 @@ describe("formules automatiques", () => {
     }
   });
 
+  it("entrees d'AOP en exposant", () => {
+    expect(one("V+ = V-").tex).toBe("V^{+} = V^{-}");
+    expect(one("eps = V+ - V-").tex).toBe("\\varepsilon = V^{+} - V^{-}");
+    expect(one("V+ = Vs.R1/(R1+R2)").tex).toBe("V^{+} = \\frac{V_s \\cdot R_1}{R_1 + R_2}");
+    expect(one("Vs = V+ ").tex).toBe("V_s = V^{+}");
+    expect(one("a = b+c").tex).not.toContain("^");
+  });
+
   it("symboles deja tapes et grecs", () => {
     expect(one("η = Pu / Pf < 1").tex).toBe("\\eta = \\frac{P_u}{P_f} < 1");
     expect(one("Ru >> R").tex).toBe("R_u \\gg R");
