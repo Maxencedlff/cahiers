@@ -34,7 +34,7 @@ const GREEK_NAMES: Record<string, string> = {
   mu: "\\mu", pi: "\\pi", rho: "\\rho", sigma: "\\sigma", tau: "\\tau",
   phi: "\\varphi", omega: "\\omega",
   Gamma: "\\Gamma", Delta: "\\Delta", Theta: "\\Theta", Lambda: "\\Lambda",
-  Pi: "\\Pi", Sigma: "\\Sigma", Phi: "\\Phi", Omega: "\\Omega",
+  Sigma: "\\Sigma", Phi: "\\Phi", Omega: "\\Omega",
 };
 
 const GREEK_CHARS: Record<string, string> = {
@@ -375,4 +375,24 @@ export function findFormulas(line: string): FoundFormula[] {
     k++;
   }
   return out;
+}
+
+/**
+ * Variables tapees dans l'editeur de formules ("Ru", "Vbe", "Vbatt") : meme
+ * convention que le texte, la suite passe en indice (R_{u}, V_{be}). Les
+ * commandes LaTeX et le contenu de \mathrm{}, \text{} ne sont pas touches.
+ */
+export function subscriptVars(latex: string): string {
+  const protectedRe = /\\(?:mathrm|text|operatorname|mathbb)\{[^}]*\}|\\[A-Za-z]+/g;
+  let out = "", last = 0, m: RegExpExecArray | null;
+  const fix = (part: string) => part.replace(
+    /(^|[^A-Za-z_^])(?<![_^]\{)([A-Z])([a-z]{1,5})(?![A-Za-z])/g,
+    (all, pre: string, head: string, rest: string) =>
+      STOP.has((head + rest).toLowerCase()) ? all : `${pre}${head}_{${rest}}`,
+  );
+  while ((m = protectedRe.exec(latex))) {
+    out += fix(latex.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + fix(latex.slice(last));
 }

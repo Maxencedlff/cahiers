@@ -18,6 +18,7 @@ export const SYMBOLS: [string, string][] = [
   ["\\leq", "\\leq"], ["\\geq", "\\geq"], ["\\neq", "\\neq"], ["\\approx", "\\approx"],
   ["\\in", "\\in"], ["\\forall", "\\forall"], ["\\exists", "\\exists"], ["\\mathbb{R}", "\\mathbb{R}"],
   ["\\times", "\\times"], ["\\pm", "\\pm"], ["\\partial", "\\partial"], ["\\Omega", "\\Omega"], ["\\eta", "\\eta"],
+  ["\\varepsilon", "\\varepsilon"],
 ];
 
 const KEY = "cahiers.symbols.v1";

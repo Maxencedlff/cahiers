@@ -5,7 +5,7 @@ import { el } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import { normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken } from "../core/text/doc";
-import { findFormulas } from "../core/text/automath";
+import { findFormulas, subscriptVars } from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
@@ -401,6 +401,11 @@ export class TextDoc {
     mf.smartFence = false;
     mf.value = eq.dataset.latex ?? "";
     eq.replaceWith(mf);
+    // Reglages a poser une fois le champ dans la page (sinon MathLive leve
+    // "Mathfield not mounted"). La barre d'espace fait un vrai espace.
+    mf.mathModeSpace = "\\;";
+    // Raccourcis en minuscules seulement : "PI" reste P fois I.
+    mf.inlineShortcuts = { ...mf.inlineShortcuts, eps: "\\varepsilon", pi: "\\pi" };
     this.field = mf;
     editingDoc = this;
     lastDoc = this;
@@ -474,7 +479,7 @@ export class TextDoc {
     if (!mf) return;
     this.field = null;
     if (editingDoc === this) editingDoc = null;
-    const latex = mf.getValue("latex").trim();
+    const latex = subscriptVars(mf.getValue("latex").trim());
     this.root.contentEditable = "true";
 
     let mark: Node;
@@ -598,6 +603,68 @@ export class TextDoc {
     this.placeFormulas(node as Text, before, found, after, sel);
   }
 
+  /**
+   * "/" tape juste apres une expression : ouvre la formule avec la fraction
+   * deja posee, numerateur rempli, curseur au denominateur. Faux si rien ne
+   * peut servir de numerateur (le "/" s'ecrit alors normalement).
+   */
+  private slashToFraction(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    if (node.parentElement?.closest(".eq")) return false;
+    const text = node.textContent ?? "";
+    const before = text.slice(0, r.startOffset).replace(/\u200b/g, " ");
+    const after = text.slice(r.startOffset);
+    // Denominateur provisoire : une variable que personne n'ecrit.
+    const DEN = "ZDEN";
+    const attempt = (line: string) => findFormulas(`${line}/${DEN}`)
+      .find((f) => f.end === line.length + 1 + DEN.length && f.latex.includes("Z_{DEN}"));
+
+    // Formule convertie juste avant ("Id =" deja mis en forme) : on la reprend.
+    let prev: Node | null = node.previousSibling;
+    const between: Node[] = [];
+    while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/[\u200b\s]/g, "")) {
+      between.push(prev);
+      prev = prev.previousSibling;
+    }
+    const prevEq = prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src ? prev : null;
+    let found = undefined as ReturnType<typeof attempt>;
+    let line = before;
+    if (prevEq) {
+      const joined = (prevEq.dataset.src ?? "") + " " + before.replace(/^\s+/, "");
+      const f = attempt(joined);
+      if (f && f.start === 0) { found = f; line = joined; }
+    }
+    const merged = !!found;
+    if (!found) found = attempt(before);
+    if (!found) return false;
+    // "28/09/2026" : une date reste du texte (un chiffre seul, "3/", fait
+    // bien une fraction).
+    const num = line.slice(found.start);
+    if (/^[\d/\s]+$/.test(num) && /\d{2}/.test(num)) return false;
+
+    const prevLatex = merged ? prevEq?.dataset.latex ?? "" : "";
+    if (merged && prevEq) {
+      for (const b of between) b.parentNode?.removeChild(b);
+      prevEq.remove();
+    }
+    const head = document.createTextNode(merged ? "" : before.slice(0, found.start));
+    const eq = makeEq("");
+    const tail = document.createTextNode("\u200b" + after);
+    const parent = node.parentNode;
+    if (!parent) return false;
+    parent.insertBefore(head, node);
+    parent.insertBefore(eq, node);
+    parent.insertBefore(tail, node);
+    parent.removeChild(node);
+    recordLatex(found.latex.replace("Z_{DEN}", ""), prevLatex);
+    this.editEq(eq, "end", found.latex.replace("Z_{DEN}", "#?"));
+    return true;
+  }
+
   /** Remplace le noeud texte par texte + formules, curseur a la fin de `line`. */
   private placeFormulas(node: Text, line: string, found: ReturnType<typeof findFormulas>, after: string, sel: Selection, prevLatex = ""): void {
     const frag = document.createDocumentFragment();
@@ -631,6 +698,11 @@ export class TextDoc {
       if (autoMath) this.convertLine();
       document.execCommand("insertLineBreak");
       return;
+    }
+    // "/" : la fraction s'ouvre tout de suite, ce qui precede au numerateur
+    // et le curseur au denominateur. On voit ou l'on ecrit.
+    if (e.key === "/" && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (this.slashToFraction()) { e.preventDefault(); return; }
     }
     // Espace : la formule qu'on vient de finir se met en forme.
     if (e.key === " " && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {

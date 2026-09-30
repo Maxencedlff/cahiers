@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findFormulas } from "../core/text/automath";
+import { findFormulas, subscriptVars } from "../core/text/automath";
 
 const one = (line: string) => {
   const f = findFormulas(line);
@@ -77,10 +77,30 @@ describe("formules automatiques", () => {
     expect(one("a = b+c").tex).not.toContain("^");
   });
 
+  it("pi et eps en minuscules seulement", () => {
+    expect(one("P = pi.R").tex).toBe("P = \\pi \\cdot R");
+    expect(one("P = PI").tex).toBe("P = P_I");
+    expect(one("P = Pi").tex).toBe("P = P_i");
+    expect(one("eps = 0").tex).toBe("\\varepsilon = 0");
+  });
+
   it("symboles deja tapes et grecs", () => {
     expect(one("η = Pu / Pf < 1").tex).toBe("\\eta = \\frac{P_u}{P_f} < 1");
     expect(one("Ru >> R").tex).toBe("R_u \\gg R");
     expect(one("iD < 0 <=> vbatt > Vz").tex).toBe("i_D < 0 \\Leftrightarrow v_{batt} > V_z");
     expect(one("Pc = (vbatt − Vz)² / R").tex).toBe("P_c = \\frac{\\left(v_{batt} - V_z\\right)^2}{R}");
+  });
+});
+
+describe("variables de l'editeur de formules", () => {
+  it("Ru, Vbe, Vbatt passent en indice", () => {
+    expect(subscriptVars("I_{d}=\\frac{V_{z}-V_{be}}{\\beta\;Ru}")).toBe("I_{d}=\\frac{V_{z}-V_{be}}{\\beta\;R_{u}}");
+    expect(subscriptVars("Vbatt>Vz")).toBe("V_{batt}>V_{z}");
+  });
+  it("commandes, unites et mots ne bougent pas", () => {
+    expect(subscriptVars("\\Delta+\\Omega")).toBe("\\Delta+\\Omega");
+    expect(subscriptVars("5\\,\\mathrm{Hz}")).toBe("5\\,\\mathrm{Hz}");
+    expect(subscriptVars("\\text{Donc }x")).toBe("\\text{Donc }x");
+    expect(subscriptVars("R_{u}^{Ab}")).toBe("R_{u}^{Ab}");
   });
 });
