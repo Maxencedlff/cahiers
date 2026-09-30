@@ -564,6 +564,10 @@ export class App {
       }, "Photo"),
       el("button", { onclick: () => view()?.addFlag(), title: "Pas compris (Ctrl+F)" }, "Pas compris"),
       el("button", { onclick: () => void this.toggleCalculator(), title: "Calculatrice (Ctrl+L)" }, "Calculatrice"),
+      el("button", {
+        onclick: () => void view()?.exportPdf(),
+        title: "Toutes les pages de l'intercalaire, puis « Enregistrer au format PDF »",
+      }, "Exporter PDF"),
       el("div", { class: "sep" }),
       el("button", { onclick: () => void view()?.newPage(), title: "Nouvelle page a la fin" }, "Nouvelle page"),
       el("button", { onclick: () => void view()?.newPage(true), title: "Inserer apres la page courante" }, "Inserer ici"),

@@ -1016,6 +1016,47 @@ export class PageView {
     }
   }
 
+  /**
+   * Export PDF de tout l'intercalaire. Passe par l'impression du WebView2 :
+   * la boite de dialogue propose « Enregistrer au format PDF ». Les pages
+   * sont posees seules sur une feuille A4 le temps de l'impression, puis la
+   * vue revient exactement ou elle etait.
+   */
+  async exportPdf(): Promise<void> {
+    const prevMode = this.viewMode;
+    const prevPage = this.current;
+    const parent = this.root.parentElement;
+    const nextSibling = this.root.nextSibling;
+    const prevTitle = document.title;
+    const host = el("div", { class: "print-host" });
+    document.body.append(host);
+    // Poser la vue hors ecran AVANT le rendu : les feuilles se calent
+    // directement sur la largeur A4 (sinon elles gardent la hauteur de
+    // l'ecran et debordent sur une seconde feuille).
+    host.append(this.root);
+    this.viewMode = "scroll";
+    await this.render();
+    // Les photos doivent etre chargees avant l'apercu, sinon trous blancs.
+    await Promise.all([...this.root.querySelectorAll("img")].map((img) =>
+      img.decode().catch(() => undefined)));
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    document.title = `${this.notebook} - ${this.divider}`;
+    document.body.classList.add("printing");
+    const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
+    window.print();
+    await done;
+    document.body.classList.remove("printing");
+    document.title = prevTitle;
+    parent?.insertBefore(this.root, nextSibling);
+    host.remove();
+    this.viewMode = prevMode;
+    this.current = prevPage;
+    await this.render();
+    if (prevMode === "scroll") {
+      this.list.find((p) => p.number === prevPage)?.wrap.scrollIntoView({ block: "start" });
+    }
+  }
+
   setRenderMode(mode: RenderMode): void {
     this.renderMode = mode;
     for (const p of this.list) {
