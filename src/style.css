@@ -377,7 +377,9 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .text-doc {
   position: absolute; left: 0; top: 0; right: 0; min-height: 100%;
   padding: calc(56px * var(--k, 1)) calc(64px * var(--k, 1));
-  font: calc(19px * var(--k, 1)) / 1.55 "Segoe UI", system-ui, sans-serif;
+  /* Meme police que les formules (Computer Modern de KaTeX) : la page se
+     lit d'un seul tenant, comme un document LaTeX. */
+  font: calc(21px * var(--k, 1)) / 1.5 KaTeX_Main, "Latin Modern Roman", "Times New Roman", serif;
   color: #16181d; white-space: pre-wrap; overflow-wrap: anywhere;
   outline: none; cursor: text; caret-color: var(--accent);
   -webkit-user-select: text; user-select: text;
@@ -496,3 +498,6 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   .print-host .sheet { box-shadow: none; border: none; border-radius: 0; }
   .print-host .sheet canvas { touch-action: auto; }
 }
+
+/* Symboles frequents : le conteneur se reordonne sans casser la grille. */
+.mathsyms { display: contents; }

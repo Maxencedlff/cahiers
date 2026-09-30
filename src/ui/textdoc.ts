@@ -5,7 +5,7 @@ import { el } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import { normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken } from "../core/text/doc";
-import { findFormulas, subscriptVars } from "../core/text/automath";
+import { findFormulas, greekWordAtEnd, subscriptVars, symbolAtEnd } from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
@@ -79,6 +79,7 @@ export class TextDoc {
   readonly root: HTMLElement;
   private savedRange: Range | null = null;
   private field: MathfieldElement | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     content: string,
@@ -92,7 +93,21 @@ export class TextDoc {
       lang: "fr",
     });
     this.setContent(content);
-    this.root.addEventListener("input", () => this.emit());
+    this.root.addEventListener("input", (e) => {
+      // Symbole a deux touches remplace tout de suite ("->" -> →), puis
+      // la formule se met en forme apres une courte pause de frappe.
+      if (autoMath && !this.field && (e as InputEvent).inputType === "insertText") {
+        this.replaceBeforeCaret(symbolAtEnd);
+        if (this.idleTimer) clearTimeout(this.idleTimer);
+        this.idleTimer = setTimeout(() => {
+          this.idleTimer = null;
+          const sel = document.getSelection();
+          if (this.field || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
+          this.convertLine(false);
+        }, 900);
+      }
+      this.emit();
+    });
     // Frappe dans la couleur choisie : si le curseur n'est pas deja dans un
     // texte de cette couleur, le caractere part dans un nouveau segment.
     this.root.addEventListener("beforeinput", (e) => {
@@ -568,7 +583,32 @@ export class TextDoc {
    * la suite la prolonge ("Vs = Vz" puis " - Vbe"), les deux sont relues
    * ensemble et ne font qu'une formule.
    */
-  private convertLine(): void {
+  /**
+   * Remplace la fin du texte juste avant le curseur, dans le meme noeud,
+   * si `fn` propose un remplacement. Le curseur reste en fin de remplacement.
+   */
+  private replaceBeforeCaret(fn: (before: string) => string | null): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    const text = node.textContent ?? "";
+    const next = fn(text.slice(0, r.startOffset));
+    if (next === null) return false;
+    node.textContent = next + text.slice(r.startOffset);
+    const caret = document.createRange();
+    caret.setStart(node, next.length);
+    caret.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+    return true;
+  }
+
+  private convertLine(finished = true): void {
+    // Mot grec fini ("pi", "eps") : la lettre, meme hors formule.
+    if (finished && this.replaceBeforeCaret(greekWordAtEnd)) this.emit();
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     const sel = document.getSelection();
     if (!sel?.rangeCount || !sel.isCollapsed) return;
     const r = sel.getRangeAt(0);
@@ -576,7 +616,7 @@ export class TextDoc {
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return;
     if (node.parentElement?.closest(".eq")) return;
     const text = node.textContent ?? "";
-    const before = text.slice(0, r.startOffset).replace(/\u200b/g, " ");
+    const before = text.slice(0, r.startOffset).replace(/\u200b/g, "");
     const after = text.slice(r.startOffset);
 
     // Formule juste avant, convertie automatiquement : la suite la prolonge ?
@@ -589,7 +629,8 @@ export class TextDoc {
     const prevEq = prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src ? prev : null;
     if (prevEq) {
       const src = prevEq.dataset.src ?? "";
-      const joined = src + " " + before.replace(/^\s+/, "");
+      // Sans espace ajoute : "Vb" converti a la pause puis "e" donne "Vbe".
+      const joined = src + before;
       const found = findFormulas(joined);
       if (found.length && found[0].start === 0 && found[0].end > src.length) {
         for (const b of between) b.parentNode?.removeChild(b);

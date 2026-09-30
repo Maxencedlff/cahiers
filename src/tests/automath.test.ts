@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findFormulas, subscriptVars } from "../core/text/automath";
+import { findFormulas, greekWordAtEnd, subscriptVars, symbolAtEnd } from "../core/text/automath";
 
 const one = (line: string) => {
   const f = findFormulas(line);
@@ -102,5 +102,26 @@ describe("variables de l'editeur de formules", () => {
     expect(subscriptVars("5\\,\\mathrm{Hz}")).toBe("5\\,\\mathrm{Hz}");
     expect(subscriptVars("\\text{Donc }x")).toBe("\\text{Donc }x");
     expect(subscriptVars("R_{u}^{Ab}")).toBe("R_{u}^{Ab}");
+  });
+});
+
+describe("saisie hors formule", () => {
+  it("lettres grecques en toutes lettres", () => {
+    expect(greekWordAtEnd("on prend pi")).toBe("on prend π");
+    expect(greekWordAtEnd("eps")).toBe("ε");
+    expect(greekWordAtEnd("(omega")).toBe("(ω");
+    expect(greekWordAtEnd("un pixel")).toBeNull();
+    expect(greekWordAtEnd("api")).toBeNull();
+    expect(greekWordAtEnd("Vpi")).toBeNull();
+  });
+  it("symboles a deux touches", () => {
+    expect(symbolAtEnd("donc ->")).toBe("donc →");
+    expect(symbolAtEnd("Ru >=")).toBe("Ru ≥");
+    expect(symbolAtEnd("a ≤>")).toBe("a ⇔");
+    expect(symbolAtEnd("Vs ~=")).toBe("Vs ≈");
+    expect(symbolAtEnd("rien")).toBeNull();
+  });
+  it("eps dans une formule", () => {
+    expect(findFormulas("x < eps")[0].latex).toBe("x < \\varepsilon");
   });
 });

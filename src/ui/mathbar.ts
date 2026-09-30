@@ -1,7 +1,7 @@
 import { el } from "./dom";
 import { renderTex } from "./tex";
 import { insertMathTemplate, type TextDoc } from "./textdoc";
-import { orderedSymbols, recordSymbol } from "../core/symbols";
+import { orderedSymbols, recordSymbol, SYMBOLS_CHANGED } from "../core/symbols";
 
 /**
  * Modeles de formules. #@ = mot pris avant le curseur, #? = case a remplir.
@@ -55,12 +55,18 @@ export function buildMathBar(getDoc: () => TextDoc | undefined): HTMLElement {
     bar.append(button(t.label, t.key ? `${t.title} (Alt+${t.key.toUpperCase()})` : t.title, t.insert));
   }
   bar.append(el("div", { class: "sep" }));
-  // Les plus utilises d'abord, comme les emojis frequents. L'ordre ne bouge
-  // qu'a la prochaine construction du ruban, jamais sous le pointeur.
-  for (const [label, insert] of orderedSymbols()) {
-    const b = button(label, insert, insert);
-    b.addEventListener("click", () => recordSymbol(insert));
-    bar.append(b);
-  }
+  // Les plus utilises d'abord, comme les emojis frequents. L'ordre se remet
+  // a jour des qu'un symbole est utilise (clic ou formule tapee).
+  const syms = el("div", { class: "mathsyms" });
+  const paintSymbols = () => {
+    syms.replaceChildren(...orderedSymbols().map(([label, insert]) => {
+      const b = button(label, insert, insert);
+      b.addEventListener("click", () => recordSymbol(insert));
+      return b;
+    }));
+  };
+  paintSymbols();
+  window.addEventListener(SYMBOLS_CHANGED, () => { if (syms.isConnected) paintSymbols(); });
+  bar.append(syms);
   return bar;
 }

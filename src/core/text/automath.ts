@@ -396,3 +396,34 @@ export function subscriptVars(latex: string): string {
   }
   return out + fix(latex.slice(last));
 }
+
+/** Lettre grecque tapee en toutes lettres, hors formule ("pi" -> π). */
+const GREEK_WORDS: Record<string, string> = {
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", eps: "ε", epsilon: "ε",
+  eta: "η", theta: "θ", lambda: "λ", mu: "μ", pi: "π", rho: "ρ", sigma: "σ",
+  tau: "τ", phi: "φ", omega: "ω", Gamma: "Γ", Delta: "Δ", Theta: "Θ",
+  Lambda: "Λ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Omega: "Ω",
+};
+
+/**
+ * Mot grec qui termine `text` (juste avant le curseur) : renvoie le texte
+ * avec la lettre, ou null. "pi" seul oui, "pixel" ou "api" non.
+ */
+export function greekWordAtEnd(text: string): string | null {
+  const m = text.match(/(^|[^A-Za-z0-9À-ÿ])([A-Za-z]+)$/);
+  if (!m || !(m[2] in GREEK_WORDS)) return null;
+  return text.slice(0, text.length - m[2].length) + GREEK_WORDS[m[2]];
+}
+
+/** Symbole tape en deux touches, remplace des la seconde ("->" -> →). */
+const SYMBOL_PAIRS: Record<string, string> = {
+  "->": "→", "=>": "⇒", ">=": "≥", "<=": "≤", "!=": "≠", "~=": "≈",
+  ">>": "≫", "<<": "≪", "≤>": "⇔",
+};
+
+/** `text` se termine-t-il par un symbole a deux touches ? */
+export function symbolAtEnd(text: string): string | null {
+  const two = text.slice(-2);
+  if (!(two in SYMBOL_PAIRS)) return null;
+  return text.slice(0, -2) + SYMBOL_PAIRS[two];
+}

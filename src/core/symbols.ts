@@ -30,8 +30,12 @@ function load(): Usage {
   try { return JSON.parse(localStorage.getItem(KEY) ?? "{}") as Usage; } catch { return {}; }
 }
 
+/** Evenement emis sur window a chaque usage : le ruban se reordonne. */
+export const SYMBOLS_CHANGED = "cahiers:symbols";
+
 function save(u: Usage): void {
   try { localStorage.setItem(KEY, JSON.stringify(u)); } catch { /* stockage indisponible */ }
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(SYMBOLS_CHANGED));
 }
 
 function current(entry: { s: number; t: number } | undefined, now: number): number {
