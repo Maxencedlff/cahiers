@@ -335,6 +335,24 @@ class Parser {
 }
 
 /**
+ * Variable seule dans une phrase ("Vz", "Ru", "Vbatt", "I1", "iD") : elle a
+ * une forme de variable sans ambiguite. Les mots courts du francais ("La",
+ * "On", "Il"), les numeros de question ("Q1") et de seance ("S01") restent
+ * du texte, comme les grandeurs d'une seule lettre ("R", "a").
+ */
+function loneVariable(s: string): boolean {
+  if (!validIdent(s) || STOP.has(s.toLowerCase()) || isGreek(s) || s in FUNCS) return false;
+  // Majuscule + minuscules : Vz, Ru, Vbe, Vbatt (pas La, Le : mots outils).
+  if (/^[A-Z][a-z]{1,5}$/.test(s)) return /^[A-Z][a-z]{1,2}$/.test(s) || /^[VIU]/.test(s);
+  // Lettre + chiffres : I1, R2, C10 ; pas Q1 (question), S01 (seance).
+  if (/^[A-Za-z]\d{1,2}$/.test(s)) return !/^[QSEP]/.test(s) && !/^[A-Za-z]0/.test(s);
+  // Minuscule + majuscule : iD, uD, vS.
+  if (/^[a-z][A-Z]{1,2}$/.test(s)) return true;
+  // Tensions et courants a la francaise en minuscules : vbatt, vce, icc.
+  return LOWER_VAR.test(s);
+}
+
+/**
  * Calcul sans variable ("3/2", "2^10", "5 * 3 = 15") : garde seulement
  * s'il a une fraction, une puissance, un produit ou une relation, et si ce
  * n'est pas une date ("30/09", "29/09/2026") ni un simple "1 - 2".
@@ -363,7 +381,10 @@ export function findFormulas(line: string): FoundFormula[] {
     const node = p.relation();
     let last = p.pos - 1;
     while (last > k && toks[last].t === "sp") last--;
-    if (node && node.ops >= 1 && (node.vars >= 1 || numericOk(line.slice(t.a, toks[last].b), node.tex))) {
+    if (last < k) last = k;
+    const src = line.slice(t.a, toks[last].b);
+    const lone = !!node && node.ops === 0 && t.t === "id" && last === k && loneVariable(t.s);
+    if (node && (lone || (node.ops >= 1 && (node.vars >= 1 || numericOk(src, node.tex))))) {
       // Fin = dernier jeton non blanc consomme.
       const end = toks[last].b;
       // Un point final de phrase reste du texte.

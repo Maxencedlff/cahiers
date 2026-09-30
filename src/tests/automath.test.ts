@@ -25,8 +25,7 @@ describe("formules automatiques", () => {
 
   it("formule au milieu d'une phrase", () => {
     const f = findFormulas("On a donc Vs = Vz - Vbe, ce qui ne depend pas de Ru.");
-    expect(f).toHaveLength(1);
-    expect(f[0].latex).toBe("V_s = V_z - V_{be}");
+    expect(f.map((x) => x.latex)).toEqual(["V_s = V_z - V_{be}", "R_u"]);
   });
 
   it("deux formules separees par un mot", () => {
@@ -39,7 +38,6 @@ describe("formules automatiques", () => {
 
   it("le texte courant ne bouge pas", () => {
     for (const line of [
-      "On voit donc que la tension de sortie Vs n'est pas dependante de la resistance Ru.",
       "Est-elle dependante de la resistance ?",
       "Q4. Puissances (Zener en inverse)",
       "Fichier 1009_Q12.asc, directive .dc",
@@ -123,5 +121,18 @@ describe("saisie hors formule", () => {
   });
   it("eps dans une formule", () => {
     expect(findFormulas("x < eps")[0].latex).toBe("x < \\varepsilon");
+  });
+});
+
+describe("variables seules", () => {
+  it("mises en forme dans la phrase", () => {
+    const f = findFormulas("Vz est imposee et I1 traverse Ru, vbatt et iD aussi");
+    expect(f.map((x) => x.latex)).toEqual(["V_z", "I_1", "R_u", "v_{batt}", "i_D"]);
+  });
+  it("les mots restent du texte", () => {
+    for (const line of ["La tension et On a Il faut", "Q1. Zener", "EON S01", "une valeur R", "Le TP porte sur Linux",
+      "Si on le fait", "Or on voit que", "En effet"]) {
+      expect(findFormulas(line), line).toEqual([]);
+    }
   });
 });
