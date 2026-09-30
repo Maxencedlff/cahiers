@@ -555,8 +555,12 @@ export class TextDoc {
 
   /**
    * Formules de la ligne qu'on vient de taper, mises en forme : le texte
-   * "Vs = Vz - Vbe" devient la formule V_s = V_z - V_{be}. Seul le texte
-   * avant le curseur est lu, le reste de la phrase ne bouge pas.
+   * "Vs = Vz - Vbe" devient la formule V_s = V_z - V_{be}. Appele a chaque
+   * espace et a chaque Entree. Seul le texte avant le curseur est lu.
+   *
+   * Une formule convertie a l'espace precedent garde sa source tapee : si
+   * la suite la prolonge ("Vs = Vz" puis " - Vbe"), les deux sont relues
+   * ensemble et ne font qu'une formule.
    */
   private convertLine(): void {
     const sel = document.getSelection();
@@ -566,22 +570,49 @@ export class TextDoc {
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return;
     if (node.parentElement?.closest(".eq")) return;
     const text = node.textContent ?? "";
-    const before = text.slice(0, r.startOffset);
+    const before = text.slice(0, r.startOffset).replace(/\u200b/g, " ");
+    const after = text.slice(r.startOffset);
+
+    // Formule juste avant, convertie automatiquement : la suite la prolonge ?
+    let prev: Node | null = node.previousSibling;
+    const between: Node[] = [];
+    while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/[\u200b\s]/g, "")) {
+      between.push(prev);
+      prev = prev.previousSibling;
+    }
+    const prevEq = prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src ? prev : null;
+    if (prevEq) {
+      const src = prevEq.dataset.src ?? "";
+      const joined = src + " " + before.replace(/^\s+/, "");
+      const found = findFormulas(joined);
+      if (found.length && found[0].start === 0 && found[0].end > src.length) {
+        for (const b of between) b.parentNode?.removeChild(b);
+        prevEq.remove();
+        this.placeFormulas(node as Text, joined, found, after, sel);
+        return;
+      }
+    }
     const found = findFormulas(before);
     if (!found.length) return;
+    this.placeFormulas(node as Text, before, found, after, sel);
+  }
+
+  /** Remplace le noeud texte par texte + formules, curseur a la fin de `line`. */
+  private placeFormulas(node: Text, line: string, found: ReturnType<typeof findFormulas>, after: string, sel: Selection): void {
     const frag = document.createDocumentFragment();
     let pos = 0;
     for (const f of found) {
-      if (f.start > pos) frag.append(before.slice(pos, f.start));
-      frag.append(makeEq(f.latex), anchor());
+      if (f.start > pos) frag.append(line.slice(pos, f.start));
+      frag.append(makeEq(f.latex, line.slice(f.start, f.end)));
       pos = f.end;
     }
-    const rest = before.slice(pos) + text.slice(r.startOffset);
-    const tail = document.createTextNode(rest || "\u200b");
+    const rest = line.slice(pos) + after;
+    // Toujours un texte apres la derniere formule : le curseur s'y pose.
+    const tail = document.createTextNode("\u200b" + rest);
     frag.append(tail);
     node.parentNode?.replaceChild(frag, node);
     const caret = document.createRange();
-    caret.setStart(tail, rest ? before.length - pos : 1);
+    caret.setStart(tail, 1 + line.length - pos);
     caret.collapse(true);
     sel.removeAllRanges();
     sel.addRange(caret);
@@ -597,6 +628,26 @@ export class TextDoc {
       if (autoMath) this.convertLine();
       document.execCommand("insertLineBreak");
       return;
+    }
+    // Espace : la formule qu'on vient de finir se met en forme.
+    if (e.key === " " && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      this.convertLine();
+      return;
+    }
+    // Retour arriere ou Suppr colle a une formule : on entre dedans pour la
+    // corriger au clavier, au lieu de l'effacer d'un bloc.
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey) {
+      const sel = document.getSelection();
+      if (sel?.rangeCount && sel.isCollapsed) {
+        const forward = e.key === "Delete";
+        const eq = neighbour(sel.getRangeAt(0), forward);
+        if (eq instanceof HTMLElement && eq.classList.contains("eq")) {
+          e.preventDefault();
+          this.editEq(eq, forward ? "start" : "end");
+          if (!forward && waiting) waiting.keys.push(new KeyboardEvent("keydown", { key: "Backspace" }));
+          return;
+        }
+      }
     }
     // Tab insere une tabulation, comme Word, au lieu de quitter la page.
     if (e.key === "Tab") {
@@ -623,8 +674,8 @@ export class TextDoc {
 }
 
 /** Formule figee dans le texte : un seul bloc pour le curseur et la gomme. */
-function makeEq(latex: string): HTMLElement {
-  const eq = el("span", { class: "eq", contenteditable: "false", dataset: { latex } });
+function makeEq(latex: string, src?: string): HTMLElement {
+  const eq = el("span", { class: "eq", contenteditable: "false", dataset: src ? { latex, src } : { latex } });
   try {
     // \displaystyle : une fraction dans la phrase reste lisible, comme dans
     // le champ d'edition, au lieu de tomber en corps 7.
@@ -681,13 +732,20 @@ function insertInField(mf: MathfieldElement, template: string): void {
 /** Noeud colle au curseur, en ignorant les ancres invisibles. */
 function neighbour(r: Range, forward: boolean): Node | null {
   const c = r.startContainer, o = r.startOffset;
+  let n: Node | null;
   if (c.nodeType === Node.TEXT_NODE) {
     const text = (c.textContent ?? "");
     const rest = forward ? text.slice(o) : text.slice(0, o);
     if (rest.replace(/\u200b/g, "")) return null;
-    return forward ? c.nextSibling : c.previousSibling;
+    n = forward ? c.nextSibling : c.previousSibling;
+  } else {
+    n = forward ? c.childNodes[o] ?? null : c.childNodes[o - 1] ?? null;
   }
-  return forward ? c.childNodes[o] ?? null : c.childNodes[o - 1] ?? null;
+  // Les ancres invisibles posees autour des formules ne comptent pas.
+  while (n && n.nodeType === Node.TEXT_NODE && !(n.textContent ?? "").replace(/\u200b/g, "")) {
+    n = forward ? n.nextSibling : n.previousSibling;
+  }
+  return n;
 }
 
 function escapeTex(s: string): string {
