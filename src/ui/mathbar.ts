@@ -1,6 +1,7 @@
 import { el } from "./dom";
 import { renderTex } from "./tex";
 import { insertMathTemplate, type TextDoc } from "./textdoc";
+import { orderedSymbols, recordSymbol } from "../core/symbols";
 
 /**
  * Modeles de formules. #@ = mot pris avant le curseur, #? = case a remplir.
@@ -30,16 +31,6 @@ export const MATH_TEMPLATES: MathTemplate[] = [
   { label: "\\begin{cases}\\cdot\\\\\\cdot\\end{cases}", insert: "\\begin{cases}#?\\\\#?\\end{cases}", title: "Systeme" },
 ];
 
-/** Symboles frequents : un clic, sans quitter le clavier longtemps. */
-const SYMBOLS: [string, string][] = [
-  ["\\alpha", "\\alpha"], ["\\beta", "\\beta"], ["\\lambda", "\\lambda"], ["\\pi", "\\pi"],
-  ["\\theta", "\\theta"], ["\\omega", "\\omega"], ["\\Delta", "\\Delta"], ["\\infty", "\\infty"],
-  ["\\to", "\\to"], ["\\Rightarrow", "\\Rightarrow"], ["\\Leftrightarrow", "\\Leftrightarrow"],
-  ["\\leq", "\\leq"], ["\\geq", "\\geq"], ["\\neq", "\\neq"], ["\\approx", "\\approx"],
-  ["\\in", "\\in"], ["\\forall", "\\forall"], ["\\exists", "\\exists"], ["\\mathbb{R}", "\\mathbb{R}"],
-  ["\\times", "\\times"], ["\\pm", "\\pm"], ["\\partial", "\\partial"], ["\\Omega", "\\Omega"], ["\\eta", "\\eta"],
-];
-
 /**
  * Ruban Maths. Les boutons ne prennent jamais le focus : le curseur reste
  * dans le texte ou la formule, on enchaine au clavier sans recliquer.
@@ -64,6 +55,12 @@ export function buildMathBar(getDoc: () => TextDoc | undefined): HTMLElement {
     bar.append(button(t.label, t.key ? `${t.title} (Alt+${t.key.toUpperCase()})` : t.title, t.insert));
   }
   bar.append(el("div", { class: "sep" }));
-  for (const [label, insert] of SYMBOLS) bar.append(button(label, insert, insert));
+  // Les plus utilises d'abord, comme les emojis frequents. L'ordre ne bouge
+  // qu'a la prochaine construction du ruban, jamais sous le pointeur.
+  for (const [label, insert] of orderedSymbols()) {
+    const b = button(label, insert, insert);
+    b.addEventListener("click", () => recordSymbol(insert));
+    bar.append(b);
+  }
   return bar;
 }

@@ -6,6 +6,7 @@ import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import { normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken } from "../core/text/doc";
 import { findFormulas } from "../core/text/automath";
+import { recordLatex } from "../core/symbols";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
 // fonctionne hors ligne et en amphi.
@@ -588,7 +589,7 @@ export class TextDoc {
       if (found.length && found[0].start === 0 && found[0].end > src.length) {
         for (const b of between) b.parentNode?.removeChild(b);
         prevEq.remove();
-        this.placeFormulas(node as Text, joined, found, after, sel);
+        this.placeFormulas(node as Text, joined, found, after, sel, prevEq.dataset.latex ?? "");
         return;
       }
     }
@@ -598,12 +599,14 @@ export class TextDoc {
   }
 
   /** Remplace le noeud texte par texte + formules, curseur a la fin de `line`. */
-  private placeFormulas(node: Text, line: string, found: ReturnType<typeof findFormulas>, after: string, sel: Selection): void {
+  private placeFormulas(node: Text, line: string, found: ReturnType<typeof findFormulas>, after: string, sel: Selection, prevLatex = ""): void {
     const frag = document.createDocumentFragment();
     let pos = 0;
     for (const f of found) {
       if (f.start > pos) frag.append(line.slice(pos, f.start));
       frag.append(makeEq(f.latex, line.slice(f.start, f.end)));
+      // Formule prolongee : ses symboles d'avant sont deja comptes.
+      recordLatex(f.latex, f === found[0] ? prevLatex : "");
       pos = f.end;
     }
     const rest = line.slice(pos) + after;
