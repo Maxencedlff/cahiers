@@ -1036,16 +1036,27 @@ export class PageView {
     host.append(this.root);
     this.viewMode = "scroll";
     await this.render();
+    // Passer en media print change la largeur de la vue : sans cela les
+    // feuilles se recalculent a 900 px au milieu de l'impression.
+    this.resizeObserver.disconnect();
     // Les photos doivent etre chargees avant l'apercu, sinon trous blancs.
     await Promise.all([...this.root.querySelectorAll("img")].map((img) =>
       img.decode().catch(() => undefined)));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    // Hauteur utile d'une A4 a 96 dpi : 297 mm moins 10 mm en haut et une
+    // marge de securite en bas. Au-dela, la page est reduite pour tenir.
+    const usable = 1000;
+    for (const p of this.list) {
+      const h = p.wrap.offsetHeight;
+      if (h > usable) p.wrap.style.zoom = String(usable / h);
+    }
     document.title = `${this.notebook} - ${this.divider}`;
     document.body.classList.add("printing");
     const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
     window.print();
     await done;
     document.body.classList.remove("printing");
+    this.resizeObserver.observe(this.root);
     document.title = prevTitle;
     parent?.insertBefore(this.root, nextSibling);
     host.remove();

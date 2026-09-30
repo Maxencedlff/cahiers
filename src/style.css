@@ -477,19 +477,21 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 }
 .text-doc .doc-img:hover .doc-img-grip { opacity: 1; }
 
-/* Export PDF : la vue est posee hors ecran a la largeur d'une A4
-   (feuille + numero tiennent sur 273 mm utiles), puis seule elle part a
-   l'impression. */
+/* Export PDF : la vue est posee hors ecran a la largeur d'une A4, puis
+   seule elle part a l'impression. Une page du cahier = une feuille : une
+   page plus longue qu'une A4 est reduite (zoom pose par exportPdf), jamais
+   coupee. Marges de page nulles : le WebView2 n'a plus de place pour ses
+   en-tetes (URL, date, pagination) ; la marge vient du padding. */
 .print-host { position: fixed; left: -10000px; top: 0; width: 720px; }
 @media print {
-  @page { size: A4; margin: 12mm; }
+  @page { size: A4; margin: 0; }
   html, body.printing { height: auto; overflow: visible; background: #fff; }
   body.printing > *:not(.print-host) { display: none !important; }
-  body.printing .print-host { position: static; width: auto; }
+  body.printing .print-host { position: static; width: 720px; margin: 0 auto; }
   .print-host .pages { overflow: visible; padding: 0; background: #fff; height: auto; }
   .print-host .pages.scroll-mode { padding-bottom: 0; }
   .print-host .page-sep { display: none; }
-  .print-host .page-wrap { margin: 0 auto; break-after: page; break-inside: avoid; }
+  .print-host .page-wrap { margin: 0 auto; padding-top: 10mm; break-after: page; break-inside: avoid; }
   .print-host .page-wrap:last-child { break-after: auto; }
   .print-host .sheet { box-shadow: none; border: none; border-radius: 0; }
   .print-host .sheet canvas { touch-action: auto; }
