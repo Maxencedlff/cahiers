@@ -102,6 +102,11 @@ const UNITS: Record<string, string> = {
   Pa: "\\mathrm{Pa}", kPa: "\\mathrm{kPa}", bar: "\\mathrm{bar}",
   bit: "\\mathrm{bit}", bits: "\\mathrm{bits}", ko: "\\mathrm{ko}", Ko: "\\mathrm{Ko}",
   Mo: "\\mathrm{Mo}", Go: "\\mathrm{Go}", To: "\\mathrm{To}",
+  // Multiples tapes au clavier : kOhm pour kΩ, u pour µ (uF, uA, us).
+  kOhm: "\\mathrm{k}\\Omega", MOhm: "\\mathrm{M}\\Omega", kohm: "\\mathrm{k}\\Omega",
+  uF: "\\mu\\mathrm{F}", uA: "\\mu\\mathrm{A}", uH: "\\mu\\mathrm{H}", uV: "\\mu\\mathrm{V}",
+  us: "\\mu\\mathrm{s}", "µH": "\\mu\\mathrm{H}", "µV": "\\mu\\mathrm{V}", nH: "\\mathrm{nH}",
+  ns: "\\mathrm{ns}", GHz: "\\mathrm{GHz}", mF: "\\mathrm{mF}",
 };
 
 /** Mot qui est une unite ("Hz", "dB", "Mo") : jamais une variable seule. */
@@ -570,9 +575,14 @@ export interface LinePart { kind: "text" | "eq" | "cur"; str: string }
  * ce qu'on vient de taper, ou qui prolongent une formule deja en forme
  * ("Vs = Vz" puis " - Vbe"). Une formule en forme n'est jamais coupee en
  * deux. `undone` : indice de la formule collee a la frappe ("x = Q" puis
- * "uand") qui redevient du texte, -1 sinon. null : rien a faire.
+ * "uand") qui redevient du texte, -1 sinon. `atCaret` : la derniere formule
+ * finit au curseur ("Vs = Vz - Vbe" puis Espace), et non quelques mots plus
+ * tot ("I1" converti a l'Espace apres "traverse") : seule la premiere est
+ * annulee par Retour arriere. null : rien a faire.
  */
-export function planLine(parts: LinePart[], mode: ScanMode): { formulas: FoundFormula[]; undone: number } | null {
+export function planLine(
+  parts: LinePart[], mode: ScanMode,
+): { formulas: FoundFormula[]; undone: number; atCaret: boolean } | null {
   const pos: { a: number; b: number }[] = [];
   let at = 0;
   for (const p of parts) { pos.push({ a: at, b: at + p.str.length }); at += p.str.length; }
@@ -595,7 +605,8 @@ export function planLine(parts: LinePart[], mode: ScanMode): { formulas: FoundFo
     formulas = pick(eqIdx.filter((i) => i !== g));
   }
   if (!formulas.length && undone < 0) return null;
-  return { formulas, undone };
+  const lastEnd = formulas.length ? formulas[formulas.length - 1].end : -1;
+  return { formulas, undone, atCaret: lastEnd >= full.trimEnd().length };
 }
 
 /**
@@ -667,7 +678,9 @@ export function latexToSource(tex: string): string | null {
       return all;
     });
   if (/[\\{}_^]/.test(s)) return null;
-  return s.replace(/\s+/g, " ").trim();
+  // "\beta.R_{u}" donne "beta .Ru" : pas d'espace avant un point ou une
+  // parenthese fermante, la source rendue par Ctrl+Z reste celle tapee.
+  return s.replace(/\s+/g, " ").replace(/ (?=[.,)\]])/g, "").trim();
 }
 
 /** Lettre grecque tapee en toutes lettres, hors formule ("pi" -> π). */

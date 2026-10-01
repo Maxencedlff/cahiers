@@ -150,9 +150,13 @@ export class TextDoc {
    * Formules que la derniere frappe vient de mettre en forme : Ctrl+Z ou
    * Retour arriere juste apres rend le texte tape, comme dans Word.
    * `expectSpace` : l'espace qui a declenche la conversion n'est pas encore
-   * arrivee (la conversion se fait avant elle).
+   * arrivee (la conversion se fait avant elle). `atCaret` : la derniere
+   * formule finit au curseur ; sinon ("I1" mis en forme a l'Espace apres
+   * "traverse"), Retour arriere efface normalement et seul Ctrl+Z l'annule.
    */
-  private lastAuto: { eqs: HTMLElement[]; greek?: GreekDone | null; expectSpace: boolean } | null = null;
+  private lastAuto: { eqs: HTMLElement[]; greek?: GreekDone | null; expectSpace: boolean; atCaret: boolean } | null = null;
+  /** La derniere relecture a fini sa derniere formule au curseur (voir planLine). */
+  private madeAtCaret = false;
   /** Lettre grecque posee par la derniere relecture ("pi" -> π). */
   private greekDone: GreekDone | null = null;
 
@@ -192,7 +196,7 @@ export class TextDoc {
           const sel = document.getSelection();
           if (this.field || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
           const made = this.convertLine("pause");
-          if (made.length) this.lastAuto = { eqs: made, expectSpace: false };
+          if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret };
         }, 900);
       }
       this.emit();
@@ -759,7 +763,8 @@ export class TextDoc {
           const eq = this.commit(true);
           const made = autoMath ? this.convertLine("space") : [];
           this.insertTextAtCaret(" ");
-          this.lastAuto = made.length ? { eqs: made, expectSpace: false } : eq ? { eqs: [eq], expectSpace: false } : null;
+          this.lastAuto = made.length ? { eqs: made, expectSpace: false, atCaret: this.madeAtCaret }
+            : eq ? { eqs: [eq], expectSpace: false, atCaret: true } : null;
           return true;
         }
       }
@@ -990,6 +995,7 @@ export class TextDoc {
     if (!plan) return [];
     const { formulas } = plan;
     const undone = plan.undone >= 0 ? line.segs[plan.undone] : null;
+    this.madeAtCaret = plan.atCaret;
     return this.rebuildLine(line, formulas, undone, after, sel);
   }
 
@@ -1121,15 +1127,16 @@ export class TextDoc {
   /**
    * Ctrl+Z ou Retour arriere juste apres une mise en forme automatique :
    * les formules creees redeviennent le texte tape, et ne sont plus
-   * reconverties.
+   * reconverties. `backspace` : seulement ce qui touche le curseur (une
+   * formule finie quelques mots plus tot reste en forme).
    */
-  private undoAuto(): boolean {
+  private undoAuto(backspace: boolean): boolean {
     const last = this.lastAuto;
     this.lastAuto = null;
     if (!last) return false;
     let done = false;
     const g = last.greek;
-    if (last.eqs.length && last.eqs.every((q) => this.root.contains(q))) {
+    if (last.eqs.length && (!backspace || last.atCaret) && last.eqs.every((q) => this.root.contains(q))) {
       last.eqs.forEach((q, i) => {
         let src = q.dataset.src ?? "";
         // La lettre grecque finissait la formule : on rend aussi le mot tape.
@@ -1161,9 +1168,9 @@ export class TextDoc {
     // Mise en forme qu'on vient de faire : Ctrl+Z ou Retour arriere l'annule.
     if (this.lastAuto) {
       const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
-      const undo = (e.key === "Backspace" && plain)
-        || ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z");
-      if (undo && this.undoAuto()) { e.preventDefault(); return; }
+      const bs = e.key === "Backspace" && plain;
+      const undo = bs || ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z");
+      if (undo && this.undoAuto(bs)) { e.preventDefault(); return; }
       if (!["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) this.lastAuto = null;
     }
     // Retour a la ligne simple : pas de <div> par ligne, le texte reste plat
@@ -1183,7 +1190,9 @@ export class TextDoc {
     // variable seule en fin de ligne attend le mot suivant ("iD" puis "=").
     if (e.key === " " && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {
       const made = this.convertLine("space");
-      if (made.length || this.greekDone) this.lastAuto = { eqs: made, greek: this.greekDone, expectSpace: true };
+      if (made.length || this.greekDone) {
+        this.lastAuto = { eqs: made, greek: this.greekDone, expectSpace: true, atCaret: this.madeAtCaret };
+      }
       return;
     }
     // Retour arriere ou Suppr colle a une formule : on entre dedans pour la

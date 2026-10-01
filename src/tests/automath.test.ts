@@ -175,6 +175,14 @@ describe("variables seules : quand les convertir", () => {
   });
 });
 
+describe("multiples d'unites tapes au clavier", () => {
+  it("kOhm, uF, us derriere un nombre", () => {
+    expect(one("R = 10 kOhm").tex).toBe("R = 10\\,\\mathrm{k}\\Omega");
+    expect(one("C = 10 uF").tex).toBe("C = 10\\,\\mu\\mathrm{F}");
+    expect(one("T = 5 us").tex).toBe("T = 5\\,\\mu\\mathrm{s}");
+  });
+});
+
 describe("barre oblique : unites et sigles", () => {
   it("pas de fraction pour m/s, dB/dec, E/S", () => {
     expect(findFormulas("en m/s")).toEqual([]);
@@ -242,7 +250,8 @@ describe("editeur de formules : indices et unites", () => {
     expect(subscriptVars("V_{R1}")).toBe("V_{R1}");
   });
   it("source tapee d'un denominateur", () => {
-    expect(latexToSource("(\\beta.R_{u})")).toBe("(beta .Ru)");
+    expect(latexToSource("(\\beta.R_{u})")).toBe("(beta.Ru)");
+    expect(latexToSource("(\\beta)")).toBe("(beta)");
     expect(latexToSource("R1")).toBe("R1");
     expect(latexToSource("\\beta\\cdot R_{u}")).toBe("beta * Ru");
     expect(latexToSource("x^{2}")).toBeNull();
@@ -268,6 +277,16 @@ describe("relecture d'une ligne deja en partie en forme", () => {
     const p = plan([["eq", "x = Q"], ["cur", "uand"]], "pause");
     expect(p?.undone).toBe(0);
     expect(p?.formulas).toEqual([]);
+  });
+  it("Retour arriere : seule une formule finie au curseur s'annule", () => {
+    // "Vs = Vz - Vbe" puis Espace : la formule touche le curseur.
+    expect(plan([["cur", "Vs = Vz - Vbe"]])?.atCaret).toBe(true);
+    // "I1" mis en forme a l'Espace qui suit "traverse" : deux mots plus tot.
+    const p = plan([["cur", "Le courant I1 traverse"]]);
+    expect(p?.formulas.map((f) => f.latex)).toEqual(["I_1"]);
+    expect(p?.atCaret).toBe(false);
+    // Point de fin de phrase apres la formule : il reste entre elle et le curseur.
+    expect(plan([["cur", "On a U = R I."]])?.atCaret).toBe(false);
   });
   it("l'ancien texte de la ligne n'est pas touche", () => {
     // "Vz" deja relu dans un texte d'avant la formule : on ne le reprend pas.
