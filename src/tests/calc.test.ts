@@ -193,7 +193,7 @@ describe("resolution", () => {
   it("second degre, delta positif", () => {
     const r = solveEquation("x^2 - 3x + 2 = 0");
     expect(r.discriminant).toBe(1);
-    expect(r.nature).toMatch(/deux racines reelles/);
+    expect(r.nature).toMatch(/deux racines réelles/);
     expect(r.roots?.map((x) => x.value)).toEqual([1, 2]);
   });
 
