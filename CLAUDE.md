@@ -244,6 +244,7 @@ Le portable tient environ 3 h. Chaque watt compte.
 
 - **Séparer strictement la logique du calcul de l'interface.** La calculatrice et le moteur symbolique dans leurs propres modules, sans dépendance à l'UI. Objectif : pouvoir ajouter un bouton sans risquer de casser la dérivation.
 - Même séparation pour la couche de stockage : lecture/écriture des pages isolée du rendu.
+- Formules automatiques du texte tapé : logique pure dans `src/core/text/automath.ts` (`findFormulas` avec un mode `final`/`space`/`pause`, `planLine` pour relire une ligne déjà en partie en forme), DOM dans `src/ui/textdoc.ts`. Variable seule (« Vz », « I1 ») : liste blanche, convertie au mot suivant ou à Entrée, jamais à la pause ; une unité (`isUnit`) n'en est jamais une.
 - **Tests dès le début.** Une vingtaine de calculs à résultat connu, lancés automatiquement. Ajouter les matrices ne doit pas casser la dérivation sans qu'on le voie tout de suite.
 
 ---

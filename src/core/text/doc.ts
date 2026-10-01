@@ -180,12 +180,12 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
   return out;
 }
 
-/** Texte brut pour la recherche : les formules gardent leur LaTeX. */
 /** Ids des photos posees dans le texte. */
 export function docImageIds(src: string): string[] {
   return parseDoc(src).flatMap((t) => (t.kind === "image" ? [t.id] : []));
 }
 
+/** Texte brut pour la recherche : les formules gardent leur LaTeX. */
 export function docPlainText(src: string): string {
   return parseDoc(src).map((t) =>
     t.kind === "br" ? "\n" : t.kind === "math" ? t.latex : t.kind === "image" ? "" : t.text).join("");
@@ -226,4 +226,54 @@ export function absorbTextBoxes(
     body.content = [body.content, ...texts].filter(Boolean).join("\n");
   }
   return true;
+}
+
+/**
+ * Texte d'un morceau copie, pour le presse-papiers des autres logiciels :
+ * les formules en $LaTeX$, les photos omises.
+ */
+export function docClipboardText(tokens: DocToken[]): string {
+  return tokens.map((t) =>
+    t.kind === "br" ? "\n" : t.kind === "math" ? `$${t.latex}$` : t.kind === "image" ? "" : t.text).join("");
+}
+
+/** Commandes LaTeX relues en texte : lettres grecques par leur nom, relations en ASCII. */
+const TEX_WORDS: Record<string, string> = {
+  varepsilon: "epsilon", epsilon: "epsilon", varphi: "phi", cdot: "·", times: "×",
+  leq: "<=", geq: ">=", neq: "!=", approx: "~=", ll: "<<", gg: ">>", to: "->",
+  Rightarrow: "=>", Leftrightarrow: "<=>", infty: "infini", pm: "+-", partial: "d",
+};
+
+/**
+ * Formule LaTeX relue en texte simple, comme on l'aurait tapee :
+ * "V_{be}" -> "Vbe", "\frac{V_z - V_{be}}{R}" -> "(Vz - Vbe)/R",
+ * "\beta" -> "beta". Sert a la recherche : "vbe" doit trouver V_{be}.
+ */
+export function texToPlain(tex: string): string {
+  // Parentheses autour d'un numerateur ou denominateur compose, pas autour
+  // de ce qui est deja entre parentheses.
+  const wrap = (x: string) => {
+    let top = x.trim();
+    for (let k = 0; k < 10 && /\([^()]*\)/.test(top); k++) top = top.replace(/\([^()]*\)/g, "");
+    return /[\s+\-=<>]/.test(top) ? `(${x.trim()})` : x.trim();
+  };
+  let s = tex.replace(/\\left|\\right|\\displaystyle/g, "");
+  // De l'interieur vers l'exterieur : un groupe sans accolade a la fois.
+  for (let k = 0; k < 30; k++) {
+    const next = s
+      .replace(/\\(?:mathrm|text|operatorname|mathbf|mathit|mathbb|vec|overline)\{([^{}]*)\}/g, "$1")
+      .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (_a, n: string, d: string) => `${wrap(n)}/${wrap(d)}`)
+      .replace(/\\sqrt\{([^{}]*)\}/g, "sqrt($1)")
+      .replace(/_\{([^{}]*)\}/g, "$1")
+      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${wrap(e)}`)
+      .replace(/\{,\}/g, ",");
+    if (next === s) break;
+    s = next;
+  }
+  return s
+    .replace(/\\[,;:! ]/g, " ")
+    .replace(/\\([A-Za-z]+)/g, (_a, name: string) => TEX_WORDS[name] ?? name)
+    .replace(/[_{}]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }

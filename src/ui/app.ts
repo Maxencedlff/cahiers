@@ -3,7 +3,7 @@ import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
-import { insertMathTemplate, isEditingDoc, setAutoMath, setTypingColor } from "./textdoc";
+import { insertMathTemplate, isEditingDoc, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE } from "../core/palette";
 import type { ColorKey, ToolKind } from "../core/types";
@@ -83,6 +83,7 @@ export class App {
     this.width = this.settings.width;
     this.autoConvert = this.settings.autoConvert;
     setAutoMath(this.settings.autoMath);
+    setSpellcheck(this.settings.spellcheck);
     if (this.autoConvert) this.renderMode = "clean";
 
     // Les cles de la machine passent devant celles du navigateur : elles
@@ -576,6 +577,17 @@ export class App {
           toast(this.settings.autoMath ? "Formules automatiques activees" : "Formules automatiques coupees");
         },
       }, "Formules auto"),
+      el("button", {
+        class: this.settings.spellcheck ? "on" : "",
+        title: "Souligner les fautes d'orthographe dans le texte tapé",
+        onclick: () => {
+          this.settings.spellcheck = !this.settings.spellcheck;
+          setSpellcheck(this.settings.spellcheck);
+          saveSettings(this.settings);
+          this.paintToolbar();
+          toast(this.settings.spellcheck ? "Correcteur orthographique activé" : "Correcteur orthographique coupé");
+        },
+      }, "Orthographe"),
       el("button", {
         onclick: () => void view()?.exportPdf(),
         title: "Toutes les pages de l'intercalaire, puis « Enregistrer au format PDF »",

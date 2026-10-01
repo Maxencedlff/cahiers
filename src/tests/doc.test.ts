@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  absorbTextBoxes, docImageIds, docPlainText, normalizeTokens, parseDoc, serializeDoc, trailingOperand,
+  absorbTextBoxes, docClipboardText, docImageIds, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
+  trailingOperand,
   type DocToken,
 } from "../core/text/doc";
 
@@ -128,5 +129,29 @@ describe("texte en couleur", () => {
     const t: DocToken[] = [{ kind: "text", text: "[a,+b[ et x]{.theoreme}" }];
     expect(round(t)).toEqual(t);
     expect(parseDoc("[a, b] et ]{.inconnu}")).toEqual([{ kind: "text", text: "[a, b] et ]{.inconnu}" }]);
+  });
+});
+
+describe("presse-papiers et recherche", () => {
+  it("aller-retour d'un morceau copie avec formule, couleur et gras", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "on a " },
+      { kind: "math", latex: "V_s = V_z - V_{be}" },
+      { kind: "text", text: " donc", bold: true },
+      { kind: "br" },
+      { kind: "math", latex: "I_1", color: "theoreme" },
+    ];
+    expect(round(t)).toEqual(t);
+    expect(docClipboardText(t)).toBe("on a $V_s = V_z - V_{be}$ donc\n$I_1$");
+  });
+
+  it("formules relues en texte simple", () => {
+    expect(texToPlain("V_{be}")).toBe("Vbe");
+    expect(texToPlain("V_s = V_z - V_{be}")).toBe("Vs = Vz - Vbe");
+    expect(texToPlain("i_D = \\frac{V_z - V_{be}}{\\beta \\cdot R_u}")).toBe("iD = (Vz - Vbe)/(beta · Ru)");
+    expect(texToPlain("\\frac{\\left(v_{batt} - V_z\\right)^2}{R}")).toBe("(vbatt - Vz)^2/R");
+    expect(texToPlain("0{,}6\\,\\mathrm{V}")).toBe("0,6 V");
+    expect(texToPlain("\\sqrt{L\\,C}")).toBe("sqrt(L C)");
+    expect(texToPlain("x \\leq \\varepsilon")).toBe("x <= epsilon");
   });
 });

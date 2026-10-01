@@ -4,8 +4,13 @@ import katex from "katex";
 import { el } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
-import { normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken } from "../core/text/doc";
-import { findFormulas, greekWordAtEnd, subscriptVars, symbolAtEnd } from "../core/text/automath";
+import {
+  docClipboardText, normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken,
+} from "../core/text/doc";
+import {
+  findFormulas, greekWordAtEnd, latexToSource, planLine, slashOpensFraction, subscriptVars, symbolAtEnd,
+  type FoundFormula, type LinePart, type ScanMode,
+} from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
@@ -66,6 +71,16 @@ let typingColor: ColorKey | null = null;
 let autoMath = true;
 export function setAutoMath(on: boolean): void { autoMath = on; }
 
+/**
+ * Correcteur orthographique du navigateur : coupe par defaut, il souligne
+ * en rouge Vz, Vbe, malloc... et la page n'a plus l'air d'un document propre.
+ */
+let spellcheckOn = false;
+export function setSpellcheck(on: boolean): void {
+  spellcheckOn = on;
+  document.querySelectorAll<HTMLElement>(".text-doc").forEach((d) => { d.spellcheck = on; });
+}
+
 export function setTypingColor(color: ColorKey | null): void {
   typingColor = color;
   // Texte selectionne : il prend la couleur, comme dans Word.
@@ -74,12 +89,72 @@ export function setTypingColor(color: ColorKey | null): void {
 
 /** Type de glisser-deposer interne : une photo deplacee dans le texte. */
 const DRAG_TYPE = "application/x-cahiers-image";
+/** Presse-papiers interne : le morceau copie, formules et couleurs comprises. */
+const CLIP_TYPE = "application/x-cahiers-doc";
+
+/**
+ * Symboles du ruban poses directement dans le texte, sans formule a
+ * remplir : la frappe continue en texte ("l'angle α vaut 30"), et le
+ * caractere se relit dans les formules tapees ensuite.
+ */
+const SYMBOL_CHARS: Record<string, string> = {
+  "\\alpha": "α", "\\beta": "β", "\\lambda": "λ", "\\pi": "π", "\\theta": "θ",
+  "\\omega": "ω", "\\Delta": "Δ", "\\infty": "∞", "\\to": "→", "\\Rightarrow": "⇒",
+  "\\Leftrightarrow": "⇔", "\\leq": "≤", "\\geq": "≥", "\\neq": "≠", "\\approx": "≈",
+  "\\in": "∈", "\\forall": "∀", "\\exists": "∃", "\\mathbb{R}": "ℝ", "\\times": "×",
+  "\\pm": "±", "\\partial": "∂", "\\Omega": "Ω", "\\eta": "η", "\\varepsilon": "ε",
+};
+
+/**
+ * Raccourcis d'une fraction ouverte par "/" : lettres grecques et fonctions
+ * seulement. Les raccourcis complets de MathLive changent "or" en ∨ jusque
+ * dans "rapport".
+ */
+const AUTO_SHORTCUTS: Record<string, string> = {
+  alpha: "\\alpha", beta: "\\beta", gamma: "\\gamma", delta: "\\delta", eps: "\\varepsilon",
+  epsilon: "\\varepsilon", eta: "\\eta", theta: "\\theta", lambda: "\\lambda", mu: "\\mu",
+  pi: "\\pi", rho: "\\rho", sigma: "\\sigma", tau: "\\tau", phi: "\\varphi", omega: "\\omega",
+  Gamma: "\\Gamma", Delta: "\\Delta", Theta: "\\Theta", Lambda: "\\Lambda", Sigma: "\\Sigma",
+  Phi: "\\Phi", Omega: "\\Omega",
+  sin: "\\sin", cos: "\\cos", tan: "\\tan", ln: "\\ln", log: "\\log", exp: "\\exp",
+  sqrt: "\\sqrt{#?}",
+};
+
+/**
+ * Morceau de la ligne relue pour les formules : un texte, une formule
+ * convertie automatiquement (sa source tapee), ou le texte courant jusqu'au
+ * curseur. `a`, `b` : position dans la ligne reconstituee ; `head` : texte
+ * garde avant le debut de ligne (lignes precedentes du meme noeud).
+ */
+interface LineSeg extends LinePart { node: Node; a: number; b: number; head: string }
+interface Line { segs: LineSeg[]; full: string; curStart: number }
+
+/** Mot grec remplace par sa lettre : `at` = position juste apres la lettre. */
+interface GreekDone { node: Text; at: number; word: string; char: string }
+
+/** Fraction ouverte par "/" : ce qui a servi de numerateur. */
+interface AutoFrac { mf: MathfieldElement; numSrc: string; head: string }
 
 export class TextDoc {
   readonly root: HTMLElement;
   private savedRange: Range | null = null;
   private field: MathfieldElement | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Remplacement ou collage en cours : l'evenement input n'est pas une frappe. */
+  private quiet = false;
+  /** Formule rouverte : son LaTeX et sa source, pour la rendre intacte si rien ne change. */
+  private fieldOrigin: { latex: string; src?: string; value: string } | null = null;
+  /** Fraction ouverte automatiquement par "/", s'il y en a une. */
+  private autoFrac: AutoFrac | null = null;
+  /**
+   * Formules que la derniere frappe vient de mettre en forme : Ctrl+Z ou
+   * Retour arriere juste apres rend le texte tape, comme dans Word.
+   * `expectSpace` : l'espace qui a declenche la conversion n'est pas encore
+   * arrivee (la conversion se fait avant elle).
+   */
+  private lastAuto: { eqs: HTMLElement[]; greek?: GreekDone | null; expectSpace: boolean } | null = null;
+  /** Lettre grecque posee par la derniere relecture ("pi" -> π). */
+  private greekDone: GreekDone | null = null;
 
   constructor(
     content: string,
@@ -89,21 +164,35 @@ export class TextDoc {
     this.root = el("div", {
       class: "text-doc",
       contenteditable: "true",
-      spellcheck: "true",
+      spellcheck: spellcheckOn ? "true" : "false",
       lang: "fr",
     });
     this.setContent(content);
     this.root.addEventListener("input", (e) => {
+      if (this.quiet) return;
+      const ie = e as InputEvent;
+      // Ctrl+Z d'un remplacement ("→" redevient "->") : le navigateur
+      // reselectionne "->", la frappe suivante l'effacerait. Curseur apres.
+      if (ie.inputType === "historyUndo") {
+        const sel = document.getSelection();
+        if (sel?.rangeCount && !sel.isCollapsed && this.root.contains(sel.anchorNode)) sel.collapseToEnd();
+      }
+      // Seule l'espace qui a declenche la mise en forme la laisse annulable.
+      if (this.lastAuto) {
+        if (this.lastAuto.expectSpace && ie.inputType === "insertText" && ie.data === " ") this.lastAuto.expectSpace = false;
+        else this.lastAuto = null;
+      }
       // Symbole a deux touches remplace tout de suite ("->" -> →), puis
       // la formule se met en forme apres une courte pause de frappe.
-      if (autoMath && !this.field && (e as InputEvent).inputType === "insertText") {
+      if (autoMath && !this.field && ie.inputType === "insertText") {
         this.replaceBeforeCaret(symbolAtEnd);
         if (this.idleTimer) clearTimeout(this.idleTimer);
         this.idleTimer = setTimeout(() => {
           this.idleTimer = null;
           const sel = document.getSelection();
           if (this.field || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
-          this.convertLine(false);
+          const made = this.convertLine("pause");
+          if (made.length) this.lastAuto = { eqs: made, expectSpace: false };
         }, 900);
       }
       this.emit();
@@ -118,13 +207,12 @@ export class TextDoc {
       if (!this.root.contains(range.startContainer)) return;
       if (colorAt(range.startContainer, this.root) === typingColor) return;
       e.preventDefault();
-      range.deleteContents();
-      const text = document.createTextNode(e.data);
-      range.insertNode(colorSpan(typingColor, text));
-      sel.collapse(text, text.length);
+      insertColored(range, e.data);
       this.emit();
     });
     this.root.addEventListener("keydown", (e) => this.onKey(e));
+    // Un clic ailleurs : la derniere mise en forme n'est plus annulable.
+    this.root.addEventListener("pointerdown", () => { this.lastAuto = null; });
     this.root.addEventListener("focusin", () => { lastDoc = this; });
     this.root.addEventListener("click", (e) => {
       const eq = (e.target as HTMLElement).closest?.(".eq");
@@ -154,13 +242,21 @@ export class TextDoc {
       if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
       this.emit();
     });
-    // Coller du texte brut : un copier-coller depuis le web ne doit pas
-    // amener ses polices et ses couleurs dans le cahier.
+    // Copier, couper : le morceau part avec ses formules (qui ne sont pas
+    // du texte selectionnable) dans un format interne, et en $LaTeX$ pour
+    // les autres logiciels. Sans cela un Ctrl+X, Ctrl+V les perdait.
+    this.root.addEventListener("copy", (e) => this.onCopy(e, false));
+    this.root.addEventListener("cut", (e) => this.onCopy(e, true));
+    // Coller : un morceau copie ici revient tel quel ; d'ailleurs, du texte
+    // brut, pour qu'un copier-coller depuis le web n'amene pas ses polices et
+    // ses couleurs dans le cahier.
     this.root.addEventListener("paste", (e) => {
       if (this.field) return;
       e.preventDefault();
-      const text = e.clipboardData?.getData("text/plain") ?? "";
-      document.execCommand("insertText", false, text);
+      const dt = e.clipboardData;
+      const internal = dt?.getData(CLIP_TYPE) || docFromHtml(dt?.getData("text/html") ?? "");
+      if (internal) { this.insertTokens(parseDoc(internal)); return; }
+      this.insertPlain((dt?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n"));
     });
   }
 
@@ -171,27 +267,45 @@ export class TextDoc {
   setContent(content: string): void {
     if (this.root.isConnected && content === this.content) return;
     this.field = null;
+    this.fieldOrigin = null;
+    this.autoFrac = null;
+    this.lastAuto = null;
     this.root.replaceChildren();
     const tokens = parseDoc(content);
-    for (const t of tokens) {
-      if (t.kind === "br") { this.root.append(el("br")); continue; }
-      if (t.kind === "math") {
-        const eq = makeEq(t.latex);
-        this.root.append(t.color ? colorSpan(t.color, eq) : eq, anchor());
-        continue;
-      }
-      if (t.kind === "image") { this.root.append(this.makeImage(t.id), anchor()); continue; }
-      let node: Node = document.createTextNode(t.text);
-      if (t.italic) node = el("i", {}, node);
-      if (t.bold) node = el("b", {}, node);
-      if (t.color) node = colorSpan(t.color, node);
-      this.root.append(node);
-    }
+    this.root.append(this.buildNodes(tokens));
     // Sans <br> final, une derniere ligne vide ne s'affiche pas.
     if (tokens[tokens.length - 1]?.kind === "br") this.root.append(el("br"));
   }
 
+  /** Noeuds du texte pour des jetons (page entiere ou morceau colle). */
+  private buildNodes(tokens: DocToken[]): DocumentFragment {
+    const frag = document.createDocumentFragment();
+    for (const t of tokens) {
+      if (t.kind === "br") { frag.append(el("br")); continue; }
+      if (t.kind === "math") {
+        const eq = makeEq(t.latex);
+        frag.append(t.color ? colorSpan(t.color, eq) : eq, anchor());
+        continue;
+      }
+      if (t.kind === "image") { frag.append(this.makeImage(t.id), anchor()); continue; }
+      let node: Node = document.createTextNode(t.text);
+      if (t.italic) node = el("i", {}, node);
+      if (t.bold) node = el("b", {}, node);
+      if (t.color) node = colorSpan(t.color, node);
+      frag.append(node);
+    }
+    return frag;
+  }
+
   private read(): DocToken[] {
+    const out = this.readNodes(this.root);
+    // Le <br> de fin ajoute pour l'affichage n'est pas une ligne.
+    if (out[out.length - 1]?.kind === "br") out.pop();
+    return normalizeTokens(out);
+  }
+
+  /** Jetons d'un morceau de texte (la page, ou une copie de la selection). */
+  private readNodes(root: Node, base: { bold: boolean; italic: boolean; color?: ColorKey } = { bold: false, italic: false }): DocToken[] {
     const out: DocToken[] = [];
     const walk = (node: Node, bold: boolean, italic: boolean, color?: ColorKey) => {
       for (const child of Array.from(node.childNodes)) {
@@ -228,10 +342,89 @@ export class TextDoc {
         walk(child, b, i, color);
       }
     };
-    walk(this.root, false, false);
-    // Le <br> de fin ajoute pour l'affichage n'est pas une ligne.
-    if (out[out.length - 1]?.kind === "br") out.pop();
-    return normalizeTokens(out);
+    walk(root, base.bold, base.italic, base.color);
+    return out;
+  }
+
+  /* ---------------- presse-papiers ---------------- */
+
+  private onCopy(e: ClipboardEvent, cut: boolean): void {
+    if (this.field || !e.clipboardData) return;
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    if (!this.root.contains(range.commonAncestorContainer)) return;
+    // Selection dans un gras ou une couleur : le morceau les garde.
+    const tokens = normalizeTokens(this.readNodes(range.cloneContents(), styleAt(range.commonAncestorContainer, this.root)));
+    if (!tokens.length) return;
+    e.preventDefault();
+    const doc = serializeDoc(tokens);
+    const plain = docClipboardText(tokens);
+    e.clipboardData.setData("text/plain", plain);
+    e.clipboardData.setData(CLIP_TYPE, doc);
+    // Copie de secours dans le HTML, si le type interne se perd en route.
+    const holder = el("span", { dataset: { cahiers: doc } }, plain);
+    e.clipboardData.setData("text/html", holder.outerHTML);
+    if (cut) {
+      // Par l'editeur du navigateur : Ctrl+Z rend le morceau coupe.
+      if (!document.execCommand("delete")) range.deleteContents();
+      this.emit();
+    }
+  }
+
+  /** Colle un morceau copie dans le cahier : formules, gras et couleurs compris. */
+  private insertTokens(tokens: DocToken[]): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (!this.root.contains(range.startContainer)) return;
+    // Une photo d'une autre page n'existe pas ici : on ne colle pas un trou.
+    const usable = tokens.filter((t) => t.kind !== "image" || !!this.images?.lookup(t.id));
+    if (!usable.length) return;
+    this.lastAuto = null;
+    range.deleteContents();
+    const frag = this.buildNodes(usable);
+    const last = frag.lastChild;
+    range.insertNode(frag);
+    if (last?.nodeType === Node.TEXT_NODE) {
+      const r = document.createRange();
+      r.setStart(last, (last.textContent ?? "").length);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } else if (last) {
+      // Apres un gras ou une couleur colles : la frappe suivante reprend en
+      // texte normal, dans une ancre a elle.
+      const a = anchor();
+      last.parentNode?.insertBefore(a, last.nextSibling);
+      sel.collapse(a, 1);
+    }
+    this.emit();
+  }
+
+  /** Colle du texte brut, une ligne apres l'autre (jamais de <div>). */
+  private insertPlain(text: string): void {
+    this.quiet = true;
+    try {
+      text.split("\n").forEach((line, i) => {
+        if (i) document.execCommand("insertLineBreak");
+        if (line) this.insertTextAtCaret(line);
+      });
+    } finally {
+      this.quiet = false;
+    }
+    this.lastAuto = null;
+    this.emit();
+  }
+
+  /** Tape `text` au curseur, dans la couleur choisie, annulable par Ctrl+Z. */
+  private insertTextAtCaret(text: string): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (!this.root.contains(range.startContainer)) return;
+    if (colorAt(range.startContainer, this.root) === typingColor && document.execCommand("insertText", false, text)) return;
+    insertColored(range, text);
   }
 
   private emit(): void {
@@ -406,9 +599,10 @@ export class TextDoc {
    * Rend une formule figee editable. `at` : ou poser le curseur dedans.
    * `template` : LaTeX MathLive a inserer aussitot (#? = case a remplir).
    */
-  private editEq(eq: HTMLElement, at: "start" | "end", template = ""): void {
+  private editEq(eq: HTMLElement, at: "start" | "end", template = "", numSrc?: string): void {
     if (editingDoc && editingDoc !== this) editingDoc.commit(null);
     if (this.field) this.commit(null);
+    this.lastAuto = null;
 
     const mf = new MathfieldElement();
     mf.mathVirtualKeyboardPolicy = "manual";
@@ -419,9 +613,14 @@ export class TextDoc {
     // Reglages a poser une fois le champ dans la page (sinon MathLive leve
     // "Mathfield not mounted"). La barre d'espace fait un vrai espace.
     mf.mathModeSpace = "\\;";
-    // Raccourcis en minuscules seulement : "PI" reste P fois I.
-    mf.inlineShortcuts = { ...mf.inlineShortcuts, eps: "\\varepsilon", pi: "\\pi" };
+    // Raccourcis en minuscules seulement : "PI" reste P fois I. Dans une
+    // fraction ouverte par "/", grecs et fonctions seulement.
+    mf.inlineShortcuts = numSrc !== undefined
+      ? AUTO_SHORTCUTS
+      : { ...mf.inlineShortcuts, eps: "\\varepsilon", pi: "\\pi" };
     this.field = mf;
+    this.fieldOrigin = template ? null : { latex: eq.dataset.latex ?? "", src: eq.dataset.src, value: mf.getValue("latex").trim() };
+    this.autoFrac = null;
     editingDoc = this;
     lastDoc = this;
 
@@ -455,6 +654,10 @@ export class TextDoc {
     this.root.contentEditable = "false";
     if (template) {
       mf.insert(template, { selectionMode: "placeholder", focus: true });
+      if (numSrc !== undefined) {
+        const parts = fracParts(mf.getValue("latex"));
+        if (parts) this.autoFrac = { mf, numSrc, head: parts.head };
+      }
       this.emit();
     } else {
       mf.position = at === "start" ? 0 : mf.lastOffset;
@@ -475,11 +678,10 @@ export class TextDoc {
           if (k.key.length === 1) document.execCommand("insertText", false, k.key);
           continue;
         }
+        if (this.fieldKey(k.key, k.shiftKey, mf)) continue;
         if (k.key.length === 1) mf.executeCommand(["typedText", k.key, { simulateKeystroke: true }]);
-        else if (k.key === "Backspace") {
-          if (mf.getValue("latex").trim()) mf.executeCommand("deleteBackward");
-          else this.commit(false);
-        } else this.onFieldKey(k, mf);
+        else if (k.key === "Backspace") mf.executeCommand("deleteBackward");
+        else if (k.key === "Tab") mf.executeCommand(k.shiftKey ? "moveToPreviousPlaceholder" : "moveToNextPlaceholder");
       }
       if (keys.length) this.emit();
     }, tries === 0 ? 70 : 30);
@@ -489,17 +691,31 @@ export class TextDoc {
    * Fige la formule en cours. `after` : curseur apres (true), avant (false),
    * ou laisse ou il est (null, focus parti ailleurs).
    */
-  commit(after: boolean | null): void {
+  commit(after: boolean | null): HTMLElement | null {
     const mf = this.field;
-    if (!mf) return;
+    if (!mf) return null;
     this.field = null;
     if (editingDoc === this) editingDoc = null;
-    const latex = subscriptVars(mf.getValue("latex").trim());
+    const value = mf.getValue("latex").trim();
+    const origin = this.fieldOrigin;
+    const auto = this.autoFrac?.mf === mf ? this.autoFrac : null;
+    this.fieldOrigin = null;
+    this.autoFrac = null;
     this.root.contentEditable = "true";
 
+    let eq: HTMLElement | null = null;
+    if (origin?.latex && value === origin.value) {
+      // Rouverte sans changement : elle garde sa source tapee et reste
+      // prolongeable par la frappe qui suit.
+      eq = makeEq(origin.latex, origin.src);
+    } else if (value) {
+      // Fraction ouverte par "/" et denominateur simple : relue comme le
+      // texte ("Id = Vz/R1"), elle reste prolongeable elle aussi.
+      const typed = auto ? autoSource(auto, value) : null;
+      eq = typed ? makeEq(typed.latex, typed.src) : makeEq(subscriptVars(value));
+    }
     let mark: Node;
-    if (latex) {
-      const eq = makeEq(latex);
+    if (eq) {
       mf.replaceWith(eq);
       mark = eq;
     } else {
@@ -510,22 +726,87 @@ export class TextDoc {
     }
     this.emit();
     if (after !== null) this.caretBeside(mark, after);
+    return eq;
   }
 
   private onFieldKey(e: KeyboardEvent, mf: MathfieldElement): void {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    if (this.fieldKey(e.key, e.shiftKey, mf)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
+
+  /** Touche dans la formule en cours : vrai si elle est traitee ici. */
+  private fieldKey(key: string, shift: boolean, mf: MathfieldElement): boolean {
+    const value = mf.getValue("latex");
+    const auto = this.autoFrac?.mf === mf ? this.autoFrac : null;
+    if (auto) {
+      const parts = fracParts(value);
+      const den = parts ? parts.den.replace(/\\placeholder\{\}/g, "").trim() : null;
+      // Retour arriere juste apres l'ouverture : "num/" redevient du texte
+      // ("10 m/s", "les E/S" quand la barre n'etait pas une fraction).
+      if (key === "Backspace" && den === "" && parts?.head === auto.head) {
+        this.undoAutoFrac(mf, auto);
+        return true;
+      }
+      const balanced = den !== null && count(den, "(") === count(den, ")");
+      if (key === " ") {
+        // Espace avant le denominateur ("Vz / R") : sans effet.
+        if (den === "") return true;
+        // Denominateur fini : la fraction se ferme, la phrase continue en texte.
+        if (den && balanced) {
+          const eq = this.commit(true);
+          const made = autoMath ? this.convertLine("space") : [];
+          this.insertTextAtCaret(" ");
+          this.lastAuto = made.length ? { eqs: made, expectSpace: false } : eq ? { eqs: [eq], expectSpace: false } : null;
+          return true;
+        }
+      }
+      // Parenthese fermante sans ouvrante dans le denominateur : elle ferme
+      // celle d'avant la fraction ("Vz (1 + R2/R1)").
+      if (key === ")" && den && balanced) {
+        this.commit(true);
+        this.insertTextAtCaret(")");
+        return true;
+      }
+      if (key === "Enter" && !shift) {
+        this.commit(true);
+        if (autoMath) this.convertLine("final");
+        document.execCommand("insertLineBreak");
+        return true;
+      }
+    }
+    // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
+    if (key === "Enter" && !shift) {
+      this.commit(true);
+      document.execCommand("insertLineBreak");
+      return true;
+    }
     // Tab : case suivante tant qu'il en reste, sinon sortie de la formule.
-    const done = !mf.getValue("latex").includes("\\placeholder");
-    if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey) || (e.key === "Tab" && done)) {
-      e.preventDefault();
-      e.stopPropagation();
-      this.commit(!(e.key === "Tab" && e.shiftKey));
-      return;
+    const done = !value.includes("\\placeholder");
+    if (key === "Escape" || (key === "Tab" && done)) {
+      this.commit(!(key === "Tab" && shift));
+      return true;
     }
-    if (e.key === "Backspace" && !mf.getValue("latex").trim()) {
-      e.preventDefault();
-      e.stopPropagation();
+    if (key === "Backspace" && !value.trim()) {
       this.commit(false);
+      return true;
     }
+    return false;
+  }
+
+  /** Annule la fraction automatique : le numerateur et la barre redeviennent du texte. */
+  private undoAutoFrac(mf: MathfieldElement, auto: AutoFrac): void {
+    this.field = null;
+    this.fieldOrigin = null;
+    this.autoFrac = null;
+    if (editingDoc === this) editingDoc = null;
+    this.root.contentEditable = "true";
+    const raw = rawSpan(`${auto.numSrc}/`);
+    mf.replaceWith(raw);
+    this.emit();
+    this.caretBeside(raw, true);
   }
 
   /**
@@ -542,6 +823,24 @@ export class TextDoc {
       this.focus();
       range = sel?.rangeCount ? sel.getRangeAt(0) : null;
       if (!range) return;
+    }
+
+    // Symbole seul (lettre grecque, fleche, relation) : rien a remplir. Il
+    // se pose dans le texte et la frappe continue en texte, pas dans une
+    // formule restee ouverte.
+    if (template && !template.includes("#?") && !template.includes("#@")) {
+      this.lastAuto = null;
+      const char = SYMBOL_CHARS[template];
+      if (char) {
+        this.insertTextAtCaret(char);
+      } else {
+        range.deleteContents();
+        const eq = makeEq(template);
+        range.insertNode(eq);
+        this.caretBeside(eq, true);
+      }
+      this.emit();
+      return;
     }
 
     // Texte selectionne ou mot colle au curseur : il entre dans la formule.
@@ -575,17 +874,10 @@ export class TextDoc {
   /* ---------------- clavier ---------------- */
 
   /**
-   * Formules de la ligne qu'on vient de taper, mises en forme : le texte
-   * "Vs = Vz - Vbe" devient la formule V_s = V_z - V_{be}. Appele a chaque
-   * espace et a chaque Entree. Seul le texte avant le curseur est lu.
-   *
-   * Une formule convertie a l'espace precedent garde sa source tapee : si
-   * la suite la prolonge ("Vs = Vz" puis " - Vbe"), les deux sont relues
-   * ensemble et ne font qu'une formule.
-   */
-  /**
    * Remplace la fin du texte juste avant le curseur, dans le meme noeud,
    * si `fn` propose un remplacement. Le curseur reste en fin de remplacement.
+   * Le remplacement passe par la pile d'annulation du navigateur : Ctrl+Z
+   * juste apres rend "->" ou "pi" tels qu'ils ont ete tapes.
    */
   private replaceBeforeCaret(fn: (before: string) => string | null): boolean {
     const sel = document.getSelection();
@@ -594,60 +886,188 @@ export class TextDoc {
     const node = r.startContainer;
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
     const text = node.textContent ?? "";
-    const next = fn(text.slice(0, r.startOffset));
+    const before = text.slice(0, r.startOffset);
+    const next = fn(before);
     if (next === null) return false;
-    node.textContent = next + text.slice(r.startOffset);
-    const caret = document.createRange();
-    caret.setStart(node, next.length);
-    caret.collapse(true);
+    // Seule la partie qui change est retapee.
+    let p = 0;
+    while (p < next.length && p < before.length && next[p] === before[p]) p++;
+    const range = document.createRange();
+    range.setStart(node, p);
+    range.setEnd(node, r.startOffset);
     sel.removeAllRanges();
-    sel.addRange(caret);
+    sel.addRange(range);
+    this.quiet = true;
+    let done = false;
+    try { done = document.execCommand("insertText", false, next.slice(p)); } finally { this.quiet = false; }
+    if (!done) {
+      node.textContent = next + text.slice(r.startOffset);
+      const caret = document.createRange();
+      caret.setStart(node, next.length);
+      caret.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(caret);
+    }
     return true;
   }
 
-  private convertLine(finished = true): void {
-    // Mot grec fini ("pi", "eps") : la lettre, meme hors formule.
-    if (finished && this.replaceBeforeCaret(greekWordAtEnd)) this.emit();
-    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+  /** Mot grec juste avant le curseur remplace par sa lettre, et de quoi l'annuler. */
+  private greekBeforeCaret(): GreekDone | null {
     const sel = document.getSelection();
-    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    if (!sel?.rangeCount) return null;
     const r = sel.getRangeAt(0);
-    const node = r.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return;
-    if (node.parentElement?.closest(".eq")) return;
-    const text = node.textContent ?? "";
-    const before = text.slice(0, r.startOffset).replace(/\u200b/g, "");
-    const after = text.slice(r.startOffset);
+    const before = r.startContainer.nodeType === Node.TEXT_NODE
+      ? (r.startContainer.textContent ?? "").slice(0, r.startOffset) : "";
+    const next = greekWordAtEnd(before);
+    if (next === null || !this.replaceBeforeCaret(greekWordAtEnd)) return null;
+    const after = document.getSelection()?.getRangeAt(0);
+    if (!after || after.startContainer.nodeType !== Node.TEXT_NODE) return null;
+    const char = next.slice(-1);
+    return { node: after.startContainer as Text, at: after.startOffset, word: before.slice(next.length - 1), char };
+  }
 
-    // Formule juste avant, convertie automatiquement : la suite la prolonge ?
-    let prev: Node | null = node.previousSibling;
-    const between: Node[] = [];
-    while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/[\u200b\s]/g, "")) {
-      between.push(prev);
+  /**
+   * Ligne en cours, du debut de ligne jusqu'au curseur, relue comme on l'a
+   * tapee : les textes, et les formules converties automatiquement par leur
+   * source ("Vs = Vz" converti a l'espace, puis " - Vbe"). Une formule
+   * editee a la main, une photo ou un retour a la ligne arretent la relecture.
+   */
+  private lineAt(node: Text, offset: number): Line {
+    const raw = (node.textContent ?? "").slice(0, offset);
+    const nl = raw.lastIndexOf("\n");
+    const cur: LineSeg = { node, kind: "cur", str: raw.slice(nl + 1).replace(/\u200b/g, ""), a: 0, b: 0, head: raw.slice(0, nl + 1) };
+    const back: LineSeg[] = [];
+    // La ligne commence dans ce noeud : rien a reprendre avant.
+    let prev: Node | null = nl >= 0 ? null : node.previousSibling;
+    while (prev) {
+      if (prev.nodeType === Node.TEXT_NODE) {
+        // Un "\n" tape par Entree finit la ligne precedente : on s'arrete.
+        const t = prev.textContent ?? "";
+        const n = t.lastIndexOf("\n");
+        back.push({ node: prev, kind: "text", str: t.slice(n + 1).replace(/\u200b/g, ""), a: 0, b: 0, head: t.slice(0, n + 1) });
+        if (n >= 0) break;
+      } else if (prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src) {
+        back.push({ node: prev, kind: "eq", str: prev.dataset.src, a: 0, b: 0, head: "" });
+      } else {
+        break;
+      }
       prev = prev.previousSibling;
     }
-    const prevEq = prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src ? prev : null;
-    if (prevEq) {
-      const src = prevEq.dataset.src ?? "";
-      // Sans espace ajoute : "Vb" converti a la pause puis "e" donne "Vbe".
-      const joined = src + before;
-      const found = findFormulas(joined);
-      if (found.length && found[0].start === 0 && found[0].end > src.length) {
-        for (const b of between) b.parentNode?.removeChild(b);
-        prevEq.remove();
-        this.placeFormulas(node as Text, joined, found, after, sel, prevEq.dataset.latex ?? "");
-        return;
+    const segs = [...back.reverse(), cur];
+    let pos = 0;
+    for (const s of segs) { s.a = pos; pos += s.str.length; s.b = pos; }
+    return { segs, full: segs.map((s) => s.str).join(""), curStart: cur.a };
+  }
+
+  /**
+   * Formules de la ligne qu'on vient de taper, mises en forme : le texte
+   * "Vs = Vz - Vbe" devient la formule V_s = V_z - V_{be}. Appele a chaque
+   * espace ("space"), a chaque Entree ("final") et apres une pause de
+   * frappe ("pause"). Seul le texte avant le curseur est lu.
+   *
+   * Une formule convertie automatiquement garde sa source tapee : si la
+   * suite la prolonge ("Vs = Vz" puis " - Vbe", ou "Vs = Vz (" puis une
+   * fraction puis ")"), toute la ligne est relue et ne fait qu'une formule.
+   * Renvoie les formules creees.
+   */
+  private convertLine(mode: ScanMode = "final"): HTMLElement[] {
+    // Mot grec fini ("pi", "eps") : la lettre, meme hors formule.
+    this.greekDone = mode === "pause" ? null : this.greekBeforeCaret();
+    if (this.greekDone) this.emit();
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return [];
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return [];
+    if (node.parentElement?.closest(".eq, .raw")) return [];
+    const after = (node.textContent ?? "").slice(r.startOffset);
+    // Curseur au milieu d'un mot ("Vatt" corrige en "Vbatt") : on attend.
+    if (/^[\p{L}\p{N}]/u.test(after.replace(/^\u200b+/, ""))) return [];
+
+    const line = this.lineAt(node as Text, r.startOffset);
+    const plan = planLine(line.segs, mode);
+    if (!plan) return [];
+    const { formulas } = plan;
+    const undone = plan.undone >= 0 ? line.segs[plan.undone] : null;
+    return this.rebuildLine(line, formulas, undone, after, sel);
+  }
+
+  /**
+   * Remplace la fin de ligne par texte + formules. Les formules deja en
+   * forme qui ne bougent pas sont gardees telles quelles ; le curseur
+   * revient apres ce qu'on vient de taper.
+   */
+  private rebuildLine(line: Line, formulas: FoundFormula[], undone: LineSeg | null, after: string, sel: Selection): HTMLElement[] {
+    const { segs, full } = line;
+    const cur = segs[segs.length - 1];
+    const parent = cur.node.parentNode;
+    if (!parent) return [];
+    const start = Math.min(...formulas.map((f) => f.start), undone ? undone.a : Infinity);
+    let fi = segs.findIndex((s) => s.b > start);
+    if (fi < 0) fi = segs.length - 1;
+    const first = segs[fi];
+    const touched = segs.slice(fi);
+    // Repere pose avant de deplacer quoi que ce soit.
+    const marker = document.createTextNode("");
+    parent.insertBefore(marker, first.node);
+
+    const pieces: (string | Node)[] = [];
+    if (first.kind !== "eq") pieces.push(first.head + first.str.slice(0, start - first.a));
+    const kept = new Set<Node>();
+    const gap = (from: number, to: number) => {
+      for (const s of touched) {
+        const a = Math.max(from, s.a), b = Math.min(to, s.b);
+        if (a >= b) continue;
+        if (s.kind === "eq" && s !== undone) { pieces.push(s.node); kept.add(s.node); }
+        else pieces.push(full.slice(a, b));
       }
+    };
+    const created: HTMLElement[] = [];
+    let pos = start;
+    for (const f of formulas) {
+      gap(pos, f.start);
+      const eq = makeEq(f.latex, full.slice(f.start, f.end));
+      pieces.push(eq);
+      created.push(eq);
+      // Formule prolongee : ses symboles d'avant sont deja comptes.
+      const merged = touched.filter((s) => s.kind === "eq" && s.a >= f.start && s.b <= f.end);
+      recordLatex(f.latex, merged.map((s) => (s.node as HTMLElement).dataset.latex ?? "").join(" "));
+      pos = f.end;
     }
-    const found = findFormulas(before);
-    if (!found.length) return;
-    this.placeFormulas(node as Text, before, found, after, sel);
+    gap(pos, full.length);
+
+    // Le texte de fin recoit le curseur, suivi de ce qui etait apres lui.
+    let tailText = "";
+    while (typeof pieces[pieces.length - 1] === "string") tailText = (pieces.pop() as string) + tailText;
+    const frag = document.createDocumentFragment();
+    let buf = "";
+    for (const p of pieces) {
+      if (typeof p === "string") { buf += p; continue; }
+      if (buf) { frag.append(buf); buf = ""; }
+      frag.append(p);
+    }
+    // Toujours un texte apres la derniere formule : le curseur s'y pose.
+    const tail = document.createTextNode("\u200b" + tailText + after);
+    frag.append(tail);
+    for (const s of touched) if (!kept.has(s.node)) s.node.parentNode?.removeChild(s.node);
+    parent.insertBefore(frag, marker);
+    marker.remove();
+
+    const caret = document.createRange();
+    caret.setStart(tail, 1 + tailText.length);
+    caret.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+    this.emit();
+    return created;
   }
 
   /**
    * "/" tape juste apres une expression : ouvre la formule avec la fraction
    * deja posee, numerateur rempli, curseur au denominateur. Faux si rien ne
-   * peut servir de numerateur (le "/" s'ecrit alors normalement).
+   * peut servir de numerateur (le "/" s'ecrit alors normalement), ou si la
+   * barre est celle d'une unite ou d'un sigle ("m/s", "E/S").
    */
   private slashToFraction(): boolean {
     const sel = document.getSelection();
@@ -655,88 +1075,102 @@ export class TextDoc {
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
-    if (node.parentElement?.closest(".eq")) return false;
-    const text = node.textContent ?? "";
-    const before = text.slice(0, r.startOffset).replace(/\u200b/g, " ");
-    const after = text.slice(r.startOffset);
-    // Denominateur provisoire : une variable que personne n'ecrit.
-    const DEN = "ZDEN";
-    const attempt = (line: string) => findFormulas(`${line}/${DEN}`)
-      .find((f) => f.end === line.length + 1 + DEN.length && f.latex.includes("Z_{DEN}"));
+    if (node.parentElement?.closest(".eq, .raw")) return false;
+    const after = (node.textContent ?? "").slice(r.startOffset);
+    if (/^[\p{L}\p{N}]/u.test(after.replace(/^\u200b+/, ""))) return false;
 
-    // Formule convertie juste avant ("Id =" deja mis en forme) : on la reprend.
-    let prev: Node | null = node.previousSibling;
-    const between: Node[] = [];
-    while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/[\u200b\s]/g, "")) {
-      between.push(prev);
-      prev = prev.previousSibling;
-    }
-    const prevEq = prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src ? prev : null;
-    let found = undefined as ReturnType<typeof attempt>;
-    let line = before;
-    if (prevEq) {
-      const joined = (prevEq.dataset.src ?? "") + " " + before.replace(/^\s+/, "");
-      const f = attempt(joined);
-      if (f && f.start === 0) { found = f; line = joined; }
-    }
-    const merged = !!found;
-    if (!found) found = attempt(before);
+    const line = this.lineAt(node as Text, r.startOffset);
+    const { segs, full } = line;
+    // Denominateur provisoire : une variable que personne n'ecrit (un
+    // sigle en majuscules ne serait pas lu comme une variable).
+    const DEN = "Zqx";
+    const MARK = "Z_{qx}";
+    const found = findFormulas(`${full}/${DEN}`)
+      .find((f) => f.end === full.length + 1 + DEN.length && f.latex.includes(MARK));
     if (!found) return false;
+    // Une formule deja en forme ne se coupe pas : le numerateur la reprend en entier.
+    if (segs.some((s) => s.kind === "eq" && found.start > s.a && found.start < s.b)) return false;
+    const num = full.slice(found.start);
     // "28/09/2026" : une date reste du texte (un chiffre seul, "3/", fait
     // bien une fraction).
-    const num = line.slice(found.start);
     if (/^[\d/\s]+$/.test(num) && /\d{2}/.test(num)) return false;
+    if (!slashOpensFraction(num, full)) return false;
 
-    const prevLatex = merged ? prevEq?.dataset.latex ?? "" : "";
-    if (merged && prevEq) {
-      for (const b of between) b.parentNode?.removeChild(b);
-      prevEq.remove();
-    }
-    const head = document.createTextNode(merged ? "" : before.slice(0, found.start));
-    const eq = makeEq("");
-    const tail = document.createTextNode("\u200b" + after);
-    const parent = node.parentNode;
+    const cur = segs[segs.length - 1];
+    const parent = cur.node.parentNode;
     if (!parent) return false;
-    parent.insertBefore(head, node);
-    parent.insertBefore(eq, node);
-    parent.insertBefore(tail, node);
-    parent.removeChild(node);
-    recordLatex(found.latex.replace("Z_{DEN}", ""), prevLatex);
-    this.editEq(eq, "end", found.latex.replace("Z_{DEN}", "#?"));
+    let fi = segs.findIndex((s) => s.b > found.start);
+    if (fi < 0) fi = segs.length - 1;
+    const first = segs[fi];
+    const touched = segs.slice(fi);
+    const prevLatex = touched.filter((s) => s.kind === "eq").map((s) => (s.node as HTMLElement).dataset.latex ?? "").join(" ");
+    const lead = first.kind === "eq" ? "" : first.head + first.str.slice(0, found.start - first.a);
+    const marker = document.createTextNode("");
+    parent.insertBefore(marker, first.node);
+    for (const s of touched) s.node.parentNode?.removeChild(s.node);
+    const eq = makeEq("");
+    if (lead) parent.insertBefore(document.createTextNode(lead), marker);
+    parent.insertBefore(eq, marker);
+    parent.insertBefore(document.createTextNode("\u200b" + after), marker);
+    marker.remove();
+    recordLatex(found.latex.replace(MARK, ""), prevLatex);
+    this.editEq(eq, "end", found.latex.replace(MARK, "#?"), num);
     return true;
   }
 
-  /** Remplace le noeud texte par texte + formules, curseur a la fin de `line`. */
-  private placeFormulas(node: Text, line: string, found: ReturnType<typeof findFormulas>, after: string, sel: Selection, prevLatex = ""): void {
-    const frag = document.createDocumentFragment();
-    let pos = 0;
-    for (const f of found) {
-      if (f.start > pos) frag.append(line.slice(pos, f.start));
-      frag.append(makeEq(f.latex, line.slice(f.start, f.end)));
-      // Formule prolongee : ses symboles d'avant sont deja comptes.
-      recordLatex(f.latex, f === found[0] ? prevLatex : "");
-      pos = f.end;
+  /**
+   * Ctrl+Z ou Retour arriere juste apres une mise en forme automatique :
+   * les formules creees redeviennent le texte tape, et ne sont plus
+   * reconverties.
+   */
+  private undoAuto(): boolean {
+    const last = this.lastAuto;
+    this.lastAuto = null;
+    if (!last) return false;
+    let done = false;
+    const g = last.greek;
+    if (last.eqs.length && last.eqs.every((q) => this.root.contains(q))) {
+      last.eqs.forEach((q, i) => {
+        let src = q.dataset.src ?? "";
+        // La lettre grecque finissait la formule : on rend aussi le mot tape.
+        if (g && i === last.eqs.length - 1 && !this.root.contains(g.node) && src.endsWith(g.char)) {
+          src = src.slice(0, -1) + g.word;
+        }
+        q.replaceWith(rawSpan(src));
+      });
+      done = true;
     }
-    const rest = line.slice(pos) + after;
-    // Toujours un texte apres la derniere formule : le curseur s'y pose.
-    const tail = document.createTextNode("\u200b" + rest);
-    frag.append(tail);
-    node.parentNode?.replaceChild(frag, node);
-    const caret = document.createRange();
-    caret.setStart(tail, 1 + line.length - pos);
-    caret.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(caret);
-    this.emit();
+    // "π " redevient "pi ", le curseur reste apres l'espace.
+    if (g && this.root.contains(g.node) && (g.node.textContent ?? "").slice(g.at - 1, g.at) === g.char) {
+      const sel = document.getSelection();
+      const caret = sel?.rangeCount && sel.getRangeAt(0).startContainer === g.node ? sel.getRangeAt(0).startOffset : null;
+      const text = g.node.textContent ?? "";
+      g.node.textContent = text.slice(0, g.at - 1) + g.word + text.slice(g.at);
+      if (sel && caret !== null) {
+        const shift = caret >= g.at ? g.word.length - 1 : 0;
+        sel.collapse(g.node, caret + shift);
+      }
+      done = true;
+    }
+    if (done) this.emit();
+    return done;
   }
 
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
+    // Mise en forme qu'on vient de faire : Ctrl+Z ou Retour arriere l'annule.
+    if (this.lastAuto) {
+      const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
+      const undo = (e.key === "Backspace" && plain)
+        || ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z");
+      if (undo && this.undoAuto()) { e.preventDefault(); return; }
+      if (!["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) this.lastAuto = null;
+    }
     // Retour a la ligne simple : pas de <div> par ligne, le texte reste plat
     // et se relit sans surprise.
     if (e.key === "Enter") {
       e.preventDefault();
-      if (autoMath) this.convertLine();
+      if (autoMath) this.convertLine("final");
       document.execCommand("insertLineBreak");
       return;
     }
@@ -745,9 +1179,11 @@ export class TextDoc {
     if (e.key === "/" && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {
       if (this.slashToFraction()) { e.preventDefault(); return; }
     }
-    // Espace : la formule qu'on vient de finir se met en forme.
+    // Espace : la formule qu'on vient de finir se met en forme. Une
+    // variable seule en fin de ligne attend le mot suivant ("iD" puis "=").
     if (e.key === " " && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      this.convertLine();
+      const made = this.convertLine("space");
+      if (made.length || this.greekDone) this.lastAuto = { eqs: made, greek: this.greekDone, expectSpace: true };
       return;
     }
     // Retour arriere ou Suppr colle a une formule : on entre dedans pour la
@@ -837,6 +1273,95 @@ function colorAt(node: Node, root: HTMLElement): ColorKey | null {
 /** Point d'ancrage invisible : le curseur a toujours un texte ou se poser. */
 function anchor(): Text {
   return document.createTextNode("\u200b");
+}
+
+/**
+ * Texte redevenu brut apres une annulation de mise en forme : son propre
+ * noeud, que la relecture des formules ne reprend pas.
+ */
+function rawSpan(text: string): HTMLElement {
+  return el("span", { class: "raw" }, text);
+}
+
+/** Pose `text` a la place de `range`, dans la couleur de frappe choisie. */
+function insertColored(range: Range, text: string): void {
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(colorSpan(typingColor, node));
+  document.getSelection()?.collapse(node, text.length);
+}
+
+/** Gras, italique et couleur a cet endroit du texte. */
+function styleAt(node: Node, root: HTMLElement): { bold: boolean; italic: boolean; color?: ColorKey } {
+  let bold = false, italic = false;
+  let n: Node | null = node;
+  while (n && n !== root) {
+    if (n instanceof HTMLElement) {
+      if (n.tagName === "B" || n.tagName === "STRONG") bold = true;
+      if (n.tagName === "I" || n.tagName === "EM") italic = true;
+    }
+    n = n.parentNode;
+  }
+  const color = colorAt(node, root);
+  return { bold, italic, ...(color ? { color } : {}) };
+}
+
+/** Morceau interne retrouve dans le HTML du presse-papiers (copie de secours). */
+function docFromHtml(html: string): string {
+  if (!html.includes("data-cahiers")) return "";
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return doc.querySelector("[data-cahiers]")?.getAttribute("data-cahiers") ?? "";
+}
+
+function count(s: string, c: string): number {
+  return s.split(c).length - 1;
+}
+
+/**
+ * Derniere fraction d'une formule MathLive, quand elle la termine :
+ * `head` = tout jusqu'au numerateur compris, `den` = le denominateur.
+ */
+function fracParts(latex: string): { head: string; den: string } | null {
+  // MathLive abrege les fractions de chiffres (\frac34) : on remet les accolades.
+  const full = latex.trimEnd()
+    .replace(/\\frac(\d)(\d)/g, "\\frac{$1}{$2}")
+    .replace(/\\frac(\d)(?=\{)/g, "\\frac{$1}")
+    .replace(/(\\frac\{[^{}]*\})([0-9A-Za-z])$/, "$1{$2}");
+  const last = lastGroup(full);
+  if (!last) return null;
+  const num = lastGroup(last.before);
+  if (!num || !/\\frac\s*$/.test(num.before)) return null;
+  return { head: last.before, den: last.body };
+}
+
+/** Dernier groupe {...} qui termine `s`, et ce qui le precede. */
+function lastGroup(s: string): { before: string; body: string } | null {
+  const t = s.trimEnd();
+  if (!t.endsWith("}")) return null;
+  let depth = 0;
+  for (let i = t.length - 1; i >= 0; i--) {
+    const c = t[i];
+    if ((c === "{" || c === "}") && t[i - 1] === "\\") { i--; continue; }
+    if (c === "}") depth++;
+    else if (c === "{" && --depth === 0) return { before: t.slice(0, i), body: t.slice(i + 1, -1) };
+  }
+  return null;
+}
+
+/**
+ * Formule saisie dans une fraction ouverte par "/" : si le numerateur n'a
+ * pas bouge et que le denominateur est simple ("R1", "(beta.Ru)"), elle est
+ * relue comme du texte tape (meme rendu que le reste, source gardee).
+ */
+function autoSource(auto: AutoFrac, value: string): { latex: string; src: string } | null {
+  const parts = fracParts(value);
+  if (!parts || parts.head !== auto.head) return null;
+  const den = latexToSource(parts.den);
+  if (!den) return null;
+  const src = `${auto.numSrc}/${den}`;
+  const f = findFormulas(src);
+  if (f.length !== 1 || f[0].start !== 0 || f[0].end !== src.trimEnd().length) return null;
+  return { latex: f[0].latex, src };
 }
 
 function insertInField(mf: MathfieldElement, template: string): void {

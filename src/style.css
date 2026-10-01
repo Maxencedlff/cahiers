@@ -413,8 +413,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .mathbar .mathkey:hover { border-color: var(--accent); background: #f3f7ff; }
 .mathbar .mathkey.eq { font-weight: 600; color: var(--accent); }
 .mathbar .mathkey .katex { font-size: 1em; }
-.text-doc .eq { display: inline-block; padding: 0 2px; border-radius: 4px; cursor: pointer; user-select: none; }
-.text-doc .eq:hover { background: #f1f5ff; }
+/* Pas de marge autour des formules : pas de blanc avant la virgule ou le
+   point qui suit. Le survol se montre par une ombre, hors du flux. */
+.text-doc .eq { display: inline-block; padding: 0; border-radius: 4px; cursor: pointer; user-select: none; }
+.text-doc .eq:hover { background: #f1f5ff; box-shadow: 0 0 0 2px #f1f5ff; }
 .text-doc .eq .katex { font-size: 1.08em; }
 
 /* ---------------- colonnes : outils a gauche, calculatrice a droite ---------------- */

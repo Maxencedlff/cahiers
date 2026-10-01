@@ -17,6 +17,8 @@ export interface Settings {
   calcOpen: boolean;
   /** Formules tapees au clavier mises en forme a chaque retour a la ligne. */
   autoMath: boolean;
+  /** Correcteur orthographique du navigateur sur le texte tape (coupe par defaut). */
+  spellcheck: boolean;
   myscript: { applicationKey: string; hmacKey: string };
 }
 
@@ -29,6 +31,7 @@ const DEFAULTS: Settings = {
   autoConvert: false,
   calcOpen: true,
   autoMath: true,
+  spellcheck: false,
   textColor: null,
   myscript: { applicationKey: "", hmacKey: "" },
 };
