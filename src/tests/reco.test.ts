@@ -152,6 +152,25 @@ describe("file : echecs", () => {
     expect(q.state().blocked).toBeNull();
   });
 
+  it("un refus des anciennes cles, revenu apres la saisie des nouvelles, n'arrete pas la file", async () => {
+    const pending = deferred<RecoResult>();
+    const old: RecognitionBackend = {
+      name: "anciennes", available: true,
+      recognize() { return pending.promise; },
+    };
+    const done: string[] = [];
+    const q = new RecognitionQueue(old, (k) => { done.push(k); }, () => 0);
+    q.enqueue({ key: "a", kind: "text", strokes: [] });
+    await tick();
+    // Nouvelles cles saisies pendant l'aller-retour des anciennes.
+    q.setBackend({ name: "nouvelles", available: true, async recognize() { return { value: "x", candidates: [] }; } });
+    pending.reject(errorForStatus(401));
+    await tick();
+    await tick();
+    expect(q.state().blocked).toBeNull();
+    expect(done).toEqual(["a"]);
+  });
+
   it("un quota atteint met la file en pause, puis elle reprend", async () => {
     let now = 0;
     let quota = true;
@@ -320,6 +339,8 @@ describe("autres lectures d'une formule (reco-8)", () => {
   it("propose dx pour dz, et alpha pour a", () => {
     const c = confusionCandidates("\\int_0^1 f(z)\\,dz");
     expect(c).toContain("\\int_0^1 f(z)\\,dx");
+    // Le z lu partout a la place d'un x : la formule entiere, en second.
+    expect(c.slice(0, 2)).toContain("\\int_0^1 f(x)\\,dx");
     expect(confusionCandidates("a+b")).toContain("\\alpha+b");
     expect(confusionCandidates("\\alpha t")).toContain("at");
   });

@@ -1376,6 +1376,10 @@ export class App {
       this.renderMode = "clean";
       for (const t of this.tabs) t.view?.setRenderMode(this.renderMode);
       this.activeTab()?.view?.reconvert();
+      // Fonds de page restes en attente hors Auto (ouverts, ou laisses a la
+      // derniere fermeture) : ils ne partaient qu'a la reouverture de leur page.
+      for (const v of this.views()) v.resumeAll();
+      void this.resumeSaved();
     }
     this.paintToolbar();
     toast(on

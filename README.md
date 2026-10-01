@@ -132,7 +132,7 @@ entouree part apres 500 ms).
 - Gommer une partie d'un mot relance sa lecture.
 
 Formule : un appui propose les autres lectures (celles du moteur, puis les
-confusions classiques dx/dz, a/α, x/×, v/ν, u/μ, e/ε), rendues en formules ;
+confusions classiques dx/dz, z/x, a/α, x/×, v/ν, u/μ, e/ε), rendues en formules ;
 « Corriger a la main » ouvre la formule dans un editeur visuel (MathLive),
 LaTeX modifiable dessous.
 
@@ -143,7 +143,8 @@ fonctionne sauf la conversion : les blocs restent en attente, l'encre reste
 lisible, et ils partent des que les cles sont la.
 
 La file d'attente survit a la fermeture de l'appli : les blocs « en attente »
-repartent au lancement suivant, page ouverte ou non. Un envoi abandonne apres
+repartent au lancement suivant, page ouverte ou non (le fond de page, seulement
+en mode « Auto » : il part des qu'on le reactive). Un envoi abandonne apres
 15 s ; au retour du reseau ou de la fenetre, la file repart tout de suite.
 Cles refusees : la file s'arrete et la barre d'etat le dit (appui = saisie
 des cles). Quota atteint : pause de 10 min. Un bloc refuse par MyScript

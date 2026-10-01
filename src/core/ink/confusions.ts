@@ -10,6 +10,8 @@
 /** Paires de lectures qui se confondent a la main, dans les deux sens. */
 export const CONFUSIONS: [string, string][] = [
   ["dz", "dx"],
+  // Le z lu pour un x l'est partout : f(z)dz -> f(x)dx, pas f(z)dx seul.
+  ["z", "x"],
   ["a", "\\alpha"],
   ["x", "\\times"],
   ["v", "\\nu"],

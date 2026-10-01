@@ -463,12 +463,17 @@ export class RecognitionQueue {
         const job = this.nextReady();
         if (!job) break;
         this.inflight = job.key;
+        const backend = this.backend;
         let result: RecoResult;
         try {
-          result = await this.backend.recognize(job.kind, job.strokes);
+          result = await backend.recognize(job.kind, job.strokes);
         } catch (e) {
           this.inflight = null;
           const err = classifyError(e);
+          // Cles changees pendant l'aller-retour : le refus vise les
+          // anciennes. Arreter la file bloquerait les nouvelles, bonnes,
+          // jusqu'a la saisie suivante ; le job repart avec elles.
+          if (this.backend !== backend) continue;
           if (err.kind === "keys" || err.kind === "quota") {
             // Rien ne passera pour personne : la file s'arrete, le job reste.
             this.blocked = {
