@@ -1,5 +1,5 @@
 import { create, all, type MathNode } from "mathjs";
-import { normalizeInput } from "./engine";
+import { normalizeInput, humanError } from "./engine";
 
 const math = create(all, { number: "number" });
 
@@ -20,14 +20,14 @@ export type DerivRule =
   | "elementaire";
 
 export const RULE_LABELS: Record<DerivRule, string> = {
-  constante:   "Derivee d'une constante",
-  variable:    "Derivee de la variable",
-  linearite:   "Linearite",
-  produit:     "Regle du produit",
-  quotient:    "Regle du quotient",
-  puissance:   "Regle de la puissance",
-  chaine:      "Regle de la chaine",
-  elementaire: "Derivee usuelle",
+  constante:   "Dérivée d'une constante",
+  variable:    "Dérivée de la variable",
+  linearite:   "Linéarité",
+  produit:     "Règle du produit",
+  quotient:    "Règle du quotient",
+  puissance:   "Règle de la puissance",
+  chaine:      "Règle de la chaîne",
+  elementaire: "Dérivée usuelle",
 };
 
 export interface DerivStep {
@@ -50,31 +50,56 @@ export interface DerivOutcome {
   result?: string;
   resultLatex?: string;
   steps?: DerivStep;
+  /** Arbre du resultat, pour enchainer sans relire le texte. */
+  node?: MathNode;
 }
 
 export function derivative(expr: string, variable = "x"): DerivOutcome {
   try {
-    const node = math.parse(normalizeInput(expr));
-    const d = simplify(math.derivative(node, variable));
+    return deriveNode(math.parse(normalizeInput(expr)), variable);
+  } catch (e) {
+    return { ok: false, message: humanError(e) };
+  }
+}
+
+/**
+ * Le resultat d'abord, l'explication ensuite : une regle mal reconnue ne
+ * doit jamais empecher d'afficher la derivee.
+ */
+function deriveNode(node: MathNode, variable: string): DerivOutcome {
+  try {
+    const d = simplifyKeep(math.derivative(node, variable, { simplify: false }));
+    let steps: DerivStep | undefined;
+    try { steps = explain(node, variable); } catch { steps = undefined; }
     return {
       ok: true,
       result: d.toString(),
       resultLatex: d.toTex({ parenthesis: "auto" }),
-      steps: explain(node, variable),
+      steps,
+      node: d,
     };
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, message: humanError(e) };
   }
 }
 
-/** Derivee n-ieme : la derivee seconde est la derivee de la derivee. */
+/**
+ * Derivee n-ieme : la derivee seconde est la derivee de la derivee.
+ * On repart de l'arbre, jamais du texte : le texte mathjs ecrit ln en
+ * « log », qui serait relu comme un log decimal.
+ */
 export function nthDerivative(expr: string, variable = "x", n = 2): DerivOutcome {
-  let current = normalizeInput(expr);
+  let current: MathNode;
+  try {
+    current = math.parse(normalizeInput(expr));
+  } catch (e) {
+    return { ok: false, message: humanError(e) };
+  }
   let last: DerivOutcome = { ok: false };
   for (let i = 0; i < n; i++) {
-    last = derivative(current, variable);
-    if (!last.ok || !last.result) return last;
-    current = last.result;
+    last = deriveNode(current, variable);
+    if (!last.ok || !last.node) return last;
+    current = last.node;
   }
   return last;
 }
@@ -83,12 +108,48 @@ function simplify(n: MathNode): MathNode {
   try { return math.simplify(n); } catch { return n; }
 }
 
+/**
+ * Simplifie sans transformer ln 2 ou √2 en decimales : un appel de fonction
+ * a arguments constants dont la valeur n'est pas entiere est mis de cote le
+ * temps de la simplification (calc-exact).
+ */
+export function simplifyKeep(n: MathNode): MathNode {
+  const kept: MathNode[] = [];
+  const hidden = n.transform((node: any) => {
+    if (node.type !== "FunctionNode") return node;
+    if (!node.args.length || node.args.some((a: MathNode) => hasFreeSymbol(a))) return node;
+    let value: unknown;
+    try { value = node.evaluate(); } catch { return node; }
+    if (typeof value !== "number" || !Number.isFinite(value)) return node;
+    if (Math.abs(value - Math.round(value)) < 1e-12) return node;
+    kept.push(node);
+    return new math.SymbolNode(`__k${kept.length - 1}`);
+  });
+  const out = simplify(hidden);
+  if (!kept.length) return out;
+  return out.transform((node: any) => {
+    const m = node.type === "SymbolNode" ? /^__k(\d+)$/.exec(node.name) : null;
+    return m ? kept[Number(m[1])] : node;
+  });
+}
+
+/** Symbole libre autre que pi, e, i. */
+function hasFreeSymbol(node: MathNode): boolean {
+  let found = false;
+  node.traverse((n: any, _p: string, parent: any) => {
+    if (n.type !== "SymbolNode") return;
+    if (parent?.type === "FunctionNode" && parent.fn === n) return;
+    if (!["pi", "e", "i", "E", "PI"].includes(n.name)) found = true;
+  });
+  return found;
+}
+
 function tex(n: MathNode): string {
   try { return n.toTex({ parenthesis: "auto" }); } catch { return n.toString(); }
 }
 
 function dTex(n: MathNode, v: string): string {
-  return tex(simplify(math.derivative(n, v)));
+  return tex(simplifyKeep(math.derivative(n, v, { simplify: false })));
 }
 
 /** L'expression depend-elle de la variable ? */
@@ -129,7 +190,12 @@ export function explain(raw: MathNode, v: string): DerivStep {
   if (node.type === "OperatorNode") {
     const [a, b] = node.args as any[];
 
-    if (node.op === "+" || node.op === "-") {
+    if (node.op === "-" && node.args.length === 1) {
+      return step("linearite", "(-u)' = -u'", [{ name: "u", latex: tex(a) }], [explain(a, v)]);
+    }
+    if (node.op === "+" && node.args.length === 1) return explain(a, v);
+
+    if ((node.op === "+" || node.op === "-") && node.args.length === 2) {
       return step(
         "linearite",
         "(u \\pm w)' = u' \\pm w'",
@@ -137,7 +203,7 @@ export function explain(raw: MathNode, v: string): DerivStep {
           { name: "u", latex: tex(a) },
           { name: "w", latex: tex(b) },
         ],
-        [explain(a, v), explain(b, v)].filter((c) => c.rule !== "constante" || true),
+        [explain(a, v), explain(b, v)],
       );
     }
 
@@ -236,9 +302,6 @@ export function explain(raw: MathNode, v: string): DerivStep {
       );
     }
 
-    if (node.op === "-" && node.args.length === 1) {
-      return step("linearite", "(-u)' = -u'", [{ name: "u", latex: tex(a) }], [explain(a, v)]);
-    }
   }
 
   if (node.type === "FunctionNode") {
@@ -312,7 +375,7 @@ export function simplifyExpr(expr: string, substitutions?: Record<string, number
       inputLatex: input.toTex({ parenthesis: "auto" }),
     };
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, message: humanError(e) };
   }
 }
 
@@ -334,6 +397,6 @@ export function substitute(expr: string, values: Record<string, number | string>
       resultLatex: out.toTex({ parenthesis: "auto" }),
     };
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, message: humanError(e) };
   }
 }

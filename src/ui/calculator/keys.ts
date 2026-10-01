@@ -78,3 +78,59 @@ export const FAMILY_CLASS: Record<KeyFamily, string> = {
   "2nd": "k-2nd",
   eq: "k-eq",
 };
+
+/* ---------------- clavier physique ---------------- */
+
+/** Ce que fait une touche du clavier dans l'onglet Calcul. */
+export type KeyCommand =
+  | { kind: "insert"; text: string }
+  | { kind: "action"; action: "equals" | "back" | "delete" | "left" | "right" | "home" | "end" | "up" | "down" | "escape" }
+  | { kind: "swallow" };
+
+/** Caracteres acceptes a la frappe (lettres pour les fonctions et les unites). */
+const TYPABLE = /^[0-9A-Za-z+\-*/^().,!=[\];%²³π _µΩ]$/;
+
+/** Sous-ensemble de KeyboardEvent, pour tester sans DOM. */
+export interface KeyLike {
+  key: string;
+  code?: string;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+}
+
+/**
+ * Traduit une frappe. Null = la calculatrice laisse passer (raccourcis
+ * Ctrl+L, Ctrl+Z... restent a l'application).
+ *
+ * AZERTY : « ^ » est une touche morte (key "Dead", code "BracketLeft") ;
+ * AltGr arrive comme Ctrl+Alt et sert a taper [ ] { } sur ce clavier.
+ */
+export function mapKey(e: KeyLike): KeyCommand | null {
+  if (e.metaKey) return null;
+  const altGr = !!e.ctrlKey && !!e.altKey;
+  if ((e.ctrlKey || e.altKey) && !altGr) return null;
+  if (e.key === "Dead") {
+    if (e.code === "BracketLeft" && !e.shiftKey) return { kind: "insert", text: "^" };
+    return { kind: "swallow" }; // ¨, ` ... : rien a inserer
+  }
+  if (altGr) {
+    // Seuls les caracteres d'AltGr (crochets, accolades) ; jamais une lettre.
+    return e.key.length === 1 && /[[\]{}^|]/.test(e.key) ? { kind: "insert", text: e.key } : null;
+  }
+  switch (e.key) {
+    case "Enter": return { kind: "action", action: "equals" };
+    case "Backspace": return { kind: "action", action: "back" };
+    case "Delete": return { kind: "action", action: "delete" };
+    case "ArrowLeft": return { kind: "action", action: "left" };
+    case "ArrowRight": return { kind: "action", action: "right" };
+    case "Home": return { kind: "action", action: "home" };
+    case "End": return { kind: "action", action: "end" };
+    case "ArrowUp": return { kind: "action", action: "up" };
+    case "ArrowDown": return { kind: "action", action: "down" };
+    case "Escape": return { kind: "action", action: "escape" };
+  }
+  if (TYPABLE.test(e.key)) return { kind: "insert", text: e.key };
+  return null;
+}

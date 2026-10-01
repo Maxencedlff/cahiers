@@ -1,5 +1,5 @@
 import { create, all } from "mathjs";
-import { humanError } from "./engine";
+import { humanError, normalizeInput } from "./engine";
 
 const math = create(all, { number: "number" });
 
@@ -102,23 +102,72 @@ export function toLatex(m: number[][]): string {
   return `\\begin{pmatrix} ${body} \\end{pmatrix}`;
 }
 
-/** Lecture d'une matrice saisie en texte : lignes separees par des retours. */
-export function parseMatrix(text: string): number[][] | null {
-  const rows = text
-    .trim()
-    .split(/[\n;]+/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (rows.length === 0) return null;
-  const out: number[][] = [];
-  for (const row of rows) {
-    const cells = row.split(/[\s,]+/).filter(Boolean).map(Number);
-    if (cells.some((c) => !Number.isFinite(c))) return null;
-    out.push(cells);
+export interface ParsedMatrix { ok: boolean; matrix?: number[][]; message?: string }
+
+/**
+ * Lecture d'une matrice saisie en texte.
+ * - une ligne par retour a la ligne ou par « ; » ;
+ * - cellules separees par des espaces ou des tabulations ;
+ * - virgule decimale francaise : « 0,5 » est UNE cellule, 0.5 ;
+ * - chaque cellule est evaluee : 1/2, pi, sqrt(2), -3e-2 ;
+ * - la syntaxe mathjs [1, 2; 3, 4] reste acceptee (virgule = separateur).
+ */
+export function readMatrix(text: string): ParsedMatrix {
+  const src = text.trim();
+  if (!src) return { ok: false, message: "Matrice vide" };
+  if (src.startsWith("[")) {
+    try {
+      const v = math.evaluate(normalizeInput(src)) as any;
+      const arr = v?.toArray ? v.toArray() : v;
+      const rows = Array.isArray(arr) && !Array.isArray(arr[0]) ? [arr] : arr;
+      if (!Array.isArray(rows) || rows.some((r: unknown) => !Array.isArray(r))) {
+        return { ok: false, message: "Matrice illisible" };
+      }
+      return checkShape(rows.map((r: unknown[]) => r.map(Number)));
+    } catch (e) {
+      return { ok: false, message: humanError(e) };
+    }
   }
-  const width = out[0].length;
-  if (out.some((r) => r.length !== width)) return null;
-  return out;
+  const lines = src.split(/[\n;]+/).map((l) => l.trim()).filter(Boolean);
+  const out: number[][] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const row: number[] = [];
+    // « 1, 2, 3 » : une virgule suivie d'une espace separe deux cellules.
+    for (const raw of lines[i].replace(/,(?=\s)/g, " ").split(/\s+/).filter(Boolean)) {
+      const cell = raw.replace(/,$/, "").replace(/(\d),(\d)/g, "$1.$2");
+      let value: number;
+      try {
+        value = Number(math.evaluate(normalizeInput(cell)));
+      } catch {
+        return { ok: false, message: `Ligne ${i + 1} : cellule « ${raw} » illisible` };
+      }
+      if (!Number.isFinite(value)) {
+        return { ok: false, message: `Ligne ${i + 1} : cellule « ${raw} » n'est pas un nombre réel` };
+      }
+      row.push(value);
+    }
+    out.push(row);
+  }
+  return checkShape(out);
+}
+
+function checkShape(m: number[][]): ParsedMatrix {
+  if (m.length === 0 || m[0].length === 0) return { ok: false, message: "Matrice vide" };
+  if (m.some((r) => r.some((c) => !Number.isFinite(c)))) {
+    return { ok: false, message: "Les cellules doivent être des nombres réels" };
+  }
+  const width = m[0].length;
+  const bad = m.findIndex((r) => r.length !== width);
+  if (bad >= 0) {
+    return { ok: false, message: `Ligne ${bad + 1} : ${m[bad].length} cellule(s) au lieu de ${width}` };
+  }
+  return { ok: true, matrix: m };
+}
+
+/** Lecture simple : la matrice, ou null si elle est illisible. */
+export function parseMatrix(text: string): number[][] | null {
+  const r = readMatrix(text);
+  return r.ok ? r.matrix! : null;
 }
 
 function round(v: number): number {

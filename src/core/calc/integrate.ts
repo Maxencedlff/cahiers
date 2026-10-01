@@ -1,6 +1,7 @@
 import { create, all, type MathNode } from "mathjs";
-import { normalizeInput } from "./engine";
+import { normalizeInput, humanError } from "./engine";
 import { dependsOn } from "./derive";
+import { polynomialCoefficients } from "./solve";
 
 const math = create(all, { number: "number" });
 
@@ -38,7 +39,7 @@ export function antiderivative(expr: string, variable = "x"): IntegralOutcome {
         ok: false,
         message:
           "Forme non couverte par la table des primitives. " +
-          "Integration par parties ou par substitution non disponible.",
+          "Intégration par parties ou par substitution non disponible.",
       };
     }
     const simplified = trySimplify(math.parse(found.expr));
@@ -49,7 +50,7 @@ export function antiderivative(expr: string, variable = "x"): IntegralOutcome {
       rule: found.rule,
     };
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    return { ok: false, message: humanError(e) };
   }
 }
 
@@ -112,8 +113,9 @@ function integrateNode(raw: MathNode, v: string): Found | null {
         const inner = integrateNode(num, v);
         return inner ? { expr: `(${inner.expr}) / ${s(den)}`, rule: "constante multiplicative" } : null;
       }
-      // 1 / (ax + b)
       if (!dependsOn(num, v)) {
+        const d = unwrap(den);
+        // 1 / (ax + b)
         const lin = affine(den, v);
         if (lin) {
           return {
@@ -121,12 +123,47 @@ function integrateNode(raw: MathNode, v: string): Found | null {
             rule: "1/(ax+b)",
           };
         }
+        // k / u^n et k / sqrt(u) : on se ramene a k * u^(-n).
+        if (d.type === "OperatorNode" && d.op === "^" && !dependsOn(d.args[1], v)) {
+          const inner = integrateNode(math.parse(`${s(num)} * (${d.args[0].toString()})^(-(${d.args[1].toString()}))`), v);
+          return inner ? { expr: inner.expr, rule: "puissance" } : null;
+        }
+        if (d.type === "FunctionNode" && (d.fn?.name ?? "") === "sqrt") {
+          const inner = integrateNode(math.parse(`${s(num)} * (${d.args[0].toString()})^(-1/2)`), v);
+          return inner ? { expr: inner.expr, rule: "puissance" } : null;
+        }
+        // k / (a x^2 + c), a et c de meme signe : arctangente.
+        try {
+          const c = polynomialCoefficients(den.toString(), v, 2);
+          if (c.length === 3 && c[1] === 0 && c[0] * c[2] > 0) {
+            const [c0, , a2] = c;
+            const sgn = a2 > 0 ? 1 : -1;
+            const A = Math.abs(a2), C = Math.abs(c0);
+            return {
+              expr: `${s(num)} * ${sgn} * atan(${v} * sqrt(${A} / ${C})) / sqrt(${A * C})`,
+              rule: "1/(1+x²) : arctangente",
+            };
+          }
+        } catch { /* pas un polynome */ }
       }
       return null;
     }
 
     if (node.op === "^") {
       const [base, exp] = args;
+      // cos²(u) et sin²(u), u affine : linearisation.
+      const b0 = unwrap(base);
+      if (b0.type === "FunctionNode" && exp.toString() === "2" && ["sin", "cos"].includes(b0.fn?.name)) {
+        const lin = affine(b0.args[0], v);
+        if (lin) {
+          const u = b0.args[0].toString();
+          const sign = b0.fn.name === "cos" ? "+" : "-";
+          return {
+            expr: `(${u}) / (2 * (${lin.a})) ${sign} sin(2 * (${u})) / (4 * (${lin.a}))`,
+            rule: `linéarisation de ${b0.fn.name}²`,
+          };
+        }
+      }
       if (dependsOn(base, v) && !dependsOn(exp, v)) {
         const n = Number(exp.toString());
         const lin = affine(base, v);
@@ -208,30 +245,138 @@ export interface DefiniteOutcome {
   value?: number;
   /** "exacte" si passee par la primitive, "numerique" si Simpson. */
   method?: "exacte" | "numerique";
+  /** A afficher avec la valeur : resultat a prendre avec precaution. */
+  warning?: string;
 }
 
 /**
  * Integrale definie. On tente la primitive ; a defaut, Simpson.
- * Un resultat numerique vaut mieux qu'un echec devant un exercice.
+ *
+ * Jamais F(b) - F(a) sans verifier que f est continue sur [a, b] :
+ * ∫₋₁¹ 1/x n'est pas 0, elle n'existe pas. Et la valeur « exacte » est
+ * recoupee par Simpson : une primitive fausse ne passe pas en silence.
  */
 export function definiteIntegral(
   expr: string, variable: string, a: number, b: number,
 ): DefiniteOutcome {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) {
+    return { ok: false, message: "Bornes invalides" };
+  }
+  if (a === b) return { ok: true, value: 0, method: "exacte" };
+  let f: (x: number) => number;
+  try {
+    const compiled = math.compile(normalizeInput(expr));
+    f = (x: number) => Number(compiled.evaluate({ [variable]: x }));
+  } catch (e) {
+    return { ok: false, message: humanError(e) };
+  }
+
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  const sing = findSingularity(f, lo, hi);
+  if (sing !== null) {
+    const at = fmtX(sing);
+    const edge = Math.abs(sing - lo) < 1e-9 * (1 + Math.abs(lo)) || Math.abs(sing - hi) < 1e-9 * (1 + Math.abs(hi));
+    return {
+      ok: false,
+      message: edge
+        ? `Intégrale impropre : f n'est pas définie en x = ${at}. Pas de valeur fiable.`
+        : `Intégrale impropre : f n'est pas définie vers x ≈ ${at}. Découpe l'intervalle en deux.`,
+    };
+  }
+
+  let numeric: number;
+  try {
+    numeric = simpson(expr, variable, a, b, 2000);
+  } catch (e) {
+    return { ok: false, message: humanError(e) };
+  }
+
   const prim = antiderivative(expr, variable);
   if (prim.ok && prim.result) {
     try {
-      const f = math.compile(prim.result);
-      const value = f.evaluate({ [variable]: b }) - f.evaluate({ [variable]: a });
-      if (Number.isFinite(value)) return { ok: true, value, method: "exacte" };
+      const F = math.compile(prim.result);
+      const value = Number(F.evaluate({ [variable]: b })) - Number(F.evaluate({ [variable]: a }));
+      if (Number.isFinite(value)) {
+        const agrees = (num: number) => Math.abs(value - num) <= 1e-6 * (1 + Math.abs(num));
+        // Fonction tres oscillante : Simpson a besoin d'un pas plus fin.
+        if (agrees(numeric) || agrees(numeric = simpson(expr, variable, a, b, 40000))) {
+          return { ok: true, value, method: "exacte" };
+        }
+        return {
+          ok: Number.isFinite(numeric), value: numeric, method: "numerique",
+          warning: "La primitive ne concorde pas avec le calcul numérique : valeur numérique affichée.",
+          message: Number.isFinite(numeric) ? undefined : "Intégrale non calculable",
+        };
+      }
     } catch { /* on bascule en numerique */ }
   }
-  try {
-    const value = simpson(expr, variable, a, b);
-    if (!Number.isFinite(value)) return { ok: false, message: "Integrale divergente ou non definie" };
-    return { ok: true, value, method: "numerique" };
-  } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  if (!Number.isFinite(numeric)) return { ok: false, message: "Intégrale divergente ou non définie" };
+  return { ok: true, value: numeric, method: "numerique" };
+}
+
+function fmtX(x: number): string {
+  const r = Math.round(x * 1e6) / 1e6;
+  return String(Object.is(r, -0) ? 0 : r);
+}
+
+/**
+ * Cherche un point de [lo, hi] ou f n'est pas bornee : valeur non finie,
+ * changement de signe qui n'est pas une racine (tan en pi/2), ou pic de |f|
+ * qui grandit sans fin quand on s'en approche (1/x² en 0, hors grille).
+ * Renvoie l'abscisse, ou null si f semble continue.
+ */
+export function findSingularity(f: (x: number) => number, lo: number, hi: number, n = 2000): number | null {
+  const xs: number[] = [], ys: number[] = [];
+  for (let i = 0; i <= n; i++) {
+    const x = i === n ? hi : lo + ((hi - lo) * i) / n;
+    let y: number;
+    try { y = f(x); } catch { y = NaN; }
+    if (!Number.isFinite(y)) return x;
+    xs.push(x); ys.push(y);
   }
+  const at = (x: number) => { try { return f(x); } catch { return NaN; } };
+
+  for (let i = 0; i < n; i++) {
+    // Changement de signe : racine ou pole ? La bissection tranche.
+    if (ys[i] * ys[i + 1] < 0) {
+      let a = xs[i], b = xs[i + 1], fa = ys[i];
+      for (let k = 0; k < 90; k++) {
+        const m = (a + b) / 2;
+        const fm = at(m);
+        if (!Number.isFinite(fm)) return m;
+        if (fm === 0) { a = b = m; break; }
+        if (fa * fm < 0) { b = m; } else { a = m; fa = fm; }
+      }
+      const m = (a + b) / 2;
+      // Echelle = le plus petit des deux cotes : une grille qui tombe pile
+      // sur le pole (tan en pi/2 vaut 1.6e16) ne doit pas le masquer.
+      const scale = 1 + Math.min(Math.abs(ys[i]), Math.abs(ys[i + 1]));
+      const fm = at(m);
+      if (!Number.isFinite(fm) || Math.abs(fm) > 1e3 * scale) return m;
+    }
+  }
+
+  // Pics de |f| : on raffine le maximum local, il doit rester borne.
+  for (let i = 0; i <= n; i++) {
+    const y = Math.abs(ys[i]);
+    const left = i > 0 ? Math.abs(ys[i - 1]) : -Infinity;
+    const right = i < n ? Math.abs(ys[i + 1]) : -Infinity;
+    if (y < left || y < right || (y === left && y === right)) continue;
+    // Echantillon isole tres au-dessus de ses voisins : pole touche par la grille.
+    const near = Math.max(1, Number.isFinite(left) ? left : 0, Number.isFinite(right) ? right : 0);
+    if (y > 1e6 * near) return xs[i];
+    let a = xs[Math.max(0, i - 1)], b = xs[Math.min(n, i + 1)];
+    for (let k = 0; k < 120 && b - a > 1e-300; k++) {
+      const m1 = a + (b - a) / 3, m2 = b - (b - a) / 3;
+      const y1 = Math.abs(at(m1)), y2 = Math.abs(at(m2));
+      if (!Number.isFinite(y1)) return m1;
+      if (!Number.isFinite(y2)) return m2;
+      if (y1 < y2) a = m1; else b = m2;
+    }
+    const peak = Math.abs(at((a + b) / 2));
+    if (!Number.isFinite(peak) || peak > 1e6 * Math.max(1, y)) return (a + b) / 2;
+  }
+  return null;
 }
 
 /** Simpson composite, n pair. */
