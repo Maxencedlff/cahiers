@@ -4,8 +4,10 @@ import { uuid } from "../id";
 /** Boite englobante d'un ou plusieurs traits, en unites de page. */
 export interface Bounds { x: number; y: number; w: number; h: number }
 
-export function newStroke(color: Stroke["color"], width: number, tool: Stroke["tool"]): Stroke {
-  return { id: uuid(), points: [], color, width, tool };
+export function newStroke(
+  color: Stroke["color"], width: number, tool: Stroke["tool"], startedAt = Date.now(),
+): Stroke {
+  return { id: uuid(), points: [], color, width, tool, startedAt };
 }
 
 export function strokeBounds(s: Stroke, pad = 0): Bounds {

@@ -27,6 +27,11 @@ export function mmToUnits(mm: number, dpi = RECO_DPI): number {
  * que MyScript renvoie ne sont pas les notres, la position est le seul lien
  * fiable. Les separateurs (" ", "\n") sont gardes tels quels, sans boite :
  * ils portent les espaces et les retours a la ligne de la transcription.
+ *
+ * Un trait trop loin de tout mot (plus d'une demi-hauteur de mot), trop
+ * grand pour une lettre (schema, accolade, fleche) ou au surligneur n'est
+ * rattache a rien : il reste visible en rendu propre. Sans ces seuils, un
+ * schema sous le texte et un surlignage disparaissaient avec le mot voisin.
  */
 export function wordsFromJiix(jiix: any, strokes: Stroke[], dpi = RECO_DPI): InkWord[] {
   const raw: any[] = Array.isArray(jiix?.words) ? jiix.words : [];
@@ -48,8 +53,11 @@ export function wordsFromJiix(jiix: any, strokes: Stroke[], dpi = RECO_DPI): Ink
 
   const boxed = words.filter((w) => w.box);
   if (boxed.length === 0) return words;
+  const tallest = MAX_STROKE_H * median(boxed.map((w) => w.box!.h));
   for (const s of strokes) {
+    if (s.tool === "highlighter") continue;
     const b = strokeBounds(s);
+    if (b.h > tallest) continue;
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
     let best: InkWord | null = null;
     let bestDist = Infinity;
@@ -57,10 +65,15 @@ export function wordsFromJiix(jiix: any, strokes: Stroke[], dpi = RECO_DPI): Ink
       const d = distanceToBox(cx, cy, w.box!);
       if (d < bestDist) { bestDist = d; best = w; }
     }
-    best?.strokeIds.push(s.id);
+    if (best && bestDist <= MAX_GAP * best.box!.h) best.strokeIds.push(s.id);
   }
   return words;
 }
+
+/** Ecart maximal entre un trait et son mot, en hauteurs de ce mot. */
+const MAX_GAP = 0.5;
+/** Hauteur maximale d'un trait de lettre, en hauteurs medianes de mot. */
+const MAX_STROKE_H = 2.5;
 
 function distanceToBox(x: number, y: number, b: Bounds): number {
   const dx = Math.max(b.x - x, 0, x - (b.x + b.w));
@@ -72,9 +85,11 @@ function distanceToBox(x: number, y: number, b: Bounds): number {
  * Reporte les corrections faites a la main sur une nouvelle reconnaissance.
  *
  * Chaque pause d'ecriture reconvertit la page : sans ce report, le trait
- * suivant effacerait la correction. Un mot corrige est reconnu a ses traits :
- * s'il partage au moins la moitie de ses traits avec un nouveau mot, sa
- * correction s'applique a ce nouveau mot.
+ * suivant effacerait la correction. Une correction ne revient que si c'est
+ * bien le meme mot : memes traits, ou meme lecture fautive (`misread`) sur
+ * la moitie au moins de ses traits. Un mot qui a grandi (« tension » corrige,
+ * puis un « s » ajoute) garde sa nouvelle lecture ; l'ancienne correction
+ * passe en tete de ses autres lectures, a un geste.
  */
 export function carryEdits(previous: InkWord[] | undefined, next: InkWord[]): InkWord[] {
   const edited = (previous ?? []).filter((w) => w.edited && w.strokeIds.length);
@@ -82,11 +97,20 @@ export function carryEdits(previous: InkWord[] | undefined, next: InkWord[]): In
   return next.map((w) => {
     if (!w.box || w.strokeIds.length === 0) return w;
     const ids = new Set(w.strokeIds);
-    const match = edited.find((e) => {
+    let near: InkWord | undefined;
+    for (const e of edited) {
       const shared = e.strokeIds.filter((id) => ids.has(id)).length;
-      return shared / Math.max(e.strokeIds.length, w.strokeIds.length) >= 0.5;
-    });
-    return match ? { ...w, label: match.label, edited: true, candidates: undefined } : w;
+      if (shared === 0) continue;
+      const same = shared === e.strokeIds.length && shared === w.strokeIds.length;
+      const most = shared / Math.max(e.strokeIds.length, w.strokeIds.length) >= 0.5;
+      if (same || (most && e.misread !== undefined && w.label === e.misread)) {
+        return { ...w, label: e.label, edited: true, misread: e.misread, candidates: undefined };
+      }
+      if (most) near ??= e;
+    }
+    if (!near || near.label === w.label) return w;
+    const label = near.label;
+    return { ...w, candidates: [label, ...(w.candidates ?? []).filter((c) => c !== label && c !== w.label)] };
   });
 }
 

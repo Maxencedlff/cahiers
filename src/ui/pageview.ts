@@ -9,11 +9,13 @@ import type {
 } from "../core/types";
 import { uuid, nowIso } from "../core/id";
 import type { Repo, TrashEntry } from "../core/storage/repo";
-import type { RecoResult } from "../core/ink/recognizer";
 import {
-  carryEdits, convertedStrokeIds, dropStrokes, joinWords, layoutWords,
+  convertedStrokeIds, dropStrokes, joinWords, layoutWords,
   LINE_HEIGHT, type PlacedWord,
 } from "../core/ink/words";
+import { blockKey, isPending, type BlockRef } from "../core/ink/recokey";
+import { confusionCandidates } from "../core/ink/confusions";
+import { askLatex } from "./mathdialog";
 import { colorOf } from "../core/palette";
 import { TextDoc } from "./textdoc";
 import { absorbTextBoxes } from "../core/text/doc";
@@ -39,19 +41,26 @@ export interface PageViewHost {
    * ponctuels : l'appli remet l'outil d'avant, le trait suivant ecrit.
    */
   onRegionDone?: () => void;
-  /** Demande la reconnaissance d'un bloc math ou texte manuscrit. */
-  requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
+  /**
+   * Demande la reconnaissance d'un bloc math ou texte manuscrit, apres la
+   * pause d'ecriture. `auto` = conversion au fil de la plume (pause plus
+   * longue, D14).
+   */
+  requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[], auto?: boolean) => void;
+  /**
+   * Remet en file un bloc reste « en attente » (page rouverte apres une
+   * fermeture de l'appli, cles saisies), sans pause ni message. Ne fait
+   * rien si ce bloc attend deja ou part en ce moment.
+   */
+  resumeRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
+  /** Retire la demande en attente d'un bloc. Vrai s'il y en avait une. */
+  cancelRecognition: (key: string) => boolean;
   onDirty: () => void;
   /** La page en vue a change (navigation, defilement, ajout, suppression). */
   onPageChange?: (n: number, total: number) => void;
   openLink: (target: string) => void;
   /** Une page vient de partir a la corbeille : l'appli propose « Annuler ». */
   onTrashed: (entry: TrashEntry) => void;
-}
-
-/** Cle stable d'un bloc dans toute l'arborescence, utilisee par la file. */
-export function blockKey(nb: string, div: string, page: number, blockId: string): string {
-  return `${nb}/${div}/${String(page).padStart(4, "0")}#${blockId}`;
 }
 
 interface LoadedPage {
@@ -355,7 +364,33 @@ export class PageView {
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
     if (migrated) this.queueSave(loaded);
+    this.resumePending(loaded);
     return loaded;
+  }
+
+  /**
+   * Blocs restes « en attente » sur le disque (appli fermee hors ligne, cles
+   * saisies apres coup) : ils repartent a l'ouverture de la page. La file
+   * vit en memoire, sans cela ils attendaient a vie. Le fond de page ne
+   * repart qu'en conversion au fil de la plume.
+   */
+  private resumePending(loaded: LoadedPage): void {
+    for (const b of loaded.page.blocks) {
+      if (!isPending(b) || (b.type !== "math" && b.type !== "ink")) continue;
+      if (b.type === "ink" && !b.rect && !this.host.autoConvert()) continue;
+      const strokes = b.strokes.filter((st) => st.tool === "pen");
+      if (!strokes.length) continue;
+      this.host.resumeRecognition(this.keyOf(loaded, b.id), kindOf(b), strokes);
+    }
+  }
+
+  /** Remet en file les blocs en attente des pages affichees (cles saisies). */
+  resumeAll(): void {
+    for (const p of this.list) this.resumePending(p);
+  }
+
+  private keyOf(loaded: LoadedPage, blockId: string): string {
+    return blockKey(this.notebook, this.divider, loaded.page.id, blockId);
   }
 
   /* ---------------- texte au clavier ---------------- */
@@ -566,6 +601,9 @@ export class PageView {
     word.candidates = [
       ...(word.candidates ?? []).filter((c) => c !== next), word.label,
     ];
+    // La lecture du moteur, gardee a la premiere correction : une nouvelle
+    // lecture ne recoit la correction que si elle refait la meme erreur.
+    if (!word.edited) word.misread = word.label;
     word.label = next;
     word.edited = true;
     ink.recognized = joinWords(ink.words!);
@@ -644,12 +682,14 @@ export class PageView {
     // En mot a mot, les corrections sont reportees mot par mot (carryEdits).
     if (ink.editedByHand && !ink.words) return;
     ink.pending = true;
+    delete ink.recoError;
     this.paintOverlay(loaded);
     // Seule l'ecriture part chez MyScript : un surlignage la perturbe.
     this.host.requestRecognition(
-      blockKey(this.notebook, this.divider, loaded.number, ink.id),
+      this.keyOf(loaded, ink.id),
       "text",
       ink.strokes.filter((s) => s.tool === "pen"),
+      true,
     );
   }
 
@@ -668,10 +708,18 @@ export class PageView {
     // trait touche (un geste dans le vide n'en cree aucune).
     if (!loaded.eraseNoted) { this.pushUndo(loaded); loaded.eraseNoted = true; }
     const set = new Set(ids);
+    /** Un mot du fond de page a perdu une partie de son encre. */
+    let amputated = false;
     for (const b of loaded.page.blocks) {
       if (b.type === "ink") {
         b.strokes = b.strokes.filter((s) => !set.has(s.id));
         if (b.words) {
+          if (!b.rect) {
+            amputated ||= b.words.some((w) => {
+              const lost = w.strokeIds.filter((id) => set.has(id)).length;
+              return lost > 0 && lost < w.strokeIds.length;
+            });
+          }
           b.words = dropStrokes(b.words, set);
           b.recognized = joinWords(b.words) || null;
         }
@@ -690,6 +738,9 @@ export class PageView {
     );
     this.paintOverlay(loaded);
     this.queueSave(loaded);
+    // « courants » gomme en « courant » : le mot tape doit suivre. Sans
+    // relecture, la recherche et l'export gardaient l'ancien mot.
+    if (amputated && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
   }
 
   /**
@@ -710,6 +761,22 @@ export class PageView {
     this.pushUndo(loaded);
     const ids = new Set(inside.map((s) => s.id));
     ink.strokes = ink.strokes.filter((s) => !ids.has(s.id));
+    // Les mots lus dans ces traits (souvent absurdes : une integrale lue en
+    // texte) partent avec eux, de l'affichage comme de la recherche.
+    if (ink.words) {
+      ink.words = dropStrokes(ink.words, ids);
+      ink.recognized = joinWords(ink.words) || null;
+    }
+    // Une lecture du fond de page en attente porte encore ces traits : elle
+    // repart sans eux. Celle deja partie les perdra a son retour (applyToBlock).
+    if (this.host.cancelRecognition(this.keyOf(loaded, ink.id))) {
+      if (this.host.autoConvert() && ink.strokes.some((s) => s.tool === "pen")) {
+        this.scheduleAutoConvert(loaded);
+      } else {
+        ink.pending = false;
+      }
+    }
+    this.paintStrokes(loaded);
 
     const box = unionBounds(inside.map((s) => strokeBounds(s, 4)));
     const id = uuid();
@@ -722,56 +789,68 @@ export class PageView {
     this.paintOverlay(loaded);
     this.queueSave(loaded);
 
-    this.host.requestRecognition(
-      blockKey(this.notebook, this.divider, loaded.number, id),
-      kind,
-      inside,
-    );
+    this.host.requestRecognition(this.keyOf(loaded, id), kind, inside);
   }
 
-  /** Appele quand la reconnaissance revient, eventuellement bien plus tard. */
-  async applyRecognition(key: string, result: RecoResult): Promise<void> {
-    const hash = key.indexOf("#");
-    const blockId = key.slice(hash + 1);
-    const pageNum = Number(key.slice(0, hash).split("/").pop());
-    // Le bloc est retrouve par son id, pas par le numero de la cle : une
-    // page supprimee ou inseree entre temps a decale les numeros.
-    const has = (p: LoadedPage) => p.page.blocks.some((b) => b.id === blockId);
-    const loaded = this.list.find(has);
-
+  /**
+   * Un resultat de reconnaissance revient, eventuellement bien plus tard
+   * (`change` le range dans le bloc : applyToBlock, markFailed). Applique
+   * seulement si cette vue tient la page en memoire (affichee, ou quittee
+   * mais pas encore ecrite) : sinon l'appli l'ecrit une seule fois sur le
+   * disque. Faux si la page n'est pas ici.
+   */
+  applyChange(ref: BlockRef, change: (block: Block) => void): boolean {
+    if (ref.notebook !== this.notebook || ref.divider !== this.divider) return false;
+    // Le bloc est retrouve par son id : la page a pu changer de numero.
+    const find = (p: LoadedPage) => p.page.blocks.find((b) => b.id === ref.blockId);
+    const loaded = this.list.find((p) => p.page.id === ref.pageId && find(p))
+      ?? this.list.find(find);
     if (loaded) {
-      const block = loaded.page.blocks.find((b) => b.id === blockId);
-      if (block) {
-        applyToBlock(block, result);
-        // Le rendu propre masque l'encre convertie : il faut redessiner.
-        this.paintStrokes(loaded);
-        this.paintOverlay(loaded);
-        this.queueSave(loaded);
-      }
-      return;
+      change(find(loaded)!);
+      // Le rendu propre masque l'encre convertie : il faut redessiner.
+      this.paintStrokes(loaded);
+      this.paintOverlay(loaded);
+      this.queueSave(loaded);
+      return true;
     }
     // Page quittee mais pas encore ecrite : le resultat part avec elle.
-    const waiting = [...this.pendingSave.values()].find(has);
+    const waiting = [...this.pendingSave.values()].find(find);
     if (waiting) {
-      const block = waiting.page.blocks.find((b) => b.id === blockId);
-      if (block) applyToBlock(block, result);
-      return;
+      change(find(waiting)!);
+      return true;
     }
-    // La page n'est pas a l'ecran : on ecrit directement sur le disque, a la
-    // suite des autres ecritures. Si le numero a change, le bloc n'est pas
-    // dans la page lue et rien n'est ecrit.
-    const path = key.slice(0, hash).split("/");
-    const nb = path[0], div = path[1];
-    await this.serial(async () => {
-      try {
-        const page = await this.host.repo.readPage(nb, div, pageNum);
-        const block = page.blocks.find((b) => b.id === blockId);
-        if (block) {
-          applyToBlock(block, result);
-          await this.host.repo.writePage(nb, div, pageNum, page);
-        }
-      } catch { /* page disparue entre temps */ }
-    });
+    return false;
+  }
+
+  /**
+   * Fait passer un acces disque dans la file de cette vue : une ecriture de
+   * l'appli sur une page de cet intercalaire ne croise jamais une
+   * sauvegarde de la vue.
+   */
+  runIo<T>(fn: () => Promise<T>): Promise<T> {
+    return this.serial(fn);
+  }
+
+  /** Relance un bloc refuse par la reconnaissance. */
+  private retryRecognition(loaded: LoadedPage, block: MathBlock | InkBlock): void {
+    const strokes = block.strokes.filter((st) => st.tool === "pen");
+    if (!strokes.length) return;
+    delete block.recoError;
+    if (block.type === "ink" && !block.rect) { this.scheduleAutoConvert(loaded); return; }
+    block.pending = true;
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
+    this.host.requestRecognition(this.keyOf(loaded, block.id), kindOf(block), strokes);
+  }
+
+  /** Etiquette « non reconnu, réessayer » d'un bloc refuse. */
+  private failTag(loaded: LoadedPage, block: MathBlock | InkBlock): HTMLElement {
+    const tag = el("button", {
+      class: "tag reco-fail",
+      title: block.recoError ?? "",
+      onclick: (e: Event) => { e.stopPropagation(); this.retryRecognition(loaded, block); },
+    }, "non reconnu, réessayer");
+    return tag;
   }
 
   /* ---------------- blocs affiches ---------------- */
@@ -803,9 +882,10 @@ export class PageView {
         // En mode encre le bloc n'est qu'un cadre : l'encre brute dessous
         // doit rester lisible, c'est elle qui fait foi si la conversion se trompe.
         const clean = this.renderMode === "clean" && !!block.latex;
+        const failed = !block.pending && !!block.recoError;
         const box = el("div", {
-          class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
-        }, el("span", { class: "tag" },
+          class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}${failed ? " failed" : ""}`,
+        }, failed ? this.failTag(loaded, block) : el("span", { class: "tag" },
           block.pending
             ? (this.host.recognitionReady() ? "conversion en attente" : "clés MyScript manquantes")
             : block.latex ? "math" : "math, non reconnu"));
@@ -902,9 +982,10 @@ export class PageView {
         // transcription de la page, modifiable au clavier.
         if (!block.rect) return this.renderPageTranscript(loaded, block, scale);
         const clean = this.renderMode === "clean" && !!block.recognized;
+        const failed = !block.pending && !!block.recoError;
         const box = el("div", {
-          class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
-        }, el("span", { class: "tag" },
+          class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}${failed ? " failed" : ""}`,
+        }, failed ? this.failTag(loaded, block) : el("span", { class: "tag" },
           block.pending
             ? (this.host.recognitionReady() ? "conversion en attente" : "clés MyScript manquantes")
             : block.recognized ? "texte" : "texte, non reconnu"));
@@ -932,7 +1013,14 @@ export class PageView {
    * couter un geste, pas une reecriture.
    */
   private async correctMath(loaded: LoadedPage, block: MathBlock): Promise<void> {
-    const options = (block.candidates ?? []).map((c) => ({ value: c, label: c }));
+    // Lectures du moteur d'abord, puis les confusions classiques de
+    // l'ecriture a la main (dx/dz, a/alpha...), chacune rendue en formule.
+    const latex = block.latex ?? "";
+    const values = [...new Set([...(block.candidates ?? []), ...confusionCandidates(latex)])]
+      .filter((c) => c && c !== latex)
+      .slice(0, 6);
+    const options: { value: string; label: string | Node }[] =
+      values.map((c) => ({ value: c, label: renderTex(c) }));
     options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? "Autres lectures possibles" : "Corriger la formule",
@@ -940,6 +1028,7 @@ export class PageView {
     );
     if (choice === null) return;
     if (choice === EDIT_SENTINEL) { await this.editLatex(loaded, block); return; }
+    this.pushUndo(loaded);
     // La lecture choisie devient la principale, l'ancienne rejoint les autres.
     const previous = block.latex;
     block.candidates = [
@@ -960,7 +1049,9 @@ export class PageView {
   private renderPageTranscript(
     loaded: LoadedPage, block: InkBlock, scale: number,
   ): HTMLElement | null {
+    const failed = !block.pending && block.recoError ? this.transcriptFail(loaded, block) : null;
     if (this.renderMode !== "clean") {
+      if (failed) return failed;
       if (!block.pending) return null;
       const wait = el("div", { class: "block-box math pending" },
         el("span", { class: "tag" },
@@ -968,10 +1059,15 @@ export class PageView {
       Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
       return wait;
     }
-    if (block.words?.length) return this.renderWords(loaded, block, scale);
+    if (block.words?.length) {
+      const layer = this.renderWords(loaded, block, scale);
+      if (failed) layer.append(failed);
+      return layer;
+    }
     loaded.placed = undefined;
     // Premiere conversion en route : l'encre reste visible, rien a afficher.
     if (!block.recognized) {
+      if (failed) return failed;
       if (!block.pending || this.host.recognitionReady()) return null;
       const wait = el("div", { class: "block-box math pending" },
         el("span", { class: "tag" }, "clés MyScript manquantes"));
@@ -1006,6 +1102,13 @@ export class PageView {
       width: `${(PAGE_W - 80) * scale}px`,
       fontSize: `${Math.max(15, 19 * scale)}px`,
     });
+    return box;
+  }
+
+  /** Etiquette « non reconnu » du fond de page, en haut a gauche. */
+  private transcriptFail(loaded: LoadedPage, block: InkBlock): HTMLElement {
+    const box = el("div", { class: "block-box math failed" }, this.failTag(loaded, block));
+    Object.assign(box.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
     return box;
   }
 
@@ -1080,8 +1183,9 @@ export class PageView {
   }
 
   private async editLatex(loaded: LoadedPage, block: MathBlock): Promise<void> {
-    const next = await askText("Corriger la formule", "LaTeX reconnu", block.latex ?? "");
-    if (next === null) return;
+    const next = await askLatex("Corriger la formule", block.latex ?? "");
+    if (next === null || next === (block.latex ?? "")) return;
+    this.pushUndo(loaded);
     if (block.latex && block.latex !== next) {
       block.candidates = [...(block.candidates ?? []).filter((c) => c !== next), block.latex];
     }
@@ -1700,26 +1804,9 @@ export class PageView {
   get unsavedError(): string | null { return this.hasUnsaved ? this.saveError : null; }
 }
 
-/** Range le resultat la ou le bloc l'attend : LaTeX pour math, texte pour l'encre. */
-function applyToBlock(block: Block, result: RecoResult): void {
-  if (block.type === "math") {
-    block.latex = result.value;
-    block.candidates = result.candidates.length ? result.candidates : undefined;
-    block.pending = false;
-  } else if (block.type === "ink" && !block.rect && result.words) {
-    // Mot a mot. Un trait gomme pendant l'aller-retour reseau ne doit pas
-    // ressusciter dans un mot : on ne garde que les traits encore la.
-    const alive = new Set(block.strokes.map((st) => st.id));
-    const gone = new Set(result.words.flatMap((w) => w.strokeIds).filter((id) => !alive.has(id)));
-    block.words = dropStrokes(carryEdits(block.words, result.words), gone);
-    block.recognized = joinWords(block.words) || null;
-    block.candidates = undefined;
-    block.pending = false;
-  } else if (block.type === "ink") {
-    block.recognized = result.value;
-    block.candidates = result.candidates.length ? result.candidates : undefined;
-    block.pending = false;
-  }
+/** Moteur de reconnaissance d'un bloc : Math pour une zone math, Texte sinon. */
+function kindOf(block: MathBlock | InkBlock): "math" | "text" {
+  return block.type === "math" ? "math" : "text";
 }
 
 /** Police des mots tapes. La meme sert a les mesurer et a les afficher. */

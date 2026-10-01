@@ -158,4 +158,57 @@ describe("conversion mot a mot", () => {
     ], measure);
     expect(placed[1].x).toBe(600);
   });
+
+  it("un surlignage et un schema ne sont rattaches a aucun mot (reco-5)", () => {
+    const a = bar(100, 180, 200);
+    const hl = newStroke("attention", 15, "highlighter");
+    hl.points = [{ x: 95, y: 205, p: 0.5, t: 0 }, { x: 185, y: 205, p: 0.5, t: 10 }];
+    // Trait de schema 200 unites sous le mot.
+    const schema = bar(90, 300, 420);
+    // Grande accolade a cote du mot : trop haute pour une lettre.
+    const brace = newStroke("normal", 2, "pen");
+    brace.points = [{ x: 190, y: 120, p: 0.5, t: 0 }, { x: 192, y: 330, p: 0.5, t: 10 }];
+    const words = wordsFromJiix({
+      words: [{ label: "tension", "bounding-box": mm(95, 180, 90, 40) }],
+    }, [a, hl, schema, brace]);
+    expect(words[0].strokeIds).toEqual([a.id]);
+    // Ils restent donc visibles en rendu propre.
+    expect(convertedStrokeIds(words).has(schema.id)).toBe(false);
+  });
 });
+
+describe("report des corrections (reco-9)", () => {
+  const box = { x: 0, y: 0, w: 50, h: 20 };
+
+  it("un mot qui grandit garde sa nouvelle lecture", () => {
+    const before: InkWord[] = [
+      { label: "tension", misread: "teusion", box, strokeIds: ["1", "2", "3", "4"], edited: true },
+    ];
+    const next: InkWord[] = [
+      { label: "tensions", box, strokeIds: ["1", "2", "3", "4", "5"], candidates: ["tensious"] },
+    ];
+    const out = carryEdits(before, next);
+    expect(out[0].label).toBe("tensions");
+    expect(out[0].edited).toBeUndefined();
+    // L'ancienne correction reste a un geste.
+    expect(out[0].candidates).toEqual(["tension", "tensious"]);
+  });
+
+  it("la meme erreur relue sur un mot un peu different reste corrigee", () => {
+    const before: InkWord[] = [
+      { label: "tension", misread: "teusion", box, strokeIds: ["1", "2", "3", "4"], edited: true },
+    ];
+    const next: InkWord[] = [{ label: "teusion", box, strokeIds: ["1", "2", "3", "9"] }];
+    const out = carryEdits(before, next);
+    expect(out[0].label).toBe("tension");
+    expect(out[0].misread).toBe("teusion");
+  });
+
+  it("une ancienne correction sans lecture d'origine ne vaut que pour la meme encre", () => {
+    const before: InkWord[] = [{ label: "Riemann", box, strokeIds: ["a", "b"], edited: true }];
+    expect(carryEdits(before, [{ label: "Kiemann", box, strokeIds: ["a", "b"] }])[0].label).toBe("Riemann");
+    expect(carryEdits(before, [{ label: "Riemanns", box, strokeIds: ["a", "b", "c"] }])[0].label)
+      .toBe("Riemanns");
+  });
+});
+

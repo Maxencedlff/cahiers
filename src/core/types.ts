@@ -40,6 +40,13 @@ export interface Stroke {
   color: InkColor;
   width: number;
   tool: Exclude<ToolKind, "eraser">;
+  /**
+   * Heure du debut du trait (ms depuis 1970). Les `t` des points restent
+   * relatifs a ce debut ; MyScript recoit des temps absolus, d'ou il tire
+   * l'ordre des traits differes (point du i, barre du t, accents).
+   * Optionnel : les anciens traits n'en ont pas.
+   */
+  startedAt?: number;
 }
 
 export type BlockType =
@@ -85,6 +92,11 @@ export interface InkBlock extends BlockBase {
    * En rendu propre, ils remplacent l'encre mot a mot (facon Scribble).
    */
   words?: InkWord[];
+  /**
+   * La reconnaissance a refuse ce bloc (reponse 4xx, hors cles et quota) :
+   * le motif, affiche avec « non reconnu, réessayer ». Absent sinon.
+   */
+  recoError?: string;
 }
 
 /** Un mot reconnu (ou un separateur " " / "\n", sans boite ni traits). */
@@ -98,6 +110,13 @@ export interface InkWord {
   candidates?: string[];
   /** Corrige a la main : une reconversion ne doit pas l'ecraser. */
   edited?: boolean;
+  /**
+   * Lecture du moteur au moment de la correction. La correction n'est
+   * reportee sur une nouvelle lecture que si l'encre est la meme, ou si le
+   * moteur relit la meme erreur : un mot qui grandit (« tension » →
+   * « tensions ») garde sa nouvelle lecture.
+   */
+  misread?: string;
 }
 
 export interface MathBlock extends BlockBase {
@@ -110,6 +129,8 @@ export interface MathBlock extends BlockBase {
   pending?: boolean;
   /** Autres lectures proposees par le moteur, pour la correction en un geste. */
   candidates?: string[];
+  /** Motif d'un refus de la reconnaissance (voir InkBlock.recoError). */
+  recoError?: string;
 }
 
 export interface ImageBlock extends BlockBase {

@@ -80,6 +80,11 @@ export function toast(
 
 const MAX_TOASTS = 2;
 
+/** Retire le message pose avec cette cle, s'il est encore affiche. */
+export function dismissToast(key: string): void {
+  for (const t of [...(toastHost?.children ?? [])] as HTMLElement[]) if (t.dataset.key === key) t.remove();
+}
+
 /* ---------------- dialogues ---------------- */
 
 export interface DialogField {
@@ -91,11 +96,20 @@ export interface DialogField {
 }
 
 /**
+ * Verification avant de fermer le dialogue (cles essayees aupres du
+ * service, par exemple). null = valide. Sinon le message s'affiche dans le
+ * dialogue, qui reste ouvert ; `force` renomme le bouton et laisse valider
+ * les memes valeurs au second appui (« Enregistrer sans tester »).
+ */
+export type FieldsCheck = (values: Record<string, string>) =>
+  Promise<{ message: string; force?: string } | null>;
+
+/**
  * Dialogue de saisie. Remplace window.prompt, qui n'existe pas dans une
  * WebView Tauri et qui ne serait de toute facon pas utilisable au doigt.
  */
 export function askFields(
-  title: string, fields: DialogField[], okLabel = "Valider",
+  title: string, fields: DialogField[], okLabel = "Valider", check?: FieldsCheck,
 ): Promise<Record<string, string> | null> {
   return new Promise((resolve) => {
     const inputs: Record<string, HTMLInputElement | HTMLTextAreaElement> = {};
@@ -110,20 +124,54 @@ export function askFields(
       content.append(el("label", { class: "small muted" }, f.label), input);
     }
 
+    const note = el("p", { class: "form-note", role: "status" });
+    note.hidden = true;
+    content.append(note);
+    const ok = el("button", { class: "primary" }, okLabel);
+    let closed = false;
+    let busy = false;
+    /** Valeurs deja refusees avec `force` : le second appui les garde. */
+    let forced: string | null = null;
+
     const close = (result: Record<string, string> | null) => {
+      if (closed) return;
+      closed = true;
       backdrop.remove();
       document.removeEventListener("keydown", onKey);
       resolve(result);
     };
-    const submit = () => {
+    const submit = async () => {
+      if (busy) return;
       const out: Record<string, string> = {};
       for (const [k, v] of Object.entries(inputs)) out[k] = v.value.trim();
-      close(out);
+      const sig = JSON.stringify(out);
+      if (!check || forced === sig) { close(out); return; }
+      busy = true;
+      ok.disabled = true;
+      ok.textContent = "Vérification…";
+      note.hidden = true;
+      let verdict: { message: string; force?: string } | null;
+      try { verdict = await check(out); } catch (e) {
+        verdict = { message: e instanceof Error ? e.message : String(e), force: okLabel };
+      }
+      busy = false;
+      ok.disabled = false;
+      if (closed) return;
+      if (!verdict) { close(out); return; }
+      note.textContent = verdict.message;
+      note.hidden = false;
+      forced = verdict.force ? sig : null;
+      ok.textContent = verdict.force ?? okLabel;
     };
+    ok.addEventListener("click", () => void submit());
+    // Valeurs modifiees apres un refus : on reverifie avant d'enregistrer.
+    content.addEventListener("input", () => {
+      if (forced) { forced = null; ok.textContent = okLabel; }
+    });
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); close(null); }
       if (e.key === "Enter" && !e.shiftKey && document.activeElement?.tagName !== "TEXTAREA") {
-        e.preventDefault(); submit();
+        e.preventDefault(); void submit();
       }
     };
 
@@ -133,7 +181,7 @@ export function askFields(
         content,
         el("footer", {},
           el("button", { onclick: () => close(null) }, "Annuler"),
-          el("button", { class: "primary", onclick: submit }, okLabel),
+          ok,
         ),
       ),
     );
@@ -173,8 +221,8 @@ export function confirmDialog(title: string, message: string, okLabel = "Confirm
   });
 }
 
-/** Choix dans une liste, au doigt. */
-export function pick(title: string, options: { value: string; label: string }[]): Promise<string | null> {
+/** Choix dans une liste, au doigt. Le libelle peut etre un rendu (formule). */
+export function pick(title: string, options: { value: string; label: string | Node }[]): Promise<string | null> {
   return new Promise((resolve) => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(null); } };
     const close = (v: string | null) => {

@@ -116,19 +116,39 @@ l'encre brute n'est jamais jetee, meme apres conversion.
 En mode « Auto » avec le rendu propre, chaque mot manuscrit se transforme en
 texte tape **a sa place**, facon Scribble sur iPad : meme endroit, meme
 couleur, une taille et un axe communs par ligne. Le mot en cours d'ecriture
-reste a l'encre jusqu'a la pause de 500 ms, puis se convertit.
+reste a l'encre jusqu'a une pause de 1,5 s, puis se convertit (une zone
+entouree part apres 500 ms).
 
 - MyScript renvoie la boite de chaque mot sur l'encre d'origine (requete
   sans `DIGITAL_EDIT`, qui remettrait le texte en page) ; chaque trait est
-  rattache au mot dont la boite le contient (`src/core/ink/words.ts`).
+  rattache au mot dont la boite le contient (`src/core/ink/words.ts`). Un
+  surlignage, un schema ou un trait trop loin d'un mot n'est rattache a rien :
+  il reste visible en rendu propre.
 - L'encre reste dans la page : « Encre : Brute » (menu « ⋯ ») la ramene, la gomme efface un mot
   tape en frottant dessus.
 - Correction : appui au doigt ou clic droit sur un mot. Une correction est
-  reportee sur les conversions suivantes au lieu d'etre ecrasee.
+  reportee sur les conversions suivantes tant que l'encre du mot est la meme ;
+  un mot qui grandit garde sa nouvelle lecture (l'ancienne reste proposee).
+- Gommer une partie d'un mot relance sa lecture.
+
+Formule : un appui propose les autres lectures (celles du moteur, puis les
+confusions classiques dx/dz, a/α, x/×, v/ν, u/μ, e/ε), rendues en formules ;
+« Corriger a la main » ouvre la formule dans un editeur visuel (MathLive),
+LaTeX modifiable dessous.
 
 Les cles se saisissent dans l'application, en bas a droite, bouton
-« Clés MyScript ». Sans cles, tout fonctionne sauf la conversion : les blocs
-math restent en attente indefiniment, l'encre reste lisible.
+« Clés MyScript » (ou `Ctrl+R` sans cles). Elles sont essayees avant d'etre
+enregistrees et servent tout de suite, sans relancer. Sans cles, tout
+fonctionne sauf la conversion : les blocs restent en attente, l'encre reste
+lisible, et ils partent des que les cles sont la.
+
+La file d'attente survit a la fermeture de l'appli : les blocs « en attente »
+repartent au lancement suivant, page ouverte ou non. Un envoi abandonne apres
+15 s ; au retour du reseau ou de la fenetre, la file repart tout de suite.
+Cles refusees : la file s'arrete et la barre d'etat le dit (appui = saisie
+des cles). Quota atteint : pause de 10 min. Un bloc refuse par MyScript
+affiche « non reconnu, réessayer ». La barre d'etat compte les envois du mois
+(alerte a 80 % du quota, compte par machine).
 
 ## Recherche et reperes « pas compris »
 

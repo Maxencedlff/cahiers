@@ -1,4 +1,4 @@
-import { el, clear, toast, askText, askFields, confirmDialog, pick } from "./dom";
+import { el, clear, toast, dismissToast, askText, askFields, confirmDialog, pick } from "./dom";
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
@@ -12,9 +12,17 @@ import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
 import { searchAll, type FlagHit } from "../core/storage/search";
 import type { FsAdapter } from "../core/storage/fs";
 import {
-  RecognitionQueue, SEND_DEBOUNCE_MS, MyScriptBackend, NoBackend,
-  type RecognitionBackend, type QueueState,
+  RecognitionQueue, SEND_DEBOUNCE_MS, AUTO_DEBOUNCE_MS, MyScriptBackend, NoBackend, testKeys,
+  type RecognitionBackend, type QueueState, type RecoResult, type MyScriptKeys,
 } from "../core/ink/recognizer";
+import {
+  applyToBlock, findBlockOnDisk, isPending, markFailed, parseBlockKey, updateBlockOnDisk,
+  type BlockRef,
+} from "../core/ink/recokey";
+import {
+  MONTHLY_QUOTA, bumpUsage, currentUsage, shouldWarn, usageLabel, type Usage,
+} from "../core/ink/usage";
+import type { Block, Stroke } from "../core/types";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
 import { showShortcuts } from "./help";
@@ -102,8 +110,8 @@ export class App {
   private pageLabelEl: HTMLElement | null = null;
   /** Ou poser la calculatrice sur l'ecran cahier : colonne ou zone de travail. */
   private calcSlot: { side: HTMLElement; work: HTMLElement } | null = null;
-  /** Cles saisies dans cette session : actives au prochain lancement. */
-  private keysPendingRestart = false;
+  /** Envois a MyScript ce mois-ci, sur cette machine (quota, reco-3). */
+  private usage: Usage = currentUsage(null, new Date());
 
   constructor(
     fs: FsAdapter,
@@ -130,13 +138,21 @@ export class App {
     if (this.autoConvert) this.renderMode = "clean";
 
     // Les cles de la machine passent devant celles du navigateur : elles
-    // survivent a un vidage du stockage local.
+    // survivent a un vidage du stockage local. Une fois la, la cle HMAC n'a
+    // plus rien a faire en clair dans le stockage du navigateur.
+    if (machineKeys?.applicationKey && this.settings.myscript.hmacKey) {
+      this.settings.myscript = { applicationKey: "", hmacKey: "" };
+      saveSettings(this.settings);
+    }
     const active = machineKeys?.applicationKey ? machineKeys : this.settings.myscript;
-    const backend: RecognitionBackend = active.applicationKey
-      ? new MyScriptBackend(active)
-      : new NoBackend();
+    this.usage = currentUsage(readJson<Usage>(USAGE_KEY), new Date());
 
-    this.queue = new RecognitionQueue(backend, (key, result) => this.onRecognized(key, result));
+    this.queue = new RecognitionQueue(
+      this.makeBackend(active),
+      (key, result) => this.onRecognized(key, result),
+      undefined,
+      (key, message) => this.onRecoFailed(key, message),
+    );
     this.queueState = this.queue.state();
     this.queue.subscribe((s) => { this.queueState = s; this.paintStatus(); });
 
@@ -244,6 +260,9 @@ export class App {
   async start(): Promise<void> {
     await this.repo.ensureRootLayout();
     await this.showMenu();
+    // Conversions laissees en route a la derniere fermeture : elles repartent
+    // sans attendre qu'on rouvre leur page.
+    void this.resumeSaved();
   }
 
   /* ---------------- ecrans ---------------- */
@@ -398,7 +417,9 @@ export class App {
       getWidth: () => this.width,
       touchRole: () => this.touchRole(),
       onRegionDone: () => this.restoreTool(),
-      requestRecognition: (key, kind, strokes) => this.enqueue(key, kind, strokes),
+      requestRecognition: (key, kind, strokes, auto) => this.enqueue(key, kind, strokes, auto),
+      resumeRecognition: (key, kind, strokes) => this.resume(key, kind, strokes),
+      cancelRecognition: (key) => this.cancelRecognition(key),
       onDirty: () => this.paintStatus(),
       // Seule la vue de l'onglet actif pilote l'indicateur de la colonne.
       onPageChange: (n, total) => {
@@ -1032,33 +1053,150 @@ export class App {
 
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private warnedNoKeys = false;
+  /** Ecritures disque de resultats, l'une apres l'autre. */
+  private recoIo: Promise<unknown> = Promise.resolve();
+
+  /** Moteur pour ces cles ; chaque envoi reel est compte (quota mensuel). */
+  private makeBackend(keys: MyScriptKeys): RecognitionBackend {
+    return keys.applicationKey && keys.hmacKey
+      ? new MyScriptBackend(keys, () => this.countRequest())
+      : new NoBackend();
+  }
 
   /**
-   * N'envoyer qu'au lever du stylet plus 500 ms de pause (section 4) :
-   * dix fois moins d'allers-retours reseau, et de la batterie economisee.
+   * N'envoyer qu'au lever du stylet plus une pause (section 4) : 500 ms
+   * pour une zone, 1,5 s au fil de la plume (D14), ou chaque envoi porte
+   * toute la page. Dix fois moins d'allers-retours, et de la batterie.
    */
-  private enqueue(key: string, kind: "math" | "text", strokes: import("../core/types").Stroke[]): void {
+  private enqueue(key: string, kind: "math" | "text", strokes: Stroke[], auto = false): void {
     if (!this.queueState.backendReady && !this.warnedNoKeys) {
       this.warnedNoKeys = true;
       toast(
         "Aucune clé MyScript : l'encre est gardée mais rien ne sera converti.",
-        "warn", 7000, { label: "Saisir les clés", run: () => void this.editKeys() },
+        "warn", 7000, { label: "Saisir les clés", run: () => void this.editKeys() }, "no-keys",
       );
     }
+    this.remember(key, kind);
     const running = this.debounceTimers.get(key);
     if (running) clearTimeout(running);
     this.debounceTimers.set(key, setTimeout(() => {
       this.debounceTimers.delete(key);
       this.queue.enqueue({ key, kind, strokes });
-    }, SEND_DEBOUNCE_MS));
+    }, auto ? AUTO_DEBOUNCE_MS : SEND_DEBOUNCE_MS));
   }
 
-  private async onRecognized(key: string, result: import("../core/ink/recognizer").RecoResult): Promise<void> {
-    for (const tab of this.tabs) {
-      if (key.startsWith(`${tab.notebook}/`)) {
-        await tab.view?.applyRecognition(key, result);
-      }
+  /** Bloc reste en attente : en file tout de suite, s'il n'y est pas deja. */
+  private resume(key: string, kind: "math" | "text", strokes: Stroke[]): void {
+    if (this.queue.has(key) || this.debounceTimers.has(key)) return;
+    this.remember(key, kind);
+    this.queue.enqueue({ key, kind, strokes });
+  }
+
+  private cancelRecognition(key: string): boolean {
+    const timer = this.debounceTimers.get(key);
+    if (timer) { clearTimeout(timer); this.debounceTimers.delete(key); }
+    const had = this.queue.cancel(key) || !!timer;
+    if (had) this.forget(key);
+    return had;
+  }
+
+  /** Une autre version de ce bloc attend ou part : le resultat est provisoire. */
+  private moreComing(key: string): boolean {
+    return this.queue.has(key) || this.debounceTimers.has(key);
+  }
+
+  private async onRecognized(key: string, result: RecoResult): Promise<void> {
+    const more = this.moreComing(key);
+    await this.toBlock(key, (block) => applyToBlock(block, result, more));
+    if (!more) this.forget(key);
+  }
+
+  /** Requete refusee par MyScript : le bloc dit « non reconnu, réessayer ». */
+  private async onRecoFailed(key: string, message: string): Promise<void> {
+    if (this.moreComing(key)) return;
+    await this.toBlock(key, (block) => markFailed(block, message));
+    this.forget(key);
+  }
+
+  /**
+   * Porte un resultat jusqu'a son bloc. D'abord les vues qui tiennent la
+   * page en memoire (meme cahier, meme intercalaire, meme bloc) ; sinon UNE
+   * seule ecriture disque, passee dans la file de la vue de cet
+   * intercalaire s'il y en a une : jamais deux ecritures croisees d'une
+   * meme page, qui perdaient les derniers traits.
+   */
+  private async toBlock(key: string, change: (block: Block) => void): Promise<void> {
+    const ref = parseBlockKey(key);
+    if (!ref) return;
+    if (this.applyInViews(ref, change)) return;
+    const holder = this.holders(ref.notebook, ref.divider)[0];
+    const write = async () => {
+      // La page a pu s'ouvrir entre-temps : la vue la tient, elle ecrira.
+      if (this.applyInViews(ref, change)) return;
+      try { await updateBlockOnDisk(this.repo, ref, change); } catch { /* page disparue */ }
+    };
+    const run = holder ? holder.runIo(write) : this.recoIo.then(write, write);
+    if (!holder) this.recoIo = run.catch(() => undefined);
+    await run;
+  }
+
+  private applyInViews(ref: BlockRef, change: (block: Block) => void): boolean {
+    let done = false;
+    for (const v of this.holders(ref.notebook, ref.divider)) {
+      // Deux onglets sur le meme intercalaire : chacun garde sa copie a jour.
+      if (v.applyChange(ref, change)) done = true;
     }
+    return done;
+  }
+
+  /* -- conversions en attente, retenues d'une seance a l'autre -- */
+
+  /**
+   * Cles des blocs en route, gardees dans le stockage local de la machine
+   * (jamais dans le dossier synchronise). Au lancement suivant, elles
+   * repartent sans qu'on ait a rouvrir chaque page.
+   */
+  private saved = new Map<string, "math" | "text">(
+    Object.entries(readJson<Record<string, "math" | "text">>(PENDING_KEY) ?? {}),
+  );
+
+  private remember(key: string, kind: "math" | "text"): void {
+    if (this.saved.get(key) === kind) return;
+    this.saved.set(key, kind);
+    writeJson(PENDING_KEY, Object.fromEntries(this.saved));
+  }
+
+  private forget(key: string): void {
+    if (!this.saved.delete(key)) return;
+    writeJson(PENDING_KEY, Object.fromEntries(this.saved));
+  }
+
+  /** Remet en file les blocs encore en attente sur le disque. */
+  private async resumeSaved(): Promise<void> {
+    for (const [key, kind] of [...this.saved]) {
+      if (this.moreComing(key)) continue;
+      const ref = parseBlockKey(key);
+      const found = ref ? await findBlockOnDisk(this.repo, ref).catch(() => null) : null;
+      const b = found?.block;
+      if (!b || !isPending(b) || (b.type !== "math" && b.type !== "ink")) { this.forget(key); continue; }
+      // Le fond de page ne part qu'en conversion au fil de la plume.
+      if (b.type === "ink" && !b.rect && !this.autoConvert) continue;
+      const strokes = b.strokes.filter((st) => st.tool === "pen");
+      if (!strokes.length) { this.forget(key); continue; }
+      this.resume(key, kind, strokes);
+    }
+  }
+
+  /** Un envoi reel de plus ce mois-ci ; alerte une fois a 80 % du quota. */
+  private countRequest(): void {
+    this.usage = bumpUsage(this.usage, new Date());
+    if (shouldWarn(this.usage)) {
+      this.usage = { ...this.usage, warned: true };
+      toast(`Reconnaissance : ${usageLabel(this.usage)}. Au-delà de ${MONTHLY_QUOTA.toLocaleString("fr-FR")}, `
+        + "plus rien ne sera converti avant le mois prochain. La conversion sur zone consomme moins.",
+      "warn", 12000);
+    }
+    writeJson(USAGE_KEY, this.usage);
   }
 
   /* ---------------- liens ---------------- */
@@ -1223,12 +1361,9 @@ export class App {
    */
   private setAutoConvert(on: boolean): void {
     if (on && !this.queueState.backendReady) {
-      if (this.keysPendingRestart) {
-        toast("Clés enregistrées : relance l'application pour activer la conversion.", "warn", 6000);
-      } else {
-        toast("Ajoute d'abord tes clés MyScript : sans elles, rien n'est converti.", "warn", 7000,
-          { label: "Saisir les clés", run: () => void this.editKeys() });
-      }
+      // Sans cles, rien ne serait converti : on les demande tout de suite,
+      // et la conversion s'active des qu'elles sont bonnes (reco-15).
+      void this.editKeys().then((ok) => { if (ok && this.queueState.backendReady) this.setAutoConvert(true); });
       return;
     }
     if (on === this.autoConvert) return;
@@ -1465,7 +1600,19 @@ export class App {
             : "pas de stylet, le doigt navigue",
       ),
       el("div", { class: "spacer" }),
-      ...(q.lastError ? [el("span", { class: "pill" }, `dernière erreur : ${q.lastError}`)] : []),
+      ...(q.blocked === "keys"
+        ? [el("button", {
+            class: "ghost small keys-btn reco-blocked",
+            title: "La file de conversion est arrêtée : saisis des clés valides",
+            onclick: () => void this.editKeys(),
+          }, q.lastError ?? "Clés MyScript refusées")]
+        : q.lastError ? [el("span", { class: "pill", title: q.lastError }, `dernière erreur : ${q.lastError}`)] : []),
+      ...(q.backendReady && this.usage.count > 0
+        ? [el("span", {
+            class: `pill${this.usage.count >= MONTHLY_QUOTA * 0.8 ? " usage-high" : ""}`,
+            title: "Envois à MyScript ce mois-ci, sur cette machine (quota mensuel du compte)",
+          }, usageLabel(this.usage))]
+        : []),
       el("span", { class: "pill" }, this.rootLabel),
       el("button", {
         class: "ghost small keys-btn",
@@ -1475,21 +1622,51 @@ export class App {
     );
   }
 
-  private async editKeys(): Promise<void> {
+  /**
+   * Saisie des cles MyScript. Elles sont essayees avant d'etre gardees (un
+   * petit trait envoye), puis servent tout de suite : plus de relance de
+   * l'appli, qui vidait la file. Vrai si des cles valides sont en place.
+   */
+  private async editKeys(): Promise<boolean> {
     const r = await askFields("Reconnaissance manuscrite", [
       { name: "app", label: "applicationKey MyScript",
         value: this.machineKeys?.applicationKey || this.settings.myscript.applicationKey },
       { name: "hmac", label: "hmacKey MyScript",
         value: this.machineKeys?.hmacKey || this.settings.myscript.hmacKey },
-    ], "Enregistrer");
-    if (!r) return;
-    this.settings.myscript = { applicationKey: r.app, hmacKey: r.hmac };
-    saveSettings(this.settings);
+    ], "Enregistrer", async (v) => {
+      if (!v.app && !v.hmac) return null; // retirer les cles
+      if (!v.app || !v.hmac) return { message: "Il faut les deux clés : applicationKey et hmacKey." };
+      const err = await testKeys({ applicationKey: v.app, hmacKey: v.hmac }, () => this.countRequest());
+      if (!err) return null;
+      if (err.kind === "keys" && err.status) {
+        return { message: "MyScript refuse ces clés. Vérifie-les (copier-coller complet, sans espace)." };
+      }
+      return {
+        message: `Clés non vérifiées : ${err.message.replace(/\.$/, "")}. Elles serviront dès que MyScript répondra.`,
+        force: "Enregistrer sans tester",
+      };
+    });
+    if (!r) return false;
+    const keys = { applicationKey: r.app, hmacKey: r.hmac };
+    let onMachine = false;
     if (this.saveKeys) {
-      try { await this.saveKeys(r.app, r.hmac); } catch { /* stockage local indisponible */ }
+      try { await this.saveKeys(r.app, r.hmac); onMachine = true; } catch { /* stockage local indisponible */ }
     }
-    this.keysPendingRestart = true;
-    toast("Clés enregistrées. Relance l'application pour les activer.");
+    // Stockees sur la machine : rien en clair dans le stockage du navigateur.
+    this.settings.myscript = onMachine ? { applicationKey: "", hmacKey: "" } : keys;
+    this.machineKeys = onMachine ? keys : null;
+    saveSettings(this.settings);
+    this.queue.setBackend(this.makeBackend(keys));
+    if (!keys.applicationKey) {
+      toast("Clés retirées : la reconnaissance est coupée, l'encre reste.");
+      return false;
+    }
+    // Les blocs restes en attente partent maintenant, pages ouvertes ou non.
+    for (const v of this.views()) v.resumeAll();
+    void this.resumeSaved();
+    dismissToast("no-keys");
+    toast("Clés MyScript enregistrées : la conversion est active.");
+    return true;
   }
 
   /** Avertissement de presence OneDrive, non bloquant (section 11). */
@@ -1504,4 +1681,24 @@ export class App {
     );
     if (readOnly) toast("Lecture seule : les modifications ne seront pas enregistrées", "warn", 6000);
   }
+}
+
+/* ---------------- stockage local de la reconnaissance ---------------- */
+
+/** Blocs en route vers MyScript (cle -> moteur), d'une seance a l'autre. */
+const PENDING_KEY = "cahiers.reco.pending.v1";
+/** Compteur mensuel des envois. */
+const USAGE_KEY = "cahiers.reco.usage.v1";
+
+function readJson<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) as T : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeJson(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* stockage indisponible */ }
 }

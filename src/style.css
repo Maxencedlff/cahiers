@@ -241,6 +241,13 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .block-box.math { border-color: #cbd5e1; background: transparent; }
 .block-box.math.clean { background: rgba(255,255,255,.94); }
 .block-box.math.pending { border-color: #f0b429; background: rgba(255,251,240,.28); }
+.block-box.math.failed { border-color: #e7a3a3; }
+/* Bloc refuse par la reconnaissance : l'appui relance l'envoi. */
+.block-box .tag.reco-fail {
+  pointer-events: auto; cursor: pointer; color: #a51b1b; border-color: #e7a3a3; background: #fff5f5;
+  font: inherit; font-size: 11px; line-height: 18px; min-height: 0; min-width: 0;
+}
+.block-box .tag.reco-fail::after { content: ""; position: absolute; inset: -13px -6px; }
 .block-box.text {
   -webkit-user-select: text; user-select: text;
   border-color: transparent; background: rgba(255,255,255,.6);
@@ -354,6 +361,18 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .modal header { padding: 16px 18px 10px; font-size: 17px; font-weight: 600; }
 .modal .content { padding: 0 18px 6px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .modal footer { padding: 14px 18px; display: flex; gap: 8px; justify-content: flex-end; }
+.form-note { margin: 2px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
+  background: #fff6e5; border: 1px solid #f0d49a; color: #6b4a00; }
+.form-note[hidden] { display: none; }
+/* Correction d'une formule reconnue : champ MathLive + LaTeX source. */
+.math-dialog math-field.latex-field {
+  display: block; min-height: var(--touch); font-size: 24px; padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+}
+.math-dialog math-field::part(menu-toggle),
+.math-dialog math-field::part(virtual-keyboard-toggle) { display: none; }
+.math-dialog .latex-source { font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; }
+.hit .katex { font-size: 1.15em; }
 
 /* Au-dessus de la barre d'etat (35 px), jamais dessus. */
 .toast-host { position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%); z-index: 90;
@@ -383,6 +402,8 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 /* Bouton discret de la barre d'etat, zone d'appui de 44 px quand meme. */
 .status .keys-btn { position: relative; min-height: 26px; min-width: 0; padding: 0 8px; }
 .status .keys-btn::after { content: ""; position: absolute; inset: -9px -2px; }
+.status .reco-blocked { color: #a51b1b; border-color: #e7a3a3; background: #fff5f5; }
+.status .pill.usage-high { color: #8a5a00; font-weight: 600; }
 .tabbar .help-btn { font-weight: 700; color: var(--muted); }
 
 .hits { display: flex; flex-direction: column; gap: 6px; }
