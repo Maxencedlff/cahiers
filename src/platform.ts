@@ -1,4 +1,7 @@
 import { BrowserFs, TauriFs, joinPath, splitDataUrl, type FsAdapter } from "./core/storage/fs";
+import {
+  isPresenceFile, othersPresent, parsePresence, presenceFileName, type OtherPresence,
+} from "./core/sync";
 
 /**
  * Couche plateforme. L'application tourne dans deux contextes :
@@ -9,8 +12,10 @@ import { BrowserFs, TauriFs, joinPath, splitDataUrl, type FsAdapter } from "./co
  */
 
 export interface Presence {
-  /** Nom de l'autre machine si le cahier semble ouvert ailleurs. */
-  check: (notebook: string) => Promise<string | null>;
+  /** Nom de cette machine, tel qu'il est ecrit dans son fichier de presence. */
+  machine: string;
+  /** L'autre machine qui a le cahier ouvert (la plus recente), ou null. */
+  check: (notebook: string) => Promise<OtherPresence | null>;
   claim: (notebook: string) => Promise<void>;
   release: (notebook: string) => Promise<void>;
 }
@@ -38,7 +43,9 @@ export async function detectPlatform(): Promise<Platform> {
     return {
       fs,
       rootLabel: "Mode navigateur, données de développement",
-      presence: null,
+      // Meme logique que l'appli installee, dans les donnees du navigateur :
+      // sert a verifier les bandeaux (une presence d'un autre PC s'y simule).
+      presence: buildPresence(fs, "NAVIGATEUR"),
       isTauri: false,
       ocr: null,
       keys: null,
@@ -75,35 +82,36 @@ export async function detectPlatform(): Promise<Platform> {
 }
 
 /**
- * Fichier de presence dans le dossier partage (section 11). Le verrou
- * d'instance est local a la machine et ne peut pas voir l'autre PC :
- * seul un fichier dans OneDrive le peut. L'avertissement reste non bloquant.
+ * Fichier de presence dans le dossier partage (section 11), un par machine
+ * (core/sync.ts). Le verrou d'instance est local a la machine et ne peut pas
+ * voir l'autre PC : seul un fichier dans OneDrive le peut. L'avertissement
+ * reste non bloquant. Toute erreur de disque est avalee : la presence ne
+ * doit jamais empecher d'ouvrir un cahier.
  */
-const PRESENCE_FILE = ".presence.json";
-const PRESENCE_TTL_MS = 15 * 60 * 1000;
-
 function buildPresence(fs: FsAdapter, machine: string): Presence {
-  const path = (nb: string) => joinPath(nb, PRESENCE_FILE);
+  const mine = (nb: string) => joinPath(nb, presenceFileName(machine));
 
   return {
+    machine,
     async check(nb) {
       try {
-        if (!(await fs.exists(path(nb)))) return null;
-        const raw = JSON.parse(await fs.readText(path(nb))) as { machine: string; at: string };
-        if (raw.machine === machine) return null;
-        const age = Date.now() - new Date(raw.at).getTime();
-        return age < PRESENCE_TTL_MS ? raw.machine : null;
+        const files = (await fs.listFiles(nb)).filter(isPresenceFile);
+        const records = [];
+        for (const f of files) {
+          try { records.push(parsePresence(await fs.readText(joinPath(nb, f)))); } catch { /* fichier pas encore la */ }
+        }
+        return othersPresent(records, machine, Date.now())[0] ?? null;
       } catch {
         return null;
       }
     },
     async claim(nb) {
       try {
-        await fs.writeText(path(nb), JSON.stringify({ machine, at: new Date().toISOString() }));
+        await fs.writeText(mine(nb), JSON.stringify({ machine, at: new Date().toISOString() }));
       } catch { /* dossier en lecture seule, on continue */ }
     },
     async release(nb) {
-      try { await fs.remove(path(nb)); } catch { /* deja parti */ }
+      try { if (await fs.exists(mine(nb))) await fs.remove(mine(nb)); } catch { /* deja parti */ }
     },
   };
 }

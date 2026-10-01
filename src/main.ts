@@ -8,6 +8,7 @@ import { el, toast, confirmDialog } from "./ui/dom";
  * Fermeture de la fenetre (croix, Alt+F4) : on ecrit ce qui attend AVANT de
  * fermer. Sans cela la derniere seconde de notes partait avec la fenetre.
  * Si une page reste refusee par le disque, on demande avant de la perdre.
+ * Les fichiers de presence de ce PC partent avec la fenetre.
  */
 async function guardClose(app: App): Promise<void> {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -15,7 +16,11 @@ async function guardClose(app: App): Promise<void> {
   await getCurrentWindow().onCloseRequested(async (event) => {
     if (asking) { event.preventDefault(); return; }
     await app.flushAll();
-    if (!app.hasUnsaved) return; // la fenetre se ferme (destroy)
+    if (!app.hasUnsaved) {
+      // L'autre PC ne doit plus croire les cahiers ouverts ici (section 11).
+      await app.releaseAll();
+      return; // la fenetre se ferme (destroy)
+    }
     asking = true;
     const close = await confirmDialog(
       "Modifications non enregistrées",
@@ -25,6 +30,7 @@ async function guardClose(app: App): Promise<void> {
     );
     asking = false;
     if (!close) event.preventDefault();
+    else await app.releaseAll();
   });
 }
 

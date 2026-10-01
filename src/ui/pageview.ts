@@ -10,7 +10,8 @@ import type {
 import { isFutureVersion } from "../core/types";
 import { dayLabel } from "../core/nav";
 import { uuid, nowIso } from "../core/id";
-import type { Repo, TrashEntry } from "../core/storage/repo";
+import type { ConflictCopy, Repo, TrashEntry } from "../core/storage/repo";
+import { mergeInk } from "../core/sync";
 import {
   convertedStrokeIds, dropStrokes, joinWords, layoutWords,
   LINE_HEIGHT, type PlacedWord,
@@ -68,6 +69,19 @@ export interface PageViewHost {
    * jamais dans cahier.json.
    */
   rememberPage?: (notebook: string, divider: string, n: number) => void;
+  /** Une copie de conflit OneDrive est partie ou revenue : pastilles a refaire. */
+  onConflictsChanged?: () => void;
+}
+
+/**
+ * Bandeau en tete de la vue. `lock` = lecture seule (cahier ouvert sur
+ * l'autre PC) : rien n'est ecrit, ni page ni renumerotation. `warn` = simple
+ * avertissement, l'ecriture continue.
+ */
+export interface ViewNotice {
+  kind: "lock" | "warn";
+  text: string;
+  actions?: { label: string; run: () => void }[];
 }
 
 interface LoadedPage {
@@ -98,10 +112,16 @@ interface LoadedPage {
   lastEdit?: "text" | "ink";
   lastInk?: Bounds;
   /**
-   * Page ecrite par une version plus recente de l'appli : affichee, jamais
-   * reenregistree (elle perdrait ce que cette version ne connait pas).
+   * Lecture seule : page ecrite par une version plus recente de l'appli
+   * (elle perdrait ce que cette version ne connait pas), vue verrouillee
+   * (cahier ouvert sur l'autre PC), ou copie de conflit montree. Affichee,
+   * jamais reenregistree.
    */
   readOnly?: boolean;
+  /** Copie de conflit OneDrive montree a la place de la page (nom du fichier). */
+  copy?: string;
+  /** Bandeaux de la page (version future, copies de conflit). */
+  notes: HTMLElement;
 }
 
 /**
@@ -158,6 +178,16 @@ export class PageView {
   private attachedOnce = false;
   /** Avertissement « lecture seule » deja donne. */
   private warnedReadOnly = false;
+  /** Bandeau de la vue (presence sur l'autre PC) ; `lock` = lecture seule. */
+  private notice: ViewNotice | null = null;
+  /** Bandeaux de la vue : presence, copies de conflit sans page. */
+  private viewNotes = el("div", { class: "view-notes" });
+  /** Copies de conflit OneDrive de l'intercalaire, lues a chaque rendu. */
+  private conflicts: ConflictCopy[] = [];
+  /** Copie montree seule, en lecture seule (« Voir la copie »). */
+  private peek: ConflictCopy | null = null;
+  /** Copies dont l'encre a deja ete reprise pendant la seance. */
+  private merged = new Set<string>();
 
   constructor(
     private host: PageViewHost,
@@ -184,6 +214,31 @@ export class PageView {
   get pageCount(): number { return this.total; }
   get mode(): ViewMode { return this.viewMode; }
   get rendering(): RenderMode { return this.renderMode; }
+  /** Vue verrouillee : rien n'est ecrit (cahier ouvert sur l'autre PC). */
+  get readOnly(): boolean { return this.notice?.kind === "lock"; }
+  /** Copies de conflit vues au dernier rendu. */
+  get conflictCount(): number { return this.conflicts.length; }
+
+  /**
+   * Pose ou retire le bandeau de la vue. Passer en lecture seule ecrit
+   * d'abord ce qui attend (c'etait du travail fait avant) ; si une page
+   * reste refusee par le disque, la vue reste en ecriture (faux rendu).
+   */
+  async setNotice(notice: ViewNotice | null): Promise<boolean> {
+    const was = this.readOnly;
+    if (notice?.kind === "lock" && !was) {
+      await this.flush();
+      if (this.hasUnsaved) {
+        toast("Lecture seule impossible pour l'instant : une page attend encore d'être écrite", "err", 6000);
+        return false;
+      }
+    }
+    this.notice = notice;
+    this.warnedReadOnly = false;
+    if (was !== this.readOnly && this.list.length) await this.render();
+    else this.paintViewNotes();
+    return true;
+  }
 
   /**
    * `startPage` : la page ou l'on etait dans CET intercalaire (l'appli la
@@ -196,7 +251,7 @@ export class PageView {
     if (nums.length === 0) {
       // Dossier range en sous-dossiers (E3A/S1/Chapitre 1) : aucune page n'y
       // est creee d'office, elle polluait le vrai rangement (D4, palier 1).
-      if ((await this.host.repo.listSubfolders(this.notebook, this.divider)).length) {
+      if (this.readOnly || (await this.host.repo.listSubfolders(this.notebook, this.divider)).length) {
         this.current = 0;
         await this.render();
         return;
@@ -301,8 +356,16 @@ export class PageView {
     this.root.classList.toggle("scroll-mode", this.viewMode === "scroll");
 
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
+    this.conflicts = await this.host.repo.listConflicts(this.notebook, this.divider);
     if (gen !== this.renderGen) return;
     this.total = nums.length;
+    this.paintViewNotes();
+    this.root.append(this.viewNotes);
+    if (this.peek) {
+      const c = this.conflicts.find((x) => x.file === this.peek!.file);
+      if (c) { await this.renderPeek(c, gen); return; }
+      this.peek = null;
+    }
     if (!nums.length) {
       // Aucune page (dossier range en sous-dossiers) : on le dit, sans rien creer.
       this.current = 0;
@@ -325,7 +388,7 @@ export class PageView {
         if (gen !== this.renderGen) return;
         // Jamais d'ecran gris muet : on dit ce qui se passe. Rien n'est
         // ecrit sous ce numero tant que la page reste illisible.
-        if (this.viewMode === "scroll" && this.root.childElementCount) {
+        if (this.viewMode === "scroll" && this.root.childElementCount > 1) {
           this.root.append(el("div", { class: "page-sep" }));
         }
         this.root.append(this.unreadableSheet(n, e, nums));
@@ -342,7 +405,7 @@ export class PageView {
       if (waiting) this.pendingSave.set(page.id, loaded);
       this.list.push(loaded);
       // Separateur discret entre deux pages en mode defilement.
-      if (this.viewMode === "scroll" && this.root.childElementCount) {
+      if (this.viewMode === "scroll" && this.root.childElementCount > 1) {
         this.root.append(el("div", { class: "page-sep" }));
       }
       this.root.append(loaded.wrap);
@@ -371,6 +434,8 @@ export class PageView {
         : null,
     );
     return el("div", { class: "page-wrap unreadable-wrap", dataset: { page: String(n) } },
+      // Une page tronquee peut avoir une copie OneDrive intacte : elle se voit ici.
+      el("div", { class: "page-notes" }, ...this.conflictNotes(n)),
       el("div", { class: "sheet unreadable" },
         el("h2", {}, "Page illisible"),
         el("p", {}, "Cette page n'a pas pu être lue. Elle n'est pas modifiée : rien ne sera "
@@ -410,7 +475,210 @@ export class PageView {
     );
   }
 
-  private buildPage(n: number, page: Page): LoadedPage {
+  /* ---------------- bandeaux : lecture seule et copies de conflit ---------------- */
+
+  /**
+   * Bandeaux de la vue : presence sur l'autre PC (lecture seule ou simple
+   * avertissement), puis les copies de conflit sans page sous leur numero.
+   */
+  private paintViewNotes(): void {
+    const items: HTMLElement[] = [];
+    const n = this.notice;
+    if (n) {
+      items.push(el("div", { class: `readonly-note view-lock${n.kind === "warn" ? " warn" : ""}` },
+        el("span", {}, n.text),
+        ...(n.actions ?? []).map((a) => el("button", { class: "small", onclick: () => a.run() }, a.label)),
+      ));
+    }
+    if (!this.peek) {
+      for (const c of this.conflicts.filter((x) => x.orphan)) {
+        items.push(el("div", { class: "readonly-note conflict-note" },
+          el("span", {}, `Copie OneDrive sans page, venue de ${c.label} : `, el("code", {}, c.file),
+            ". Sa page n'existe plus ici (supprimée ou renumérotée sur l'autre PC)."),
+          el("button", { class: "small", onclick: () => void this.showCopy(c) }, "Voir la copie"),
+          el("button", { class: "small", onclick: () => void this.adoptCopy(c) }, "En faire une page"),
+          el("button", { class: "small", onclick: () => void this.trashCopy(c) }, "Supprimer la copie"),
+        ));
+      }
+    }
+    this.viewNotes.replaceChildren(...items);
+    this.viewNotes.hidden = items.length === 0;
+  }
+
+  /** Bandeaux d'une page : version future, copies de conflit. */
+  private paintNotes(loaded: LoadedPage): void {
+    const items: HTMLElement[] = [];
+    if (isFutureVersion(loaded.page)) {
+      items.push(el("div", { class: "readonly-note" },
+        "Page créée par une version plus récente de Cahiers : lecture seule. "
+          + "Mets l'application à jour sur ce PC pour la modifier."));
+    }
+    if (loaded.copy) {
+      const c = this.conflicts.find((x) => x.file === loaded.copy);
+      if (c) items.push(this.peekNote(c));
+    } else {
+      items.push(...this.conflictNotes(loaded.number));
+    }
+    loaded.notes.replaceChildren(...items);
+  }
+
+  /**
+   * « Autre version de cette page » : une ligne par copie de conflit
+   * OneDrive. Rien n'est jamais supprime sans un appui ici.
+   */
+  private conflictNotes(n: number): HTMLElement[] {
+    return this.conflicts.filter((c) => c.page === n && !c.orphan).map((c) =>
+      el("div", { class: "readonly-note conflict-note" },
+        el("span", {}, this.merged.has(c.file)
+          ? `Encre de la copie venue de ${c.label} reprise sur cette page. La copie reste là tant que tu ne la supprimes pas.`
+          : `Autre version de cette page, venue de ${c.label} (copie OneDrive `, this.merged.has(c.file) ? null : el("code", {}, c.file),
+          this.merged.has(c.file) ? null : ")."),
+        el("button", { class: "small", onclick: () => void this.showCopy(c) }, "Voir la copie"),
+        el("button", { class: "small", onclick: () => void this.mergeCopy(c) }, "Fusionner l'encre"),
+        el("button", { class: "small", onclick: () => void this.trashCopy(c) }, "Supprimer la copie"),
+      ));
+  }
+
+  /** Bandeau de la copie montree seule. */
+  private peekNote(c: ConflictCopy): HTMLElement {
+    return el("div", { class: "readonly-note conflict-note" },
+      el("span", {}, `Copie venue de ${c.label}, en lecture seule : `, el("code", {}, c.file), "."),
+      el("button", { class: "small primary", onclick: () => void this.leavePeek() },
+        c.orphan ? "Revenir aux pages" : "Revenir à ma page"),
+      c.orphan
+        ? el("button", { class: "small", onclick: () => void this.adoptCopy(c) }, "En faire une page")
+        : el("button", { class: "small", onclick: () => void this.mergeCopy(c) }, "Fusionner l'encre"),
+      el("button", { class: "small", onclick: () => void this.trashCopy(c) }, "Supprimer la copie"),
+    );
+  }
+
+  /** Rendu de la copie seule, a la place des pages, jamais ecrite. */
+  private async renderPeek(c: ConflictCopy, gen: number): Promise<void> {
+    let page: Page;
+    try {
+      page = await this.host.repo.readConflict(this.notebook, this.divider, c.file);
+    } catch (e) {
+      if (gen !== this.renderGen) return;
+      this.peek = null;
+      toast(`Copie illisible : ${errorText(e)}`, "err", 6000);
+      await this.render();
+      return;
+    }
+    if (gen !== this.renderGen) return;
+    const loaded = this.buildPage(c.page, page, c);
+    this.list.push(loaded);
+    this.root.append(loaded.wrap);
+    this.relayout();
+    this.root.scrollTop = 0;
+  }
+
+  /** « Voir la copie » : la copie seule, en lecture seule. */
+  private async showCopy(c: ConflictCopy): Promise<void> {
+    this.peek = c;
+    await this.render();
+  }
+
+  private async leavePeek(): Promise<void> {
+    const c = this.peek;
+    this.peek = null;
+    if (c && !c.orphan && c.page !== this.current) await this.goTo(c.page);
+    else await this.render();
+  }
+
+  /**
+   * « Fusionner l'encre » : les traits de la copie absents de la page la
+   * rejoignent (par id, core/sync.ts). Annulable par Ctrl+Z. La copie
+   * reste sur le disque : la supprimer est un autre appui.
+   */
+  private async mergeCopy(c: ConflictCopy): Promise<void> {
+    if (this.locked()) return;
+    if (this.peek || this.current !== c.page) {
+      this.peek = null;
+      this.current = c.page;
+      await this.render();
+    }
+    const loaded = this.list.find((p) => p.number === c.page && !p.copy && !p.dead);
+    if (!loaded) { toast("Page introuvable : fusion impossible", "err", 6000); return; }
+    if (loaded.readOnly) { toast("Page en lecture seule : fusion impossible ici", "warn", 6000); return; }
+    let other: Page;
+    try {
+      other = await this.host.repo.readConflict(this.notebook, this.divider, c.file);
+    } catch (e) {
+      toast(`Copie illisible : ${errorText(e)}`, "err", 6000);
+      return;
+    }
+    const r = mergeInk(loaded.page, other);
+    const text = r.textDiffers ? " Le texte tapé diffère : il n'est pas fusionné, regarde la copie." : "";
+    if (!r.added) {
+      toast(`Rien à reprendre : toute l'encre de la copie est déjà sur la page.${text}`, "info", 7000);
+      return;
+    }
+    this.pushUndo(loaded);
+    loaded.page.blocks = r.blocks;
+    if (r.height != null) loaded.page.height = r.height;
+    this.merged.add(c.file);
+    this.fitSheet(loaded);
+    this.paintStrokes(loaded);
+    this.paintOverlay(loaded);
+    this.paintNotes(loaded);
+    this.queueSave(loaded);
+    this.resumePending(loaded);
+    await this.flush();
+    toast(`${r.added} trait${r.added > 1 ? "s" : ""} repris de la copie de ${c.label} (Ctrl+Z annule). `
+      + `La copie reste là : supprime-la quand tu as vérifié.${text}`, "info", 9000);
+  }
+
+  /** « Supprimer la copie » : a la corbeille, jamais effacee, « Annuler » la remet. */
+  private async trashCopy(c: ConflictCopy): Promise<void> {
+    if (this.locked()) return;
+    const ok = await confirmDialog(
+      "Supprimer la copie",
+      `La copie venue de ${c.label} (${c.file}) part à la corbeille (dossier ESEO/.corbeille). `
+        + (c.orphan ? "" : this.merged.has(c.file)
+          ? "Son encre est déjà sur ta page. "
+          : "Ta page n'est pas touchée : si la copie contient de l'encre à garder, fusionne-la d'abord. "),
+      "Supprimer la copie",
+    );
+    if (!ok) return;
+    let entry: TrashEntry;
+    try {
+      entry = await this.serial(() => this.host.repo.trashConflict(this.notebook, this.divider, c.file));
+    } catch (e) {
+      toast(`Suppression impossible : ${errorText(e)}`, "err", 6000);
+      return;
+    }
+    if (this.peek?.file === c.file) this.peek = null;
+    this.merged.delete(c.file);
+    await this.render();
+    this.host.onConflictsChanged?.();
+    toast(`Copie venue de ${c.label} mise à la corbeille`, "info", 8000, {
+      label: "Annuler",
+      run: () => void this.serial(() => this.host.repo.restoreConflict(entry))
+        .then(() => this.render(), (e) => toast(`Restauration impossible : ${errorText(e)}`, "err", 6000))
+        .then(() => this.host.onConflictsChanged?.()),
+    });
+  }
+
+  /** Copie sans page : elle devient une page normale, en fin d'intercalaire. */
+  private async adoptCopy(c: ConflictCopy): Promise<void> {
+    if (this.locked()) return;
+    let n: number;
+    try {
+      n = await this.serial(() => this.host.repo.adoptConflict(this.notebook, this.divider, c.file));
+    } catch (e) {
+      toast(`Impossible : ${errorText(e)}`, "err", 6000);
+      return;
+    }
+    this.peek = null;
+    this.current = n;
+    await this.render();
+    this.revealCurrent();
+    this.host.onConflictsChanged?.();
+    this.host.onDirty();
+    toast(`Copie venue de ${c.label} récupérée : page ${n}`);
+  }
+
+  private buildPage(n: number, page: Page, copy?: ConflictCopy): LoadedPage {
     const migrated = absorbTextBoxes(page.blocks as never[], uuid);
     // Encre gommee sous l'A4 lors d'une seance precedente : la page se
     // rouvre a la taille de l'encre restante. Pas pendant la seance, ou la
@@ -439,22 +707,25 @@ export class PageView {
         this.queueSave(loaded);
       },
     });
-    const readOnly = isFutureVersion(page);
+    const readOnly = isFutureVersion(page) || this.readOnly || !!copy;
     const sheet = el("div", { class: `sheet${readOnly ? " readonly" : ""}` }, canvas, doc.root, overlay);
     // Les numeros de page restent affiches dans les deux modes (section 5),
     // avec le jour de la page : « la demo du 3 octobre » se retrouve.
     const day = dayLabel(page.created);
-    const wrap = el("div", { class: "page-wrap", dataset: { page: String(n) } },
-      readOnly
-        ? el("div", { class: "readonly-note" },
-            "Page créée par une version plus récente de Cahiers : lecture seule. "
-              + "Mets l'application à jour sur ce PC pour la modifier.")
-        : null,
+    const notes = el("div", { class: "page-notes" });
+    const wrap = el("div", { class: `page-wrap${copy ? " conflict-copy" : ""}`, dataset: { page: String(n) } },
+      notes,
       sheet,
-      el("div", { class: "page-num" }, `${this.divider} p. ${n}${day ? ` · ${day}` : ""}`),
+      el("div", { class: "page-num" }, copy
+        ? `${this.divider} · copie de la p. ${n} venue de ${copy.label}`
+        : `${this.divider} p. ${n}${day ? ` · ${day}` : ""}`),
     );
 
-    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null, readOnly };
+    const loaded: LoadedPage = {
+      number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null, readOnly, notes,
+      ...(copy ? { copy: copy.file } : {}),
+    };
+    this.paintNotes(loaded);
 
     const surface = new InkSurface(canvas, {
       getTool: this.host.getTool,
@@ -813,6 +1084,7 @@ export class PageView {
   reconvert(): void {
     const loaded = this.activePage();
     if (!loaded) return;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
     const ink = this.mainInk(loaded.page);
     if (!ink.strokes.some((s) => s.tool === "pen")) { toast("Rien à convertir sur cette page", "warn"); return; }
     ink.editedByHand = false;
@@ -919,8 +1191,10 @@ export class PageView {
     if (ref.notebook !== this.notebook || ref.divider !== this.divider) return false;
     // Le bloc est retrouve par son id : la page a pu changer de numero.
     const find = (p: LoadedPage) => p.page.blocks.find((b) => b.id === ref.blockId);
-    const loaded = this.list.find((p) => p.page.id === ref.pageId && find(p))
-      ?? this.list.find(find);
+    // Une copie de conflit montree n'est jamais une cible : elle n'est pas ecrite.
+    const live = this.list.filter((p) => !p.copy);
+    const loaded = live.find((p) => p.page.id === ref.pageId && find(p))
+      ?? live.find(find);
     if (loaded) {
       change(find(loaded)!);
       // Le rendu propre masque l'encre convertie : il faut redessiner.
@@ -1509,6 +1783,7 @@ export class PageView {
   ): Promise<void> {
     const loaded = this.activePage();
     if (!loaded) return;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
     const id = uuid();
     const name = `${id}.png`;
     let src: string;
@@ -1546,6 +1821,8 @@ export class PageView {
   async goTo(n: number, scroll = true): Promise<void> {
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (!nums.includes(n)) return;
+    // Aller a une page quitte la copie de conflit montree.
+    if (this.peek) { this.peek = null; if (this.viewMode !== "pages") await this.render(); }
     this.current = n;
     this.host.rememberPage?.(this.notebook, this.divider, n);
     if (this.viewMode === "pages") {
@@ -1601,6 +1878,7 @@ export class PageView {
   }
 
   async newPage(insertHere = false): Promise<void> {
+    if (this.locked()) return;
     if (!(await this.readyToRenumber(insertHere ? "insertion" : "création"))) return;
     const at = insertHere ? this.current + 1 : undefined;
     const n = await this.serial(async () => {
@@ -1619,6 +1897,7 @@ export class PageView {
    * defilement, c'est la page en vue qui est visee : la confirmation la nomme.
    */
   async deleteCurrentPage(): Promise<void> {
+    if (this.locked()) return;
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (nums.length <= 1) { toast("Un intercalaire garde au moins une page", "warn"); return; }
     // La page courante, meme illisible (pas de repli sur une autre page).
@@ -1660,6 +1939,7 @@ export class PageView {
 
   /** « Annuler » apres une suppression : la page revient a son numero. */
   async restorePage(entry: TrashEntry): Promise<void> {
+    if (this.locked()) return;
     if (!(await this.readyToRenumber("restauration"))) return;
     let n: number;
     try {
@@ -1681,7 +1961,8 @@ export class PageView {
 
   async setViewMode(mode: ViewMode): Promise<void> {
     this.viewMode = mode;
-    await this.host.repo.setViewMode(this.notebook, this.divider, mode);
+    // En lecture seule, le mode change ici sans toucher a cahier.json.
+    if (!this.readOnly) await this.host.repo.setViewMode(this.notebook, this.divider, mode);
     await this.render();
     if (mode === "scroll") {
       this.list.find((p) => p.number === this.current)?.wrap.scrollIntoView({ block: "start" });
@@ -1885,7 +2166,7 @@ export class PageView {
    */
   private queueSave(loaded: LoadedPage): void {
     if (loaded.dead) return;
-    if (loaded.readOnly) { this.warnReadOnly(); return; }
+    if (loaded.readOnly || this.readOnly) { this.warnReadOnly(); return; }
     this.pendingSave.set(loaded.page.id, loaded);
     this.host.onDirty();
     if (this.saveTimer) clearTimeout(this.saveTimer);
@@ -1896,7 +2177,17 @@ export class PageView {
   private warnReadOnly(): void {
     if (this.warnedReadOnly) return;
     this.warnedReadOnly = true;
-    toast("Page en lecture seule (version plus récente de Cahiers) : rien n'y est enregistré", "warn", 6000);
+    toast(this.readOnly
+      ? "Cahier en lecture seule (ouvert sur l'autre PC) : rien n'y est enregistré"
+      : "Page en lecture seule : rien n'y est enregistré", "warn", 6000);
+  }
+
+  /** Vrai (et un message) si la vue est verrouillee : action refusee. */
+  private locked(): boolean {
+    if (!this.readOnly) return false;
+    this.warnedReadOnly = false;
+    this.warnReadOnly();
+    return true;
   }
 
   /**
@@ -1907,6 +2198,8 @@ export class PageView {
   flush(): Promise<void> {
     return this.serial(async () => {
       if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+      // Lecture seule : rien ne part sur le disque (setNotice a tout ecrit avant).
+      if (this.readOnly) return;
       const pending = [...this.pendingSave.values()];
       if (!pending.length) return;
       this.pendingSave.clear();

@@ -6,6 +6,7 @@ import {
 } from "../types";
 import { uuid, nowIso } from "../id";
 import { indexPage, type FlagHit, type PageIndex } from "./search";
+import { parseConflictName, renumberConflictName } from "../sync";
 
 export const VRAC = "Vrac";
 export const META_FILE = "cahier.json";
@@ -32,6 +33,25 @@ export interface TrashEntry {
    * dossier rendu aux « Autres dossiers »). Absent : page ou intercalaire.
    */
   kind?: "notebook" | "meta";
+  /** Copie de conflit OneDrive seule (nom du fichier), sans sa page. */
+  conflict?: string;
+  /** Copies de conflit parties avec la page (noms d'origine). */
+  copies?: string[];
+}
+
+/**
+ * Copie de conflit OneDrive d'une page (« 0003.page-LAPTOP-MAX.json »).
+ * Jamais une page normale, jamais supprimee sans qu'on le demande.
+ */
+export interface ConflictCopy {
+  /** Nom du fichier dans l'intercalaire. */
+  file: string;
+  /** Numero de la page dont c'est une copie. */
+  page: number;
+  /** Origine lue dans le nom (le PC, le plus souvent). */
+  label: string;
+  /** Aucune page normale sous ce numero : la copie est seule. */
+  orphan: boolean;
 }
 
 /** Dossier de la racine qui n'est pas une matiere (D5). */
@@ -498,6 +518,105 @@ export class Repo {
     }
   }
 
+  /* ---------------- copies de conflit OneDrive ---------------- */
+
+  /**
+   * Copies de conflit d'un intercalaire, par numero de page. Elles ne sont
+   * jamais listees comme pages (parsePageNumber est strict) : ici seulement.
+   */
+  async listConflicts(dir: string, divider: string): Promise<ConflictCopy[]> {
+    let files: string[];
+    try { files = await this.fs.listFiles(joinPath(dir, divider)); } catch { return []; }
+    const pages = new Set(files.map(parsePageNumber).filter((n): n is number => n !== null));
+    const out: ConflictCopy[] = [];
+    for (const file of files) {
+      const c = parseConflictName(file);
+      if (c) out.push({ file, page: c.page, label: c.label, orphan: !pages.has(c.page) });
+    }
+    return out.sort((a, b) => a.page - b.page || a.file.localeCompare(b.file));
+  }
+
+  /** Nombre de copies de conflit par intercalaire (pastilles). */
+  async countConflicts(dir: string): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    for (const d of await this.listDividers(dir)) {
+      const n = (await this.listConflicts(dir, d)).length;
+      if (n) out.set(d, n);
+    }
+    return out;
+  }
+
+  /** Lit une copie de conflit, comme une page. */
+  async readConflict(dir: string, divider: string, file: string): Promise<Page> {
+    if (!parseConflictName(file)) throw new Error(`${file} n'est pas une copie de conflit`);
+    return migratePage(JSON.parse(await this.fs.readText(joinPath(dir, divider, file))) as Page);
+  }
+
+  /** Met une copie de conflit a la corbeille, a la demande seulement. */
+  async trashConflict(dir: string, divider: string, file: string): Promise<TrashEntry> {
+    const c = parseConflictName(file);
+    if (!c) throw new Error(`${file} n'est pas une copie de conflit`);
+    const bin = await this.newBin();
+    await this.fs.mkdir(joinPath(bin, dir, divider));
+    await this.fs.rename(joinPath(dir, divider, file), joinPath(bin, dir, divider, file));
+    return { bin, dir, divider, page: c.page, conflict: file };
+  }
+
+  /** Remet une copie de conflit (« Annuler »), sans ecraser un fichier recree. */
+  async restoreConflict(entry: TrashEntry): Promise<void> {
+    if (!entry.conflict) throw new Error("ce n'est pas une copie de conflit");
+    const src = joinPath(entry.bin, entry.dir, entry.divider, entry.conflict);
+    if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
+    const dst = joinPath(entry.dir, entry.divider, entry.conflict);
+    if (await this.fs.exists(dst)) throw new Error(`${entry.conflict} existe de nouveau`);
+    await this.fs.mkdir(joinPath(entry.dir, entry.divider));
+    await this.fs.rename(src, dst);
+    await this.dropBinIfEmpty(entry.bin);
+  }
+
+  /**
+   * Copie seule (sa page a disparu, renommee ou supprimee sur l'autre PC) :
+   * elle devient une vraie page, en fin d'intercalaire. Rend son numero.
+   */
+  async adoptConflict(dir: string, divider: string, file: string): Promise<number> {
+    if (!parseConflictName(file)) throw new Error(`${file} n'est pas une copie de conflit`);
+    const nums = await this.listPageNumbers(dir, divider);
+    const conflicts = await this.listConflicts(dir, divider);
+    // Un numero sans page ni autre copie : la copie ne s'accroche a personne.
+    let target = (nums.length ? nums[nums.length - 1] : 0) + 1;
+    while (conflicts.some((c) => c.page === target && c.file !== file)) target++;
+    this.forget(joinPath(dir, divider));
+    await this.fs.rename(joinPath(dir, divider, file), joinPath(dir, divider, pageFileName(target)));
+    return target;
+  }
+
+  /**
+   * Renumerote une page ET ses copies de conflit : sans cela, apres une
+   * insertion, « 0003.page-PC.json » se retrouvait accroche a la mauvaise page.
+   */
+  private async movePage(rel: string, from: number, to: number, files: string[]): Promise<void> {
+    if (files.includes(pageFileName(from))) {
+      await this.fs.rename(joinPath(rel, pageFileName(from)), joinPath(rel, pageFileName(to)));
+    }
+    for (const f of files) {
+      if (parseConflictName(f)?.page !== from) continue;
+      await this.fs.rename(joinPath(rel, f), joinPath(rel, renumberConflictName(f, to)));
+    }
+  }
+
+  /**
+   * Numeros a decaler lors d'une renumerotation : les pages, et aussi les
+   * copies seules, qui gardent ainsi leur place relative.
+   */
+  private numbersIn(files: string[]): number[] {
+    const set = new Set<number>();
+    for (const f of files) {
+      const n = parsePageNumber(f) ?? parseConflictName(f)?.page ?? null;
+      if (n !== null) set.add(n);
+    }
+    return [...set].sort((a, b) => a - b);
+  }
+
   /**
    * Cree une page. `at` = numero souhaite ; les pages suivantes sont
    * renumerotees en descendant pour ne jamais ecraser un fichier.
@@ -508,15 +627,11 @@ export class Repo {
     const last = nums.length ? nums[nums.length - 1] : 0;
     const target = at == null ? last + 1 : Math.max(1, Math.min(at, last + 1));
     this.forget(joinPath(dir, divider));
-
-    for (let i = nums.length - 1; i >= 0; i--) {
-      const n = nums[i];
-      if (n >= target) {
-        await this.fs.rename(
-          joinPath(dir, divider, pageFileName(n)),
-          joinPath(dir, divider, pageFileName(n + 1)),
-        );
-      }
+    const rel = joinPath(dir, divider);
+    const files = await this.fs.listFiles(rel);
+    const all = this.numbersIn(files);
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (all[i] >= target) await this.movePage(rel, all[i], all[i] + 1, files);
     }
     await this.writePage(dir, divider, target, emptyPage(uuid(), nowIso()));
     return target;
@@ -526,21 +641,18 @@ export class Repo {
   async deletePage(dir: string, divider: string, n: number): Promise<TrashEntry> {
     const bin = await this.newBin();
     this.forget(joinPath(dir, divider));
+    const rel = joinPath(dir, divider);
     await this.fs.mkdir(joinPath(bin, dir, divider));
-    await this.fs.rename(
-      joinPath(dir, divider, pageFileName(n)),
-      joinPath(bin, dir, divider, pageFileName(n)),
-    );
-    const nums = await this.listPageNumbers(dir, divider);
-    for (const num of nums) {
-      if (num > n) {
-        await this.fs.rename(
-          joinPath(dir, divider, pageFileName(num)),
-          joinPath(dir, divider, pageFileName(num - 1)),
-        );
-      }
+    await this.fs.rename(joinPath(rel, pageFileName(n)), joinPath(bin, dir, divider, pageFileName(n)));
+    // Ses copies de conflit partent avec elle : restees la, elles
+    // s'accrochaient a la page suivante une fois renumerotee.
+    const copies = (await this.listConflicts(dir, divider)).filter((c) => c.page === n).map((c) => c.file);
+    for (const f of copies) await this.fs.rename(joinPath(rel, f), joinPath(bin, dir, divider, f));
+    const files = await this.fs.listFiles(rel);
+    for (const num of this.numbersIn(files)) {
+      if (num > n) await this.movePage(rel, num, num - 1, files);
     }
-    return { bin, dir, divider, page: n };
+    return { bin, dir, divider, page: n, ...(copies.length ? { copies } : {}) };
   }
 
   /**
@@ -556,15 +668,18 @@ export class Repo {
     const nums = await this.listPageNumbers(entry.dir, entry.divider);
     const last = nums.length ? nums[nums.length - 1] : 0;
     const target = Math.max(1, Math.min(entry.page, last + 1));
-    for (let i = nums.length - 1; i >= 0; i--) {
-      if (nums[i] >= target) {
-        await this.fs.rename(
-          joinPath(entry.dir, entry.divider, pageFileName(nums[i])),
-          joinPath(entry.dir, entry.divider, pageFileName(nums[i] + 1)),
-        );
-      }
+    const rel = joinPath(entry.dir, entry.divider);
+    const files = await this.fs.listFiles(rel);
+    const all = this.numbersIn(files);
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (all[i] >= target) await this.movePage(rel, all[i], all[i] + 1, files);
     }
-    await this.fs.rename(src, joinPath(entry.dir, entry.divider, pageFileName(target)));
+    await this.fs.rename(src, joinPath(rel, pageFileName(target)));
+    for (const f of entry.copies ?? []) {
+      const from = joinPath(entry.bin, entry.dir, entry.divider, f);
+      const to = joinPath(rel, renumberConflictName(f, target));
+      if (await this.fs.exists(from) && !(await this.fs.exists(to))) await this.fs.rename(from, to);
+    }
     await this.dropBinIfEmpty(entry.bin);
     return target;
   }

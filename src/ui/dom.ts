@@ -257,6 +257,35 @@ export function confirmDialog(title: string, message: string, okLabel = "Confirm
   });
 }
 
+/**
+ * Question a plusieurs reponses, chacune un bouton du pied (44 px). Echap
+ * ou un appui a cote rend null : a l'appelant de choisir la reponse sure.
+ */
+export function chooseDialog(
+  title: string, message: string, choices: { value: string; label: string; primary?: boolean }[],
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(null); } };
+    const close = (v: string | null) => {
+      backdrop.remove(); document.removeEventListener("keydown", onKey); resolve(v);
+    };
+    document.addEventListener("keydown", onKey);
+    const backdrop = el("div", { class: "backdrop" },
+      el("div", { class: "modal" },
+        el("header", {}, title),
+        el("div", { class: "content" }, el("p", { class: "muted" }, message)),
+        el("footer", {},
+          ...choices.map((c) => el("button", {
+            class: c.primary ? "primary" : "", onclick: () => close(c.value),
+          }, c.label)),
+        ),
+      ),
+    );
+    backdrop.addEventListener("pointerdown", (e) => { if (e.target === backdrop) close(null); });
+    document.body.append(backdrop);
+  });
+}
+
 /** Choix dans une liste, au doigt. Le libelle peut etre un rendu (formule). */
 export function pick(title: string, options: { value: string; label: string | Node }[]): Promise<string | null> {
   return new Promise((resolve) => {

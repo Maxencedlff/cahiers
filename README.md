@@ -73,6 +73,25 @@ intercalaire) reste sur chaque PC, dans le stockage local, jamais dans le
 dossier synchronise. Une page ecrite par une version plus recente de
 l'application s'ouvre en lecture seule.
 
+## Deux PC (OneDrive)
+
+- Presence : un cahier ouvert pose `.presence-<NOMPC>.json` a sa racine,
+  rafraichi toutes les 5 min, retire a la fermeture de son dernier onglet ou
+  de la fenetre ; perime au bout de 15 min (appli tuee, PC en veille). Si
+  l'autre PC a le cahier ouvert, l'ouverture propose la lecture seule
+  (bandeau, rien n'est ecrit : ni page, ni renumerotation, ni `cahier.json`),
+  avec « Modifier quand meme ». L'autre PC qui ouvre le cahier en cours de
+  route : bandeau d'avertissement, « Passer en lecture seule ». Le verrou
+  d'instance, lui, reste sur la machine.
+- Copies de conflit : quand les deux PC ont modifie la meme page, OneDrive
+  garde `0003.page-NOMPC.json` a cote. Ce n'est jamais une page (numerotation
+  intacte, la copie suit sa page quand on insere ou supprime). Pastille sur
+  l'intercalaire, bandeau sur la page : « Voir la copie » (lecture seule),
+  « Fusionner l'encre » (traits absents repris par id, `Ctrl+Z` annule, le
+  texte tape n'est pas fusionne), « Supprimer la copie » (corbeille,
+  « Annuler »). Aucune copie n'est jamais supprimee automatiquement. Une copie
+  dont la page n'existe plus peut devenir une page (« En faire une page »).
+
 ## Navigation
 
 - Menu : « Reprendre » (ou `Entree`) rouvre la derniere page ; taper des
@@ -100,8 +119,9 @@ src/
 │   ├── palette.ts        les 5 couleurs a semantique fixe
 │   ├── shortcuts.ts      table unique des raccourcis (clavier, aide F1)
 │   ├── templates.ts      modeles du ruban Maths
+│   ├── sync.ts           OneDrive : copies de conflit, fusion d'encre, presence
 │   ├── calc/             mathjs : evaluation, derivation, primitives,
-│   │                     equations, matrices, courbes
+│   │                     equations, matrices, courbes, ecran facon TI
 │   ├── ink/              modele de trait, file de reconnaissance hors ligne
 │   └── storage/          lecture et ecriture des pages, recherche
 ├── ui/
@@ -248,3 +268,19 @@ Deux ecarts assumes par rapport a la specification, tous deux signales :
   specification. Le point d'extension est `tryExternal` dans
   `src/core/calc/integrate.ts`, et une integrale definie tombe de toute facon
   sur un calcul numerique quand la primitive manque.
+
+Calculatrice, conventions de saisie (clavier francais) :
+
+- virgule decimale : `3,5` vaut 3.5, mais dans un appel ou une matrice la
+  virgule separe les arguments (`max(1,2)`, `nthRoot(8,3)`, `[1,2;3,4]`) ;
+- `ln` = logarithme neperien, `log(x)` = logarithme decimal (comme la touche
+  log), `log(x, b)` garde sa base ;
+- apres un resultat, une saisie qui commence par `+ * / ^ ² !` reprend `ans`
+  (decision D10) ; `-` reste le moins unaire ;
+- `^` (touche morte), `²`, fleches, Debut/Fin, Suppr, ↑/↓ pour l'historique,
+  Echap pour vider ; Ctrl+V colle une expression ;
+- unites mathjs avec `µ` et `Ω` : `1/(2*pi*2,2kΩ*10nF)` donne des kHz ;
+- un resultat douteux n'est jamais affiche comme exact : integrale a travers
+  un pole refusee, poles de `tan` exclus des racines, `tan(90°)` en erreur,
+  residus `sin(pi)` et `0.1+0.2-0.3` ramenes a 0 (seuil relatif, jamais
+  absolu : 3 fF reste 3e-15).

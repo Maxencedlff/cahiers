@@ -1,8 +1,8 @@
-import { el, clear, toast, dismissToast, askText, askFields, confirmDialog, pick, onLongPress } from "./dom";
+import { el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick, onLongPress } from "./dom";
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { pageListDialog } from "./pagelist";
 import { buildProbe } from "./probe";
-import { PageView, type ViewMode, type RenderMode } from "./pageview";
+import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
 import { insertMathTemplate, isEditingDoc, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
@@ -30,6 +30,7 @@ import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
 import { showShortcuts } from "./help";
 import type { Presence } from "../platform";
+import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
 
 type Screen = "menu" | "notebook" | "search" | "flags" | "probe";
 type Tool = ToolKind | "region" | "textregion";
@@ -57,6 +58,16 @@ interface Tab {
   host: HTMLElement;
   /** Dernier usage (ms) : rouvrir une matiere reprend son onglet le plus recent. */
   used: number;
+}
+
+/**
+ * Presence d'un cahier ouvert (section 11). `readOnly` : on l'a ouvert en
+ * lecture seule parce que l'autre PC l'avait ; on n'y signale alors pas sa
+ * propre presence. `other` : l'autre PC vu au dernier passage.
+ */
+interface NotebookPresence {
+  readOnly: boolean;
+  other: OtherPresence | null;
 }
 
 /** L'onglet utilise le plus recemment. */
@@ -137,6 +148,10 @@ export class App {
   private calcSlot: { side: HTMLElement; work: HTMLElement } | null = null;
   /** Envois a MyScript ce mois-ci, sur cette machine (quota, reco-3). */
   private usage: Usage = currentUsage(null, new Date());
+  /** Cahiers ouverts dans un onglet et leur presence (section 11). */
+  private present = new Map<string, NotebookPresence>();
+  /** Rafraichissement de la presence, seulement tant qu'un cahier est ouvert. */
+  private presenceTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     fs: FsAdapter,
@@ -213,7 +228,7 @@ export class App {
     });
     // Filet de securite seulement : beforeunload n'attend pas une ecriture.
     // La fermeture de la fenetre passe par main.ts (onCloseRequested).
-    window.addEventListener("beforeunload", () => { void this.flushAll(); });
+    window.addEventListener("beforeunload", () => { void this.flushAll(); void this.releaseAll(); });
     // Fenetre reduite, PC mis en veille, session verrouillee : on ecrit tout
     // de suite plutot qu'au bout du delai.
     document.addEventListener("visibilitychange", () => {
@@ -551,6 +566,9 @@ export class App {
       at = undefined;
     }
     if (!tab) {
+      // Premier onglet de ce cahier : l'autre PC l'a-t-il ouvert ? Avant le
+      // montage, pour qu'une vue en lecture seule ne cree meme pas de page.
+      if (!mine.length) await this.enterNotebook(dir);
       const target = wanted ?? this.positions.dividerFor(dir, dividers, meta.lastPosition) ?? dividers[0];
       tab = this.makeTab(dir, meta, target);
       this.tabs.push(tab);
@@ -593,10 +611,13 @@ export class App {
       openLink: (target) => void this.followLink(target),
       onTrashed: (entry) => this.offerRestore(entry),
       rememberPage: (nb, d, n) => this.positions.record(nb, d, n),
+      onConflictsChanged: () => this.paintConflictBadges(),
     }, tab.notebook, tab.divider);
+    await view.setNotice(this.noticeFor(tab.notebook));
     // Une vue quittee en echec sur ce meme intercalaire : la nouvelle reprend
-    // sa file, pour qu'une seule vue ecrive ces pages.
-    for (const o of [...this.orphans]) {
+    // sa file, pour qu'une seule vue ecrive ces pages. Une vue en lecture
+    // seule n'ecrit rien : l'ancienne continue seule ses essais.
+    for (const o of view.readOnly ? [] : [...this.orphans]) {
       if (o.notebook === tab.notebook && o.divider === tab.divider) {
         this.orphans.delete(o);
         await view.adopt(o);
@@ -644,7 +665,9 @@ export class App {
   private dropTab(id: string): void {
     const i = this.tabs.findIndex((t) => t.id === id);
     if (i === -1) return;
-    this.tabs.splice(i, 1);
+    const [gone] = this.tabs.splice(i, 1);
+    // Dernier onglet de ce cahier : l'autre PC ne doit plus le croire ouvert.
+    if (!this.tabs.some((t) => t.notebook === gone.notebook)) void this.leaveNotebook(gone.notebook);
     if (this.splitId === id) this.splitId = null;
     if (this.activeId === id) {
       if (this.splitId) { this.activeId = this.splitId; this.splitId = null; }
@@ -827,10 +850,11 @@ export class App {
   }
 
   private buildDividerBar(tab: Tab, dividers: string[]): HTMLElement {
-    const bar = el("div", { class: "dividers" });
+    const bar = el("div", { class: "dividers", dataset: { notebook: tab.notebook } });
     for (const d of dividers) {
       const node = el("button", {
         class: `divider-tab${d === tab.divider ? " active" : ""}`,
+        dataset: { divider: d },
         title: "Appui long ou clic droit : ouvrir à droite, renommer, déplacer, supprimer",
         onclick: () => void this.switchDividerAndRender(tab, d),
       }, d);
@@ -843,12 +867,15 @@ export class App {
       title: "Nouvel intercalaire",
       "aria-label": "Nouvel intercalaire",
       onclick: async () => {
+        if (this.refuseLocked(tab.notebook)) return;
         const name = await askText("Nouvel intercalaire", "Nom", "");
         if (!name) return;
         const d = await this.repo.createDivider(tab.notebook, name);
         await this.switchDividerAndRender(tab, d);
       },
     }, "+"));
+    // Pastilles des copies de conflit, une fois la bande a l'ecran.
+    queueMicrotask(() => { if (bar.isConnected) this.paintConflictBadges(); });
     return bar;
   }
 
@@ -868,6 +895,7 @@ export class App {
     if (i >= 0 && i < dividers.length - 1) options.push({ value: "next", label: "Déplacer à droite" });
     options.push({ value: "delete", label: "Supprimer l'intercalaire" });
     const choice = await pick(d, options);
+    if (choice && choice !== "right" && this.refuseLocked(tab.notebook)) return;
     if (choice === "right") {
       await this.openRight(tab.notebook, d);
     } else if (choice === "rename") {
@@ -1096,6 +1124,7 @@ export class App {
 
   /** Renomme une matiere (titre et dossier) ; ses onglets suivent. */
   private async renameNotebook(dir: string, title: string): Promise<void> {
+    if (this.refuseLocked(dir)) return;
     if (!(await this.settleNotebook(dir, "renommage annulé"))) return;
     const open = this.tabs.filter((t) => t.notebook === dir);
     let next: string;
@@ -1115,6 +1144,9 @@ export class App {
       }
       this.positions.renameNotebook(dir, next);
       this.nav.renameNotebook(dir, next);
+      // Le fichier de presence a suivi le dossier ; son etat suit le nom.
+      const state = this.present.get(dir);
+      if (state) { this.present.delete(dir); this.present.set(next, state); }
     }
     for (const t of open) t.title = title.trim();
     toast(`Matière renommée : ${title.trim()}`);
@@ -1122,6 +1154,7 @@ export class App {
   }
 
   private async setNotebookColor(dir: string, color: string): Promise<void> {
+    if (this.refuseLocked(dir)) return;
     try {
       await this.repo.setNotebookColor(dir, color);
     } catch (e) {
@@ -1134,6 +1167,7 @@ export class App {
 
   /** Toute la matiere a la corbeille, ses onglets fermes ; « Annuler » la remet. */
   private async deleteNotebook(dir: string): Promise<void> {
+    if (this.refuseLocked(dir)) return;
     const title = (await this.repo.readMeta(dir)).title;
     const ok = await confirmDialog(
       "Supprimer la matière",
@@ -1551,15 +1585,14 @@ export class App {
 
   private async onRecognized(key: string, result: RecoResult): Promise<void> {
     const more = this.moreComing(key);
-    await this.toBlock(key, (block) => applyToBlock(block, result, more));
-    if (!more) this.forget(key);
+    const done = await this.toBlock(key, (block) => applyToBlock(block, result, more));
+    if (done && !more) this.forget(key);
   }
 
   /** Requete refusee par MyScript : le bloc dit « non reconnu, réessayer ». */
   private async onRecoFailed(key: string, message: string): Promise<void> {
     if (this.moreComing(key)) return;
-    await this.toBlock(key, (block) => markFailed(block, message));
-    this.forget(key);
+    if (await this.toBlock(key, (block) => markFailed(block, message))) this.forget(key);
   }
 
   /**
@@ -1569,10 +1602,13 @@ export class App {
    * intercalaire s'il y en a une : jamais deux ecritures croisees d'une
    * meme page, qui perdaient les derniers traits.
    */
-  private async toBlock(key: string, change: (block: Block) => void): Promise<void> {
+  private async toBlock(key: string, change: (block: Block) => void): Promise<boolean> {
     const ref = parseBlockKey(key);
-    if (!ref) return;
-    if (this.applyInViews(ref, change)) return;
+    if (!ref) return true;
+    // Cahier en lecture seule sur ce PC : rien n'y est ecrit. La cle reste
+    // retenue, le bloc repartira quand on y ecrira de nouveau.
+    if (this.isLocked(ref.notebook)) return false;
+    if (this.applyInViews(ref, change)) return true;
     const holder = this.holders(ref.notebook, ref.divider)[0];
     const write = async () => {
       // La page a pu s'ouvrir entre-temps : la vue la tient, elle ecrira.
@@ -1582,6 +1618,7 @@ export class App {
     const run = holder ? holder.runIo(write) : this.recoIo.then(write, write);
     if (!holder) this.recoIo = run.catch(() => undefined);
     await run;
+    return true;
   }
 
   private applyInViews(ref: BlockRef, change: (block: Block) => void): boolean {
@@ -2150,17 +2187,166 @@ export class App {
     return true;
   }
 
-  /** Avertissement de presence OneDrive, non bloquant (section 11). */
-  async checkPresence(notebook: string): Promise<void> {
+  /* ---------------- presence OneDrive (section 11) ---------------- */
+
+  /**
+   * Ouverture d'un cahier (premier onglet) : si l'autre PC semble l'avoir
+   * ouvert, avertissement non bloquant, lecture seule proposee. Sinon, ce PC
+   * signale sa presence (fichier `.presence-<PC>.json` du cahier).
+   */
+  private async enterNotebook(dir: string): Promise<void> {
+    if (!this.presence || this.present.has(dir)) return;
+    const other = await this.presence.check(dir);
+    let readOnly = false;
+    if (other) {
+      const choice = await chooseDialog(
+        "Cahier ouvert sur un autre PC",
+        `${other.machine} a ce cahier ouvert (dernier signe ${presenceAgo(other.age)}). `
+          + "Si les deux PC écrivent en même temps, OneDrive garde deux versions des pages. "
+          + "Ouvrir quand même en lecture seule ?",
+        [
+          { value: "edit", label: "Modifier quand même" },
+          { value: "read", label: "Ouvrir en lecture seule", primary: true },
+        ],
+      );
+      // Echap : la reponse sure, la lecture seule.
+      readOnly = choice !== "edit";
+    }
+    this.present.set(dir, { readOnly, other });
+    if (!readOnly) await this.presence.claim(dir);
+    this.armPresence();
+  }
+
+  /** Plus aucun onglet sur ce cahier : sa presence est retiree. */
+  private async leaveNotebook(dir: string): Promise<void> {
+    const state = this.present.get(dir);
+    this.present.delete(dir);
+    if (!this.present.size && this.presenceTimer) {
+      clearInterval(this.presenceTimer);
+      this.presenceTimer = null;
+    }
+    if (state && !state.readOnly) await this.presence?.release(dir);
+  }
+
+  /** Fermeture de la fenetre : toutes les presences de ce PC sont retirees. */
+  async releaseAll(): Promise<void> {
+    for (const [dir, state] of this.present) {
+      if (!state.readOnly) await this.presence?.release(dir);
+    }
+  }
+
+  /** Rafraichit la presence toutes les 5 min, tant qu'un cahier est ouvert. */
+  private armPresence(): void {
+    if (this.presenceTimer || !this.presence) return;
+    this.presenceTimer = setInterval(() => void this.presenceTick(), PRESENCE_CLAIM_MS);
+  }
+
+  /**
+   * Toutes les 5 min : signe de vie pour les cahiers modifiables, et nouvel
+   * examen de l'autre PC (il a pu ouvrir le cahier, ou le refermer).
+   */
+  private async presenceTick(): Promise<void> {
     if (!this.presence) return;
-    const other = await this.presence.check(notebook);
-    if (!other) return;
-    const readOnly = await confirmDialog(
-      "Cahier peut-être ouvert ailleurs",
-      `${other} semble avoir ce cahier ouvert. Ouvrir quand même en lecture seule ?`,
-      "Ouvrir en lecture seule",
-    );
-    if (readOnly) toast("Lecture seule : les modifications ne seront pas enregistrées", "warn", 6000);
+    for (const [dir, state] of [...this.present]) {
+      const other = await this.presence.check(dir);
+      if (this.present.get(dir) !== state) continue; // ferme ou change entre-temps
+      if (!state.readOnly) await this.presence.claim(dir);
+      const before = state.other?.machine ?? null;
+      state.other = other;
+      // Aussi quand rien ne change : « dernier signe il y a N min » se met a jour.
+      if (other || before) await this.applyPresence(dir);
+    }
+  }
+
+  /** Bandeau des vues d'un cahier, selon sa presence. */
+  private noticeFor(dir: string): ViewNotice | null {
+    const state = this.present.get(dir);
+    if (!state) return null;
+    const other = state.other;
+    if (state.readOnly) {
+      return {
+        kind: "lock",
+        text: other
+          ? `Lecture seule : ${other.machine} a ce cahier ouvert (dernier signe ${presenceAgo(other.age)}). Rien n'est enregistré ici.`
+          : "Lecture seule : l'autre PC a refermé ce cahier. Rien n'est enregistré ici tant que tu ne passes pas en écriture.",
+        actions: [{ label: other ? "Modifier quand même" : "Modifier maintenant", run: () => void this.setReadOnly(dir, false) }],
+      };
+    }
+    if (other) {
+      return {
+        kind: "warn",
+        text: `${other.machine} a aussi ce cahier ouvert (dernier signe ${presenceAgo(other.age)}) : `
+          + "si les deux PC écrivent, OneDrive gardera deux versions des pages.",
+        actions: [{ label: "Passer en lecture seule", run: () => void this.setReadOnly(dir, true) }],
+      };
+    }
+    return null;
+  }
+
+  /** Le bandeau change sur toutes les vues de ce cahier. */
+  private async applyPresence(dir: string): Promise<void> {
+    const notice = this.noticeFor(dir);
+    for (const t of this.tabs) if (t.notebook === dir) await t.view?.setNotice(notice);
+    this.paintStatus();
+  }
+
+  /** Bascule lecture seule / ecriture d'un cahier ouvert, depuis son bandeau. */
+  private async setReadOnly(dir: string, readOnly: boolean): Promise<void> {
+    const state = this.present.get(dir);
+    if (!state || state.readOnly === readOnly) return;
+    if (readOnly) {
+      // Ce qui attend est ecrit d'abord : c'etait du travail fait avant.
+      for (const t of this.tabs) {
+        if (t.notebook !== dir || !t.view) continue;
+        await t.view.flush();
+        if (t.view.hasUnsaved) {
+          toast("Lecture seule impossible pour l'instant : une page attend encore d'être écrite", "err", 6000);
+          return;
+        }
+      }
+    }
+    state.readOnly = readOnly;
+    if (readOnly) await this.presence?.release(dir);
+    else await this.presence?.claim(dir);
+    await this.applyPresence(dir);
+    toast(readOnly ? "Cahier en lecture seule sur ce PC" : "Cahier modifiable sur ce PC");
+  }
+
+  /** Cahier ouvert en lecture seule sur ce PC. */
+  private isLocked(dir: string): boolean {
+    return !!this.present.get(dir)?.readOnly;
+  }
+
+  /** Vrai (et un message) si une action ecrirait dans un cahier en lecture seule. */
+  private refuseLocked(dir: string): boolean {
+    if (!this.isLocked(dir)) return false;
+    toast("Cahier en lecture seule sur ce PC (ouvert sur l'autre PC) : action impossible", "warn", 5000);
+    return true;
+  }
+
+  /* ---------------- copies de conflit : pastilles ---------------- */
+
+  /**
+   * Pastille sur chaque intercalaire qui a des copies de conflit OneDrive.
+   * Faite apres coup : la bande s'affiche sans attendre le disque.
+   */
+  private paintConflictBadges(): void {
+    const bar = this.main.querySelector<HTMLElement>(".dividers");
+    const dir = bar?.dataset.notebook;
+    if (!bar || !dir) return;
+    void this.repo.countConflicts(dir).then((counts) => {
+      if (!bar.isConnected) return;
+      for (const node of bar.querySelectorAll<HTMLElement>(".divider-tab[data-divider]")) {
+        node.querySelector(".conflict-dot")?.remove();
+        const n = counts.get(node.dataset.divider!) ?? 0;
+        if (!n) continue;
+        node.append(el("span", {
+          class: "conflict-dot",
+          title: `${n} copie${n > 1 ? "s" : ""} de conflit OneDrive à regarder`,
+          "aria-label": `${n} copie${n > 1 ? "s" : ""} de conflit`,
+        }, String(n)));
+      }
+    }, () => undefined);
   }
 }
 

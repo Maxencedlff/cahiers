@@ -313,6 +313,18 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   padding: 7px 10px; font-size: 14px; min-height: 40px; overflow-x: auto;
 }
 .calc-read .lbl { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+/* Curseur de saisie : fixe, sans clignotement (batterie, section 9). Estompe
+   quand la calculatrice n'a pas le clavier. */
+.calc-screen .caret {
+  display: inline-block; width: 2px; height: 1.15em; margin: 0 -1px; vertical-align: text-bottom;
+  background: #7aa2ff; opacity: .35;
+}
+.calc.armed .calc-screen .caret { opacity: 1; }
+.calc-screen .hist { cursor: pointer; }
+.calc-screen .hist:hover { color: #b9c6dd; }
+.calc-lu { min-height: 0; padding: 4px 10px; font-size: 13px; }
+.calc-body .warn { color: #9a5b00; }
+.calc-send { align-self: flex-end; }
 
 .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
 /* Touches de 46 px, utilisables au doigt (section 7). */
@@ -683,6 +695,21 @@ kbd {
 .readonly-note {
   margin: 0 0 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px;
   background: #fff4e5; color: #8a4b00; border: 1px solid #ffd9a8;
+}
+/* Bandeaux avec boutons : presence sur l'autre PC, copies de conflit OneDrive. */
+.view-notes { max-width: 900px; margin: 0 auto; }
+.view-notes[hidden] { display: none; }
+.readonly-note:has(button) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.readonly-note:has(button) > span { flex: 1 1 260px; }
+.readonly-note code { font-size: 12px; overflow-wrap: anywhere; }
+.view-lock { border-width: 2px; font-weight: 500; }
+.view-lock.warn { background: #fffbe6; color: #6b5300; border-color: #f2df8f; font-weight: 400; }
+.conflict-note { background: #f3eefe; color: #4c2a85; border-color: #d9c9f7; }
+.page-wrap.conflict-copy .sheet { outline: 3px dashed #b79cf0; outline-offset: 3px; }
+/* Pastille d'un intercalaire qui a des copies de conflit a regarder. */
+.conflict-dot {
+  margin-left: 6px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+  background: #7c3aed; color: #fff; font-size: 12px; font-weight: 600; line-height: 20px; text-align: center;
 }
 
 /* Liste des pages. */
