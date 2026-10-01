@@ -40,7 +40,7 @@ export function buildProbe(onClose: () => void): HTMLElement {
       el("button", { onclick: onClose }, "Retour"),
       el("strong", {}, "Sonde stylet"),
       el("span", { class: "muted small" },
-        "Ecris sur la zone blanche. Tout ce que l'ecran renvoie est affiche en direct."),
+        "Écris sur la zone blanche. Tout ce que l'écran renvoie est affiché en direct."),
       el("div", { class: "spacer" }),
       el("button", { onclick: () => { strokes.length = 0; lastCount = 0; lastRate = "-"; paint(); } }, "Effacer"),
     ),

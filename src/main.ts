@@ -47,12 +47,12 @@ async function main() {
     await app.start();
 
     if (!platform.isTauri) {
-      toast("Mode navigateur : les donnees restent dans ce navigateur.", "warn", 5000);
+      toast("Mode navigateur : les données restent dans ce navigateur.", "warn", 5000);
     }
   } catch (e) {
     mount.replaceChildren(el("div", { class: "screen" },
       el("div", { class: "screen-inner" },
-        el("h1", {}, "Demarrage impossible"),
+        el("h1", {}, "Démarrage impossible"),
         el("p", { class: "muted" }, e instanceof Error ? e.message : String(e)),
       ),
     ));

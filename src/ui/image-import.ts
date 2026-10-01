@@ -146,7 +146,7 @@ export function cropDialog(img: HTMLImageElement, opts: ImportOptions = {}): Pro
     view.addEventListener("pointerup", stop);
     view.addEventListener("pointercancel", stop);
 
-    const status = el("div", { class: "small muted" }, "Deplace les quatre coins sur ceux du tableau.");
+    const status = el("div", { class: "small muted" }, "Déplace les quatre coins sur ceux du tableau.");
 
     const close = (r: ImportResult | null) => { backdrop.remove(); resolve(r); };
 
@@ -166,7 +166,7 @@ export function cropDialog(img: HTMLImageElement, opts: ImportOptions = {}): Pro
 
       let ocr: string | null = null;
       if (opts.ocr) {
-        status.textContent = "Lecture du texte...";
+        status.textContent = "Lecture du texte…";
         try {
           ocr = (await opts.ocr(dataUrl)).trim() || null;
         } catch (e) {
@@ -194,14 +194,14 @@ export function cropDialog(img: HTMLImageElement, opts: ImportOptions = {}): Pro
             }, "Noir et blanc"),
             el("button", {
               onclick: () => { quad = defaultQuad(img.width, img.height); paint(); refreshPreview(); },
-            }, "Reinitialiser les coins"),
+            }, "Réinitialiser les coins"),
           ),
-          el("span", { class: "lbl small muted" }, "Apercu redresse"),
+          el("span", { class: "lbl small muted" }, "Aperçu redressé"),
           preview,
         ),
         el("footer", {},
           el("button", { onclick: () => close(null) }, "Annuler"),
-          el("button", { class: "primary", onclick: () => void valider() }, "Inserer dans la page"),
+          el("button", { class: "primary", onclick: () => void valider() }, "Insérer dans la page"),
         ),
       ),
     );

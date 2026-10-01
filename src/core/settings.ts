@@ -19,8 +19,16 @@ export interface Settings {
    * lancement, sans attendre que le stylet touche l'ecran.
    */
   penSeen: boolean;
-  /** Calculatrice ouverte dans la colonne de droite. */
+  /** Calculatrice ouverte (colonne de droite, ou flottante sur un petit ecran). */
   calcOpen: boolean;
+  /** Ruban Maths deplie dans la colonne d'outils. */
+  mathOpen: boolean;
+  /**
+   * Version de la disposition. Passee a 2 quand la calculatrice est devenue
+   * fermee par defaut (D6) : l'ancien defaut « ouverte » est remis a fermee
+   * une fois, puis le choix de l'utilisateur est respecte.
+   */
+  layout: number;
   /** Formules tapees au clavier mises en forme a chaque retour a la ligne. */
   autoMath: boolean;
   /** Correcteur orthographique du navigateur sur le texte tape (coupe par defaut). */
@@ -29,13 +37,16 @@ export interface Settings {
 }
 
 const KEY = "cahiers.settings.v1";
+const LAYOUT = 2;
 
 const DEFAULTS: Settings = {
   tool: "pen",
   color: "normal",
   width: 2.2,
   autoConvert: false,
-  calcOpen: true,
+  calcOpen: false,
+  mathOpen: true,
+  layout: LAYOUT,
   autoMath: true,
   spellcheck: false,
   textColor: null,
@@ -57,6 +68,12 @@ export function loadSettings(): Settings {
     // reglages gardaient l'encre en « Definition » sous un texte noir : deux
     // pastilles allumees. L'encre suit desormais le texte (noir = "normal").
     out.color = out.textColor ?? "normal";
+    // Calculatrice ouverte par l'ancien defaut : la feuille perdait 340 px
+    // sur le portable. Fermee une fois ; Ctrl+L la rouvre et c'est retenu.
+    if ((parsed.layout ?? 1) < LAYOUT) {
+      out.calcOpen = false;
+      out.layout = LAYOUT;
+    }
     return out;
   } catch {
     return { ...DEFAULTS };

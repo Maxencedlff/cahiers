@@ -114,11 +114,14 @@ input:focus, textarea:focus, button:focus-visible {
 .tab.active { background: var(--accent-soft); border-color: #bcd0ff; }
 .tab .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Croix de 40 px collee au bord de l'onglet, zone d'appui portee a 44 px :
+   au doigt, on ferme l'onglet au lieu de l'activer. */
 .tab .close {
-  min-width: 26px; min-height: 26px; width: 26px; height: 26px;
-  border-radius: 6px; border: none; background: transparent; font-size: 16px; line-height: 1;
-  padding: 0;
+  position: relative; min-width: 40px; min-height: 40px; width: 40px; height: 40px;
+  margin-right: -8px; border-radius: 8px; border: none; background: transparent;
+  font-size: 16px; line-height: 1; padding: 0;
 }
+.tab .close::after { content: ""; position: absolute; inset: -2px; }
 .tab .close:hover { background: rgba(0,0,0,.1); }
 
 /* ---------------- menu d'accueil ---------------- */
@@ -163,10 +166,11 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 
 .notebook { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
+/* Les onglets d'intercalaire posent sur le bord bas : pas de marge dessous. */
 .dividers {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px; background: var(--panel); border-bottom: 1px solid var(--line);
-  overflow-x: auto; min-height: 60px;
+  display: flex; align-items: flex-end; gap: 6px;
+  padding: 4px 8px 0; background: var(--panel); border-bottom: 1px solid var(--line);
+  overflow-x: auto; flex: none;
 }
 .divider-tab {
   height: var(--touch); padding: 0 16px; border-radius: 8px 8px 0 0;
@@ -245,6 +249,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .block-box .tag {
   position: absolute; top: -10px; left: 6px; font-size: 10px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted);
+  white-space: nowrap; width: max-content;
 }
 /* Mot tape pose a la place de l'encre (conversion mot a mot). */
 .typed-word { position: absolute; white-space: pre; letter-spacing: .01em; }
@@ -273,8 +278,13 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   background: #f6f7f9; border-bottom: 1px solid var(--line); cursor: grab; min-height: 46px;
 }
 .calc-head.dragging { cursor: grabbing; }
-.calc-tabs { display: flex; gap: 4px; padding: 8px 8px 0; }
-.calc-tabs button { height: 38px; min-height: 38px; border-radius: 8px 8px 0 0; flex: 1; padding: 0 6px; }
+.calc-tabs { display: flex; gap: 4px; padding: 8px 8px 0; overflow-x: auto; scrollbar-width: none; }
+.calc-tabs button {
+  height: 38px; min-height: 38px; border-radius: 8px 8px 0 0; flex: 1 1 auto; padding: 0 6px;
+  white-space: nowrap; font-size: 14px; min-width: 0;
+}
+/* Colonne de 340 px : les cinq onglets tiennent sur une ligne. */
+.calc.docked .calc-tabs button { font-size: 13px; padding: 0 3px; }
 .calc-body {
   padding: 10px; display: flex; flex-direction: column; gap: 10px;
   /* Assez de place pour tout le pave sans defilement interne : ce sont des
@@ -345,7 +355,8 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .modal .content { padding: 0 18px 6px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .modal footer { padding: 14px 18px; display: flex; gap: 8px; justify-content: flex-end; }
 
-.toast-host { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 90;
+/* Au-dessus de la barre d'etat (35 px), jamais dessus. */
+.toast-host { position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%); z-index: 90;
   display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 .toast {
   background: #16181d; color: #fff; border-radius: 8px; padding: 10px 16px;
@@ -369,6 +380,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .pill .led.wait { background: #f0b429; }
 .pill .led.err { background: #dc2626; }
 .pill.unsaved { color: #a51b1b; font-weight: 600; }
+/* Bouton discret de la barre d'etat, zone d'appui de 44 px quand meme. */
+.status .keys-btn { position: relative; min-height: 26px; min-width: 0; padding: 0 8px; }
+.status .keys-btn::after { content: ""; position: absolute; inset: -9px -2px; }
+.tabbar .help-btn { font-weight: 700; color: var(--muted); }
 
 .hits { display: flex; flex-direction: column; gap: 6px; }
 .hit {
@@ -460,13 +475,65 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .side-tools .toolbar > .small { flex: none; }
 .side-tools .toolbar > .swatch-legend { flex: 1 1 100%; }
 
+/* Grille : les touches remplissent la largeur, sans vide a droite. */
 .side-tools .mathbar {
-  flex-wrap: wrap; overflow: visible; gap: 4px; padding: 8px;
-  border-top: 1px solid var(--line); border-bottom: none;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  overflow: visible; gap: 4px; padding: 0 8px 8px; border-bottom: none; background: transparent;
 }
-.side-tools .mathbar .sep { flex-basis: 100%; width: auto; height: 1px; margin: 3px 0; align-self: auto; }
-.side-tools .mathbar .mathkey { flex: 0 0 44px; padding: 0 2px; }
-.side-tools .mathbar .mathkey.eq { flex: 1 1 100%; }
+.side-tools .mathbar .sep { grid-column: 1 / -1; width: auto; height: 1px; margin: 3px 0; align-self: auto; }
+.side-tools .mathbar .mathkey { min-width: 0; padding: 0 2px; }
+.side-tools .mathbar .mathkey.eq { grid-column: 1 / -1; }
+
+/* Trois choix sur une ligne (epaisseurs, reglages du menu ⋯). */
+.seg { display: flex; gap: 0; flex: 1 1 100%; }
+.seg > button { flex: 1 1 0; min-width: 0; border-radius: 0; margin-left: -1px; padding: 0 6px; }
+.seg > button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+.seg > button:last-child { border-radius: 0 8px 8px 0; }
+.seg > button.on { position: relative; z-index: 1; font-weight: 600; }
+
+.side-tools .page-nav button.page-label { flex: 1 1 auto; min-width: 0; padding: 0 2px; font-size: 14px; white-space: nowrap; }
+.side-tools .page-nav button:not(.page-label) { flex: 0 0 44px; }
+/* « Pas compris » : la couleur des reperes, reperable sans lire. */
+.side-tools .toolbar > button.flag-btn {
+  flex: 1 1 auto; background: #fff4e5; border-color: #f0b429; color: #7a4700; font-weight: 600;
+}
+.side-tools .toolbar > button.flag-btn:hover { background: #ffecd0; }
+.side-tools .toolbar > button.more-btn { flex: 0 0 52px; font-size: 20px; font-weight: 700; }
+
+.math-section { border-top: 1px solid var(--line); background: #fafbfc; }
+.section-toggle {
+  width: 100%; justify-content: space-between; border: none; border-radius: 0;
+  background: transparent; padding: 0 14px; font-weight: 600; font-size: 14px; color: var(--muted);
+}
+.section-toggle:hover { background: rgba(0,0,0,.03); }
+
+/* Menu « ⋯ » : fond transparent, un appui a cote le ferme. */
+.backdrop.more-backdrop { background: transparent; display: block; padding: 0; }
+.more-menu {
+  position: fixed; width: 320px; max-height: calc(100vh - 16px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(10,14,25,.22); padding: 8px; display: flex; flex-direction: column; gap: 4px;
+}
+.more-menu .more-item { justify-content: flex-start; border-color: transparent; background: transparent; width: 100%; }
+.more-menu .more-item:hover { background: #f3f5f8; }
+.more-menu .more-item.danger { color: #a51b1b; }
+.more-menu .sep { height: 1px; background: var(--line); margin: 4px 0; }
+.more-seg { display: flex; align-items: center; gap: 8px; padding: 2px 4px; }
+.more-seg > span { flex: 0 0 92px; line-height: 1.2; }
+.more-seg .seg { flex: 1 1 auto; }
+
+/* Fiche des raccourcis (F1). */
+.modal.shortcuts-sheet { width: min(980px, 100%); }
+.shortcuts-cols { columns: 2 330px; column-gap: 28px; }
+.shortcuts-group { break-inside: avoid; margin-bottom: 14px; }
+.shortcuts-group h3 { font-size: 14px; margin: 0 0 6px; color: var(--accent); }
+.shortcuts-group table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.shortcuts-group td { padding: 3px 6px 3px 0; vertical-align: top; }
+.shortcuts-group td:first-child { white-space: nowrap; width: 1%; padding-right: 12px; }
+kbd {
+  font: 12px "Cascadia Mono", Consolas, monospace; background: #f6f7f9;
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
+}
 
 .side-calc {
   flex: none; width: 400px; display: flex; flex-direction: column; min-height: 0;
@@ -511,6 +578,9 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .print-host { position: fixed; left: -10000px; top: 0; width: 720px; }
 @media print {
   @page { size: A4; margin: 0; }
+  /* Garde-fou : une impression lancee hors export (menu du WebView2)
+     n'imprime pas l'interface. Ctrl+P passe par l'export de la page. */
+  body:not(.printing) > * { display: none !important; }
   html, body.printing { height: auto; overflow: visible; background: #fff; }
   body.printing > *:not(.print-host) { display: none !important; }
   body.printing .print-host { position: static; width: 720px; margin: 0 auto; }

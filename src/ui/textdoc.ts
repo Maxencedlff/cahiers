@@ -525,7 +525,7 @@ export class TextDoc {
     const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
     const fig = el("span", {
       class: "doc-img", contenteditable: "false", draggable: "true",
-      dataset: { id }, title: info?.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour deplacer",
+      dataset: { id }, title: info?.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour déplacer",
     }, img, grip);
     fig.style.setProperty("--w", String(info?.width ?? 640));
     if (info) {

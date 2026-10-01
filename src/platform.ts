@@ -37,7 +37,7 @@ export async function detectPlatform(): Promise<Platform> {
     await seedDemo(fs);
     return {
       fs,
-      rootLabel: "Mode navigateur, donnees de developpement",
+      rootLabel: "Mode navigateur, données de développement",
       presence: null,
       isTauri: false,
       ocr: null,

@@ -48,14 +48,29 @@ export function toast(
   if (action) {
     node.classList.add("with-action");
     // Un seul appui : le message part aussitot, l'action ne se rejoue pas.
-    node.append(el("button", {
+    const btn = el("button", {
       class: "toast-action",
       onclick: () => { node.remove(); action.run(); },
-    }, action.label));
+    }, action.label);
+    // Le curseur reste dans le texte : on annule et on continue de taper.
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    node.append(btn);
+  }
+  // Deux messages au plus : une pile masquait la page et la barre d'etat.
+  // Le plus ancien part, sauf s'il porte une action (« Annuler ») et qu'un
+  // message sans action peut partir a sa place.
+  const shown = [...toastHost.children] as HTMLElement[];
+  while (shown.length >= MAX_TOASTS) {
+    const plain = shown.find((t) => !t.classList.contains("with-action"));
+    const victim = plain ?? shown[0];
+    victim.remove();
+    shown.splice(shown.indexOf(victim), 1);
   }
   toastHost.append(node);
   setTimeout(() => node.remove(), ms);
 }
+
+const MAX_TOASTS = 2;
 
 /* ---------------- dialogues ---------------- */
 

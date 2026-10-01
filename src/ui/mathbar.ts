@@ -1,35 +1,10 @@
 import { el } from "./dom";
 import { renderTex } from "./tex";
 import { insertMathTemplate, type TextDoc } from "./textdoc";
-import { orderedSymbols, recordSymbol, SYMBOLS_CHANGED } from "../core/symbols";
+import { orderedSymbols, recordSymbol, symbolName, SYMBOLS_CHANGED } from "../core/symbols";
+import { MATH_TEMPLATES } from "../core/templates";
 
-/**
- * Modeles de formules. #@ = mot pris avant le curseur, #? = case a remplir.
- * `key` : raccourci Alt+touche, choisi pour tomber sous les doigts en AZERTY.
- */
-export interface MathTemplate {
-  label: string;      // apercu KaTeX sur le bouton
-  insert: string;     // LaTeX insere par MathLive
-  title: string;
-  key?: string;
-}
-
-export const MATH_TEMPLATES: MathTemplate[] = [
-  { label: "\\frac{a}{b}", insert: "\\frac{#@}{#?}", title: "Fraction", key: "f" },
-  { label: "x^{n}", insert: "#@^{#?}", title: "Puissance", key: "p" },
-  { label: "x_{i}", insert: "#@_{#?}", title: "Indice", key: "i" },
-  { label: "\\sqrt{x}", insert: "\\sqrt{#?}", title: "Racine", key: "r" },
-  { label: "\\sqrt[n]{x}", insert: "\\sqrt[#?]{#?}", title: "Racine n-ieme" },
-  { label: "\\int_a^b", insert: "\\int_{#?}^{#?}#?\\,\\mathrm{d}\\,#?", title: "Integrale : borne haute, Tab, borne basse, Tab, fonction", key: "n" },
-  { label: "\\sum", insert: "\\sum_{#?}^{#?}#?", title: "Somme : borne haute, Tab, borne basse", key: "s" },
-  { label: "\\lim", insert: "\\lim_{#?\\to#?}#?", title: "Limite", key: "l" },
-  { label: "\\frac{\\mathrm{d}}{\\mathrm{d}x}", insert: "\\frac{\\mathrm{d}#?}{\\mathrm{d}#?}", title: "Derivee", key: "d" },
-  { label: "\\vec{u}", insert: "\\vec{#?}", title: "Vecteur", key: "v" },
-  { label: "\\binom{n}{k}", insert: "\\binom{#?}{#?}", title: "Coefficient binomial" },
-  { label: "|x|", insert: "\\left|#?\\right|", title: "Valeur absolue" },
-  { label: "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}", insert: "\\begin{pmatrix}#?&#?\\\\#?&#?\\end{pmatrix}", title: "Matrice 2x2", key: "m" },
-  { label: "\\begin{cases}\\cdot\\\\\\cdot\\end{cases}", insert: "\\begin{cases}#?\\\\#?\\end{cases}", title: "Systeme" },
-];
+export { MATH_TEMPLATES, type MathTemplate } from "../core/templates";
 
 /**
  * Ruban Maths. Les boutons ne prennent jamais le focus : le curseur reste
@@ -60,13 +35,20 @@ export function buildMathBar(getDoc: () => TextDoc | undefined): HTMLElement {
   const syms = el("div", { class: "mathsyms" });
   const paintSymbols = () => {
     syms.replaceChildren(...orderedSymbols().map(([label, insert]) => {
-      const b = button(label, insert, insert);
+      // Infobulle lisible (« alpha », « implique »), pas du LaTeX brut.
+      const b = button(label, symbolName(insert), insert);
       b.addEventListener("click", () => recordSymbol(insert));
       return b;
     }));
   };
   paintSymbols();
-  window.addEventListener(SYMBOLS_CHANGED, () => { if (syms.isConnected) paintSymbols(); });
+  // La colonne d'outils est reconstruite a chaque changement d'outil : un
+  // ruban qui a quitte l'ecran retire son ecouteur, sinon ils s'accumulent.
+  const onChange = () => {
+    if (syms.isConnected) paintSymbols();
+    else window.removeEventListener(SYMBOLS_CHANGED, onChange);
+  };
+  window.addEventListener(SYMBOLS_CHANGED, onChange);
   bar.append(syms);
   return bar;
 }

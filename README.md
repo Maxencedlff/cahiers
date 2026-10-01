@@ -12,7 +12,7 @@ n'explique que la mise en route et l'organisation du code.
 ```bash
 npm install
 npm run dev        # interface dans un navigateur, donnees locales de demo
-npm test           # 112 tests du noyau
+npm test           # tests du noyau (vitest)
 npm run app:dev    # vraie application Tauri
 npm run app:build  # produit l'installateur .exe
 ```
@@ -74,6 +74,8 @@ src/
 ├── core/                 aucune dependance a l'interface, entierement teste
 │   ├── types.ts          schema des pages et des blocs
 │   ├── palette.ts        les 5 couleurs a semantique fixe
+│   ├── shortcuts.ts      table unique des raccourcis (clavier, aide F1)
+│   ├── templates.ts      modeles du ruban Maths
 │   ├── calc/             mathjs : evaluation, derivation, primitives,
 │   │                     equations, matrices, courbes
 │   ├── ink/              modele de trait, file de reconnaissance hors ligne
@@ -84,7 +86,8 @@ src/
 │   ├── calculator/       les cinq onglets
 │   ├── menu.ts           accueil, recherche, reperes "pas compris"
 │   ├── probe.ts          sonde stylet
-│   └── app.ts            onglets, split, raccourcis
+│   ├── help.ts           fiche des raccourcis (F1, Ctrl+/)
+│   └── app.ts            onglets, split, colonne d'outils, menu « ⋯ »
 ├── platform.ts           Tauri ou navigateur
 └── tests/
 src-tauri/src/lib.rs      acces disque controle, instance unique
@@ -92,7 +95,7 @@ src-tauri/src/lib.rs      acces disque controle, instance unique
 
 ## Photos du tableau
 
-Bouton « Photo » de la barre d'outils. On choisit l'image, on pose les quatre
+« Photo du tableau » dans le menu « ⋯ » de la colonne d'outils. On choisit l'image, on pose les quatre
 coins du tableau, l'application redresse la perspective, passe en noir et blanc
 par seuil adaptatif, puis lit le texte avec le moteur OCR **de Windows**. Rien
 ne part sur un service externe. Le texte extrait rend la photo trouvable par la
@@ -118,32 +121,47 @@ reste a l'encre jusqu'a la pause de 500 ms, puis se convertit.
 - MyScript renvoie la boite de chaque mot sur l'encre d'origine (requete
   sans `DIGITAL_EDIT`, qui remettrait le texte en page) ; chaque trait est
   rattache au mot dont la boite le contient (`src/core/ink/words.ts`).
-- L'encre reste dans la page : « Encre » la ramene, la gomme efface un mot
+- L'encre reste dans la page : « Encre : Brute » (menu « ⋯ ») la ramene, la gomme efface un mot
   tape en frottant dessus.
 - Correction : appui au doigt ou clic droit sur un mot. Une correction est
   reportee sur les conversions suivantes au lieu d'etre ecrasee.
 
 Les cles se saisissent dans l'application, en bas a droite, bouton
-« Cles MyScript ». Sans cles, tout fonctionne sauf la conversion : les blocs
+« Clés MyScript ». Sans cles, tout fonctionne sauf la conversion : les blocs
 math restent en attente indefiniment, l'encre reste lisible.
 
 ## Raccourcis
 
+La liste complete est dans l'application : **F1** (ou `Ctrl+/`, ou le bouton
+« ? » en haut a droite). Elle est generee depuis la table unique
+`src/core/shortcuts.ts`, qui sert aussi au clavier : elle ne peut pas mentir.
+Les lettres seules tapent du texte, comme dans Word ; les raccourcis passent
+tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
+
 | | |
 |---|---|
+| `Ctrl+F` | repere « pas compris » (meme en tapant ; « Annuler » dans le message) |
+| `Ctrl+Pg↓` / `Ctrl+Pg↑` | page suivante, precedente (`Pg↓` `Pg↑` seuls hors du texte) |
+| `Ctrl+Maj+Pg↓` / `Ctrl+Maj+Pg↑` | intercalaire suivant, precedent |
+| `Ctrl+N` / `Ctrl+Maj+N` | nouvelle page a la fin, inserer apres la page courante |
+| `Ctrl+G` | aller a la page (ou un appui sur « p. 4 / 12 ») |
+| `Ctrl+P` / `Ctrl+Maj+P` | exporter en PDF la page, tout l'intercalaire |
+| `Ctrl+Z` / `Ctrl+Y` | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |
 | `Ctrl+K` | recherche globale |
 | `Ctrl+L` | calculatrice |
-| `Ctrl+F` | repere « pas compris » |
-| `Ctrl+N` | nouvelle page |
-| `Ctrl+Z` / `Ctrl+Y` | annuler, retablir |
-| `Ctrl+\` | split gauche/droite |
-| `Ctrl+Maj+X` | permuter les panneaux |
-| `Ctrl+Maj+W` | fermer le panneau droit |
-| `Ctrl+Tab` / `Ctrl+W` | onglet suivant, fermer l'onglet |
-| `1` a `5` | couleurs de la palette |
-| `S` `H` `G` `Z` | stylo, surligneur, gomme, zone math |
-| `←` `→` `Pg↑` `Pg↓` | page precedente, suivante |
+| `Ctrl+R` | conversion de l'ecriture : au fil de la plume ou sur zone |
+| `Ctrl+D` | doigt : ecrire ou naviguer (avec un stylet : l'oublier) |
+| `Ctrl+Tab` / `Ctrl+Maj+Tab` | onglet suivant, precedent |
+| `Ctrl+W` | fermer l'onglet |
+| `Ctrl+\` (AZERTY : `Ctrl+*`) | split gauche/droite |
+| `Ctrl+Maj+X` / `Ctrl+Maj+W` | permuter les panneaux, fermer le panneau droit |
+| `Alt+E` `Alt+H` `Alt+G` | stylo, surligneur, gomme |
+| `Alt+Z` `Alt+T` | zone math, zone texte (deux fois : verrou) |
+| `Alt+0` a `Alt+5` | noir, puis les 5 couleurs de la palette |
+| `Alt+=` | nouvelle formule ; `Alt+F P I R N S L D V M` : modeles du ruban Maths |
+| `Echap` | quitter le texte ; une seconde fois, retour au menu |
+| `F1` | fiche des raccourcis |
 
 ## Etat
 

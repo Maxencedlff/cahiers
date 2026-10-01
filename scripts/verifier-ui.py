@@ -32,6 +32,21 @@ def verifier(condition: bool, message: str) -> None:
         problemes.append(message)
 
 
+def trait_stylet(page, points) -> None:
+    """Trace au stylet (pointerType pen) : a la souris, l'outil Stylo tape du texte."""
+    cdp = page.context.new_cdp_session(page)
+    def envoyer(kind, x, y, boutons):
+        cdp.send("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": y, "button": "left", "buttons": boutons,
+            "clickCount": 1, "pointerType": "pen", "force": 0.5,
+        })
+    envoyer("mousePressed", *points[0], 1)
+    for x, y in points[1:]:
+        envoyer("mouseMoved", x, y, 1)
+    envoyer("mouseReleased", *points[-1], 0)
+    cdp.detach()
+
+
 def main() -> int:
     with sync_playwright() as pw:
         navigateur = pw.chromium.launch()
@@ -45,18 +60,14 @@ def main() -> int:
         page.reload(wait_until="networkidle")
         page.wait_for_timeout(1200)
         page.screenshot(path=OUT / "01-menu.png")
-        verifier("Matieres" in page.inner_text("#app"), "le menu liste les matieres")
+        verifier("Matières" in page.inner_text("#app"), "le menu liste les matieres")
 
         page.get_by_text("Maths", exact=True).first.click()
         page.wait_for_timeout(900)
 
         feuille = page.locator(".sheet").first.bounding_box()
         ox, oy = feuille["x"] + 80, feuille["y"] + 90
-        page.mouse.move(ox, oy)
-        page.mouse.down()
-        for i in range(50):
-            page.mouse.move(ox + i * 4, oy + 28 * math.sin(i / 5))
-        page.mouse.up()
+        trait_stylet(page, [(ox + i * 4, oy + 28 * math.sin(i / 5)) for i in range(50)])
         page.wait_for_timeout(400)
         page.screenshot(path=OUT / "02-encre.png")
 
@@ -69,15 +80,15 @@ def main() -> int:
         page.wait_for_timeout(700)
         verifier(page.locator(".block-box.math").count() == 1, "la zone entouree cree un bloc math")
         verifier(
-            "conversion en attente" in page.inner_text(".block-box.math"),
+            any(t in page.inner_text(".block-box.math")
+                for t in ("conversion en attente", "clés MyScript manquantes")),
             "le bloc math attend la conversion sans bloquer l'ecriture",
         )
         page.screenshot(path=OUT / "03-zone-math.png")
 
         # Les blocs s'empilent au lieu de se recouvrir.
-        page.get_by_role("button", name="Texte", exact=True).click()
-        page.wait_for_timeout(300)
-        page.locator(".block-text-edit").first.fill("Critere de Riemann")
+        # Frappe au clavier : le texte va dans la page sans cliquer.
+        page.keyboard.type("Critere de Riemann")
         page.wait_for_timeout(1500)
         boites = page.locator(".block-box").all()
         rects = [b.bounding_box() for b in boites]
@@ -90,8 +101,28 @@ def main() -> int:
         verifier(not chevauche, "les blocs ne se recouvrent pas")
         page.screenshot(path=OUT / "04-blocs.png")
 
-        # Calculatrice.
-        page.get_by_role("button", name="Calculatrice").click()
+        # Outils du cours visibles sans faire defiler la colonne, meme sur
+        # un ecran de 1280x720.
+        page.set_viewport_size({"width": 1280, "height": 720})
+        page.wait_for_timeout(400)
+        for nom in ["Pas compris", "Page suivante", "Plus d'actions"]:
+            boite = page.get_by_role("button", name=nom).first.bounding_box()
+            verifier(boite is not None and boite["y"] + boite["height"] <= 720 - 36,
+                     f"« {nom} » visible a 1280x720")
+        page.set_viewport_size({"width": 1500, "height": 940})
+        page.wait_for_timeout(400)
+
+        # Ctrl+F pendant la frappe pose un repere, sans quitter le texte.
+        avant = page.locator(".flag-pin").count()
+        page.keyboard.press("Control+f")
+        page.wait_for_timeout(400)
+        verifier(page.locator(".flag-pin").count() == avant + 1, "Ctrl+F pose un repere pendant la frappe")
+        page.locator(".toast-action", has_text="Annuler").first.click()
+        page.wait_for_timeout(300)
+        verifier(page.locator(".flag-pin").count() == avant, "« Annuler » retire le repere")
+
+        # Calculatrice (fermee par defaut, Ctrl+L).
+        page.keyboard.press("Control+l")
         page.wait_for_timeout(1500)
         for touche in ["2", "+", "3", "×", "4", "="]:
             page.locator(f".keys button:text-is('{touche}')").first.click()
@@ -113,7 +144,7 @@ def main() -> int:
         verifier("Racines" in info, "les racines de la courbe sont annoncees")
         page.screenshot(path=OUT / "06-courbes.png")
 
-        page.locator(".calc-tabs button:text-is('Resoudre')").click()
+        page.locator(".calc-tabs button:text-is('Résoudre')").click()
         page.wait_for_timeout(200)
         page.locator(".calc-body button.primary").click()
         page.wait_for_timeout(400)
@@ -122,11 +153,11 @@ def main() -> int:
         verifier("x = 1" in texte and "x = 2" in texte, "x2 - 3x + 2 a pour racines 1 et 2")
         page.screenshot(path=OUT / "07-resoudre.png")
 
-        page.locator(".calc-tabs button:text-is('Litteral')").click()
+        page.locator(".calc-tabs button:text-is('Littéral')").click()
         page.wait_for_timeout(200)
-        page.get_by_role("button", name="Deriver").click()
+        page.get_by_role("button", name="Dériver").click()
         page.wait_for_timeout(500)
-        page.get_by_role("button", name="Afficher les details").click()
+        page.get_by_role("button", name="Afficher les détails").click()
         page.wait_for_timeout(500)
         etapes = page.inner_text(".steps")
         verifier("produit" in etapes.lower(), "la regle du produit est nommee")
@@ -138,7 +169,7 @@ def main() -> int:
         page.wait_for_timeout(400)
         page.locator("input[type=text]").first.fill("Riemann")
         page.wait_for_timeout(1200)
-        verifier("resultat" in page.inner_text(".screen-inner"), "la recherche trouve le texte saisi")
+        verifier("résultat" in page.inner_text(".screen-inner"), "la recherche trouve le texte saisi")
         page.screenshot(path=OUT / "09-recherche.png")
 
         # Split, puis retour sur l'onglet mis en panneau droit.
@@ -155,7 +186,7 @@ def main() -> int:
         page.get_by_text("Maths", exact=True).first.click()
         page.wait_for_timeout(900)
         verifier(
-            page.get_by_role("button", name="Calculatrice").count() > 0,
+            page.locator(".side-tools .flag-btn").count() > 0,
             "revenir sur l'onglet du panneau droit ne casse pas la vue",
         )
 

@@ -59,7 +59,7 @@ export async function buildMenu(host: MenuHost): Promise<HTMLElement> {
       el("button", { class: "resume", onclick: host.openFlags },
         el("span", { class: "badge" }, `${flags.length}`),
         el("div", {},
-          el("div", { class: "big" }, flags.length > 1 ? "reperes en attente" : "repere en attente"),
+          el("div", { class: "big" }, flags.length > 1 ? "repères en attente" : "repère en attente"),
           el("div", { class: "muted small" },
             [...new Set(flags.map((f) => f.notebookTitle))].join(", ")),
         ),
@@ -67,7 +67,7 @@ export async function buildMenu(host: MenuHost): Promise<HTMLElement> {
     );
   }
 
-  inner.append(el("h2", {}, "Matieres"));
+  inner.append(el("h2", {}, "Matières"));
   const grid = el("div", { class: "grid" });
   inner.append(grid);
 
@@ -76,16 +76,16 @@ export async function buildMenu(host: MenuHost): Promise<HTMLElement> {
   grid.append(el("button", {
     class: "card add",
     onclick: async () => {
-      const r = await askFields("Nouvelle matiere", [
-        { name: "title", label: "Nom", placeholder: "Maths, Elec, Info..." },
-      ], "Creer");
+      const r = await askFields("Nouvelle matière", [
+        { name: "title", label: "Nom", placeholder: "Maths, Élec, Info…" },
+      ], "Créer");
       if (!r?.title) return;
       const color = NOTEBOOK_COLORS[Math.floor(Math.random() * NOTEBOOK_COLORS.length)];
       const dir = await host.repo.createNotebook(r.title, color);
       await host.repo.createDivider(dir, "Cours");
       host.openNotebook(dir);
     },
-  }, "+ Nouvelle matiere"));
+  }, "+ Nouvelle matière"));
 
   return screen;
 }
@@ -127,7 +127,7 @@ export function relative(iso: string): string {
   const then = new Date(iso).getTime();
   if (!Number.isFinite(then)) return "";
   const min = Math.round((Date.now() - then) / 60000);
-  if (min < 1) return "a l'instant";
+  if (min < 1) return "à l'instant";
   if (min < 60) return `il y a ${min} min`;
   const h = Math.round(min / 60);
   if (h < 24) return `il y a ${h} h`;
@@ -148,7 +148,7 @@ export async function buildFlagsView(host: MenuHost, onBack: () => void): Promis
   );
 
   if (!flags.length) {
-    inner.append(el("div", { class: "empty" }, "Aucun repere en attente."));
+    inner.append(el("div", { class: "empty" }, "Aucun repère en attente."));
     return el("div", { class: "screen" }, inner);
   }
 
@@ -180,7 +180,7 @@ export function buildSearchView(
   onBack: () => void,
   search: (q: string) => Promise<{ notebook: string; notebookTitle: string; divider: string; page: number; blockId: string; blockType: string; excerpt: string }[]>,
 ): HTMLElement {
-  const input = el("input", { type: "text", placeholder: "Chercher dans tous les cahiers..." });
+  const input = el("input", { type: "text", placeholder: "Chercher dans tous les cahiers…" });
   const results = el("div", { class: "hits" });
   const info = el("div", { class: "muted small" });
 
@@ -190,16 +190,16 @@ export function buildSearchView(
     const mine = ++token;
     if (q.length < 2) {
       results.replaceChildren();
-      info.textContent = "Tape au moins deux caracteres.";
+      info.textContent = "Tape au moins deux caractères.";
       return;
     }
-    info.textContent = "Recherche...";
+    info.textContent = "Recherche…";
     const hits = await search(q);
     if (mine !== token) return; // une frappe plus recente a pris la main
     results.replaceChildren();
     info.textContent = hits.length
-      ? `${hits.length} resultat${hits.length > 1 ? "s" : ""}`
-      : "Aucun resultat.";
+      ? `${hits.length} résultat${hits.length > 1 ? "s" : ""}`
+      : "Aucun résultat.";
     for (const h of hits.slice(0, 200)) {
       results.append(el("button", {
         class: "hit",

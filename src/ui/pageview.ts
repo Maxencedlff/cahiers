@@ -40,6 +40,8 @@ export interface PageViewHost {
   /** Demande la reconnaissance d'un bloc math ou texte manuscrit. */
   requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
   onDirty: () => void;
+  /** La page en vue a change (navigation, defilement, ajout, suppression). */
+  onPageChange?: (n: number, total: number) => void;
   openLink: (target: string) => void;
   /** Une page vient de partir a la corbeille : l'appli propose « Annuler ». */
   onTrashed: (entry: TrashEntry) => void;
@@ -84,6 +86,8 @@ export class PageView {
   private viewMode: ViewMode = "pages";
   private renderMode: RenderMode = "ink";
   private current = 1;
+  /** Nombre de pages de l'intercalaire, lu au dernier rendu. */
+  private total = 0;
   /** Annulation par page, par id : un numero change a chaque suppression. */
   private history = new PageHistory();
   /** Derniere page modifiee, que suit Ctrl+Z en mode defilement. */
@@ -122,6 +126,7 @@ export class PageView {
   }
 
   get pageNumber(): number { return this.current; }
+  get pageCount(): number { return this.total; }
   get mode(): ViewMode { return this.viewMode; }
   get rendering(): RenderMode { return this.renderMode; }
 
@@ -202,6 +207,8 @@ export class PageView {
 
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (gen !== this.renderGen) return;
+    this.total = nums.length;
+    this.host.onPageChange?.(this.current, this.total);
     const visible = this.viewMode === "pages"
       ? nums.filter((n) => n === this.current)
       : nums;
@@ -526,7 +533,7 @@ export class PageView {
     const word = ink.words?.[index];
     if (!word) return;
     const options = (word.candidates ?? []).map((c) => ({ value: c, label: c }));
-    options.push({ value: EDIT_SENTINEL, label: "Corriger a la main..." });
+    options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? `Autres lectures de « ${word.label} »` : `Corriger « ${word.label} »`,
       options,
@@ -576,6 +583,7 @@ export class PageView {
       this.current = best;
       void this.host.repo.setLastPosition(this.notebook, this.divider, best);
       this.host.onDirty();
+      this.host.onPageChange?.(best, this.total);
     }
   }
 
@@ -777,7 +785,7 @@ export class PageView {
           class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
         }, el("span", { class: "tag" },
           block.pending
-            ? (this.host.recognitionReady() ? "conversion en attente" : "cles MyScript manquantes")
+            ? (this.host.recognitionReady() ? "conversion en attente" : "clés MyScript manquantes")
             : block.latex ? "math" : "math, non reconnu"));
         if (clean) {
           const tex = renderTex(block.latex!);
@@ -834,7 +842,7 @@ export class PageView {
       case "flag": {
         const pin = el("button", { class: "flag-pin", title: block.note }, "?");
         pin.addEventListener("click", async () => {
-          const done = await confirmDialog("Repere", block.note, "Marquer comme compris");
+          const done = await confirmDialog("Repère « pas compris »", block.note, "Marquer comme compris");
           if (done) {
             block.resolved = true;
             this.paintOverlay(loaded);
@@ -875,7 +883,7 @@ export class PageView {
           class: `block-box math${block.pending ? " pending" : ""}${clean ? " clean" : ""}`,
         }, el("span", { class: "tag" },
           block.pending
-            ? (this.host.recognitionReady() ? "conversion en attente" : "cles MyScript manquantes")
+            ? (this.host.recognitionReady() ? "conversion en attente" : "clés MyScript manquantes")
             : block.recognized ? "texte" : "texte, non reconnu"));
         if (clean) {
           const line = el("div", { style: { fontSize: `${Math.max(14, 19 * scale)}px` } },
@@ -902,7 +910,7 @@ export class PageView {
    */
   private async correctMath(loaded: LoadedPage, block: MathBlock): Promise<void> {
     const options = (block.candidates ?? []).map((c) => ({ value: c, label: c }));
-    options.push({ value: EDIT_SENTINEL, label: "Corriger a la main..." });
+    options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? "Autres lectures possibles" : "Corriger la formule",
       options,
@@ -933,7 +941,7 @@ export class PageView {
       if (!block.pending) return null;
       const wait = el("div", { class: "block-box math pending" },
         el("span", { class: "tag" },
-          this.host.recognitionReady() ? "conversion en cours" : "cles MyScript manquantes"));
+          this.host.recognitionReady() ? "conversion en cours" : "clés MyScript manquantes"));
       Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
       return wait;
     }
@@ -943,14 +951,14 @@ export class PageView {
     if (!block.recognized) {
       if (!block.pending || this.host.recognitionReady()) return null;
       const wait = el("div", { class: "block-box math pending" },
-        el("span", { class: "tag" }, "cles MyScript manquantes"));
+        el("span", { class: "tag" }, "clés MyScript manquantes"));
       Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
       return wait;
     }
 
     const area = el("textarea", { class: "block-text-edit", rows: "3" });
     area.value = block.recognized ?? "";
-    area.placeholder = "Conversion en cours...";
+    area.placeholder = "Conversion en cours…";
     const grow = () => {
       area.style.height = "auto";
       area.style.height = `${Math.max(60, area.scrollHeight)}px`;
@@ -967,7 +975,7 @@ export class PageView {
     const box = el("div", { class: "block-box text" },
       el("span", { class: "tag" },
         block.pending ? "conversion en cours"
-          : block.editedByHand ? "texte, corrige au clavier" : "texte converti"),
+          : block.editedByHand ? "texte, corrigé au clavier" : "texte converti"),
       area);
     Object.assign(box.style, {
       left: `${40 * scale}px`,
@@ -1007,7 +1015,7 @@ export class PageView {
     }
     if (block.pending && !this.host.recognitionReady()) {
       const wait = el("div", { class: "block-box math pending" },
-        el("span", { class: "tag" }, "cles MyScript manquantes"));
+        el("span", { class: "tag" }, "clés MyScript manquantes"));
       Object.assign(wait.style, { left: "12px", top: "8px", width: "auto", minHeight: "0" });
       layer.append(wait);
     }
@@ -1021,7 +1029,7 @@ export class PageView {
    */
   private async correctText(loaded: LoadedPage, block: InkBlock): Promise<void> {
     const options = (block.candidates ?? []).map((c) => ({ value: c, label: c }));
-    options.push({ value: EDIT_SENTINEL, label: "Corriger a la main..." });
+    options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? "Autres lectures possibles" : "Corriger le texte",
       options,
@@ -1102,12 +1110,30 @@ export class PageView {
    * Repere "pas compris" : un seul bouton, aucun texte a ecrire.
    * En amphi on n'a pas le temps d'ecrire une note, on a le temps d'appuyer.
    */
-  addFlag(note = "A revoir"): void {
+  addFlag(note = "À revoir"): void {
     const loaded = this.activePage();
     if (!loaded) return;
     const y = 20 + loaded.page.blocks.filter((b) => b.type === "flag").length * 40;
-    this.addBlock({ id: uuid(), type: "flag", note, rect: { x: PAGE_W - 62, y, w: 30, h: 30 } });
-    toast("Repere pose sur la page");
+    const id = uuid();
+    this.addBlock({ id, type: "flag", note, rect: { x: PAGE_W - 62, y, w: 30, h: 30 } });
+    // Un repere pose par erreur s'enleve d'un appui, sans chercher la pastille.
+    toast(`Repère « pas compris » posé, p. ${loaded.number}`, "info", 5000,
+      { label: "Annuler", run: () => this.removeFlag(loaded.page.id, id) });
+  }
+
+  /** Retire un repere, sur la page qui le porte (meme si on a change de page). */
+  private removeFlag(pageId: string, blockId: string): void {
+    const loaded = this.list.find((p) => p.page.id === pageId && !p.dead);
+    if (!loaded) {
+      toast("Cette page n'est plus affichée : retire le repère depuis la page", "warn");
+      return;
+    }
+    if (!loaded.page.blocks.some((b) => b.id === blockId)) return;
+    this.pushUndo(loaded);
+    const i = loaded.page.blocks.findIndex((b) => b.id === blockId);
+    loaded.page.blocks.splice(i, 1);
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
   }
 
   /** Insere une photo redressee : le fichier part dans assets/. */
@@ -1122,7 +1148,7 @@ export class PageView {
     try {
       src = await this.host.repo.writeAsset(this.notebook, this.divider, name, dataUrl);
     } catch (e) {
-      toast(`Image non enregistree : ${(e as Error).message}`, "err", 6000);
+      toast(`Image non enregistrée : ${(e as Error).message}`, "err", 6000);
       return;
     }
     // Posee dans le texte, au curseur : le texte passe au-dessus et en
@@ -1133,7 +1159,7 @@ export class PageView {
     });
     loaded.doc.insertImage(id);
     this.fitSheet(loaded);
-    toast(ocr ? "Photo inseree, texte extrait pour la recherche" : "Photo inseree");
+    toast(ocr ? "Photo insérée, texte extrait pour la recherche" : "Photo insérée");
   }
 
   /** Ajoute un bloc de texte et met le curseur dedans : on tape aussitot. */
@@ -1158,6 +1184,7 @@ export class PageView {
       await this.render();
     } else {
       this.list.find((p) => p.number === n)?.wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+      this.host.onPageChange?.(n, this.total);
     }
     this.host.onDirty();
   }
@@ -1166,7 +1193,7 @@ export class PageView {
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     const i = nums.indexOf(this.current);
     if (i >= 0 && i < nums.length - 1) await this.goTo(nums[i + 1]);
-    else toast("Derniere page. Utilise « Nouvelle page ».", "info", 1800);
+    else toast("Dernière page. Nouvelle page : Ctrl+N.", "info", 1800);
   }
 
   async prev(): Promise<void> {
@@ -1287,13 +1314,19 @@ export class PageView {
     }
   }
 
+  /** Un export en cours : un second Ctrl+P ne relance pas l'impression. */
+  private exporting = false;
+
   /**
-   * Export PDF de tout l'intercalaire. Passe par l'impression du WebView2 :
-   * la boite de dialogue propose « Enregistrer au format PDF ». Les pages
-   * sont posees seules sur une feuille A4 le temps de l'impression, puis la
-   * vue revient exactement ou elle etait.
+   * Export PDF : la page courante (Ctrl+P) ou tout l'intercalaire
+   * (Ctrl+Maj+P). Passe par l'impression du WebView2 : la boite de dialogue
+   * propose « Enregistrer au format PDF ». Les pages sont posees seules sur
+   * une feuille A4 le temps de l'impression, puis la vue revient exactement
+   * ou elle etait.
    */
-  async exportPdf(): Promise<void> {
+  async exportPdf(scope: "current" | "all" = "all"): Promise<void> {
+    if (this.exporting) return;
+    this.exporting = true;
     const prevMode = this.viewMode;
     const prevPage = this.current;
     const parent = this.root.parentElement;
@@ -1301,41 +1334,49 @@ export class PageView {
     const prevTitle = document.title;
     const host = el("div", { class: "print-host" });
     document.body.append(host);
-    // Poser la vue hors ecran AVANT le rendu : les feuilles se calent
-    // directement sur la largeur A4 (sinon elles gardent la hauteur de
-    // l'ecran et debordent sur une seconde feuille).
-    host.append(this.root);
-    this.viewMode = "scroll";
-    await this.render();
-    // Passer en media print change la largeur de la vue : sans cela les
-    // feuilles se recalculent a 900 px au milieu de l'impression.
-    this.resizeObserver.disconnect();
-    // Les photos doivent etre chargees avant l'apercu, sinon trous blancs.
-    await Promise.all([...this.root.querySelectorAll("img")].map((img) =>
-      img.decode().catch(() => undefined)));
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    // Hauteur utile d'une A4 a 96 dpi : 297 mm moins 10 mm en haut et une
-    // marge de securite en bas. Au-dela, la page est reduite pour tenir.
-    const usable = 1000;
-    for (const p of this.list) {
-      const h = p.wrap.offsetHeight;
-      if (h > usable) p.wrap.style.zoom = String(usable / h);
-    }
-    document.title = `${this.notebook} - ${this.divider}`;
-    document.body.classList.add("printing");
-    const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
-    window.print();
-    await done;
-    document.body.classList.remove("printing");
-    this.resizeObserver.observe(this.root);
-    document.title = prevTitle;
-    parent?.insertBefore(this.root, nextSibling);
-    host.remove();
-    this.viewMode = prevMode;
-    this.current = prevPage;
-    await this.render();
-    if (prevMode === "scroll") {
-      this.list.find((p) => p.number === prevPage)?.wrap.scrollIntoView({ block: "start" });
+    try {
+      await this.flush();
+      // Poser la vue hors ecran AVANT le rendu : les feuilles se calent
+      // directement sur la largeur A4 (sinon elles gardent la hauteur de
+      // l'ecran et debordent sur une seconde feuille).
+      host.append(this.root);
+      // Mode pages = la page courante seule ; defilement = toutes.
+      this.viewMode = scope === "current" ? "pages" : "scroll";
+      await this.render();
+      // Passer en media print change la largeur de la vue : sans cela les
+      // feuilles se recalculent a 900 px au milieu de l'impression.
+      this.resizeObserver.disconnect();
+      // Les photos doivent etre chargees avant l'apercu, sinon trous blancs.
+      await Promise.all([...this.root.querySelectorAll("img")].map((img) =>
+        img.decode().catch(() => undefined)));
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // Hauteur utile d'une A4 a 96 dpi : 297 mm moins 10 mm en haut et une
+      // marge de securite en bas. Au-dela, la page est reduite pour tenir.
+      const usable = 1000;
+      for (const p of this.list) {
+        const h = p.wrap.offsetHeight;
+        if (h > usable) p.wrap.style.zoom = String(usable / h);
+      }
+      document.title = scope === "current"
+        ? `${this.notebook} - ${this.divider} p. ${prevPage}`
+        : `${this.notebook} - ${this.divider}`;
+      document.body.classList.add("printing");
+      const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
+      window.print();
+      await done;
+    } finally {
+      document.body.classList.remove("printing");
+      this.resizeObserver.observe(this.root);
+      document.title = prevTitle;
+      parent?.insertBefore(this.root, nextSibling);
+      host.remove();
+      this.viewMode = prevMode;
+      this.current = prevPage;
+      this.exporting = false;
+      await this.render();
+      if (prevMode === "scroll") {
+        this.list.find((p) => p.number === prevPage)?.wrap.scrollIntoView({ block: "start" });
+      }
     }
   }
 
@@ -1345,6 +1386,11 @@ export class PageView {
       this.paintStrokes(p);
       this.paintOverlay(p);
     }
+  }
+
+  /** Numeros des pages de l'intercalaire, tels que sur le disque. */
+  async pageNumbers(): Promise<number[]> {
+    return this.host.repo.listPageNumbers(this.notebook, this.divider);
   }
 
   /** Va a un bloc precis, apres une recherche ou un lien. */

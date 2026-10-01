@@ -69,6 +69,24 @@ export class Calculator {
     container.append(this.root);
   }
 
+  /**
+   * Fenetre flottante, posee dans ce conteneur (ecran etroit) : la feuille
+   * garde toute sa largeur. Le conteneur la retire de l'ecran avec lui.
+   */
+  float(container: HTMLElement): void {
+    const wasDocked = this.root.classList.contains("docked");
+    this.root.classList.remove("docked");
+    container.append(this.root);
+    // Premiere fois : a droite, loin de la colonne d'outils. Ensuite elle
+    // reste la ou on l'a deplacee.
+    if (wasDocked || !this.floatPlaced) {
+      this.floatPlaced = true;
+      this.root.style.left = `${Math.max(8, window.innerWidth - 428 - 16)}px`;
+      this.root.style.top = "110px";
+    }
+  }
+  private floatPlaced = false;
+
   /* ---------------- fenetre ---------------- */
 
   toggle(): void { this.visible ? this.hide() : this.show(); }
@@ -92,6 +110,9 @@ export class Calculator {
   }
 
   get isVisible(): boolean { return this.visible; }
+  get isDocked(): boolean { return this.root.classList.contains("docked"); }
+  /** Deja posee dans ce conteneur (colonne ou zone de travail). */
+  isIn(container: HTMLElement): boolean { return this.root.parentElement === container; }
 
   private head(): HTMLElement {
     const head = el("div", { class: "calc-head" },
@@ -127,8 +148,8 @@ export class Calculator {
       ["calcul", "Calcul"],
       ["courbes", "Courbes"],
       ["matrices", "Matrices"],
-      ["resoudre", "Resoudre"],
-      ["litteral", "Litteral"],
+      ["resoudre", "Résoudre"],
+      ["litteral", "Littéral"],
     ];
     return el("div", { class: "calc-tabs" },
       ...labels.map(([id, label]) =>
@@ -182,7 +203,7 @@ export class Calculator {
       const latex = this.engine.toLatex(this.input);
       read.append(latex
         ? renderTex(latex)
-        : el("span", { class: "muted" }, this.input ? "expression incomplete" : "-"));
+        : el("span", { class: "muted" }, this.input ? "expression incomplète" : "-"));
     };
 
     const press = (k: Key) => {
@@ -239,9 +260,9 @@ export class Calculator {
       this.body.append(el("button", {
         onclick: () => {
           const last = this.engine.history.at(-1);
-          if (!last) { toast("Rien a inserer", "warn"); return; }
+          if (!last) { toast("Rien à insérer", "warn"); return; }
           this.host.insertCalc(last.expr, last.text);
-          toast("Bloc calcul insere dans la page");
+          toast("Bloc calcul inséré dans la page");
         },
       }, "Envoyer dans la page"));
     }
@@ -384,7 +405,7 @@ export class Calculator {
       el("div", { class: "row" }, el("span", { class: "muted" }, "y ="), fnInput),
       el("div", { class: "row" },
         el("span", { class: "muted small" }, "de"), fromInput,
-        el("span", { class: "muted small" }, "a"), toInput,
+        el("span", { class: "muted small" }, "à"), toInput,
         el("button", { onclick: () => zoom(0.5) }, "+"),
         el("button", { onclick: () => zoom(2) }, "−"),
       ),
@@ -397,7 +418,7 @@ export class Calculator {
           onclick: () => {
             if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
             this.host.insertGraph(stripY(fnInput.value), domain());
-            toast("Bloc courbe insere : reouvrable et modifiable");
+            toast("Bloc courbe inséré : réouvrable et modifiable");
           },
         }, "Envoyer dans la page"),
       ),
@@ -423,7 +444,7 @@ export class Calculator {
     };
     const unary = (op: "det" | "inv" | "transpose" | "rank" | "trace") => {
       const m = readA();
-      if (!m) return show(undefined, "Matrice A illisible (lignes de meme longueur)");
+      if (!m) return show(undefined, "Matrice A illisible (lignes de même longueur)");
       const r = applyMatrixOp(m, op);
       show(r.latex, r.ok ? undefined : r.message);
     };
@@ -484,7 +505,7 @@ export class Calculator {
     const solveOne = () => {
       const r = solveEquation(eq.value);
       out.replaceChildren();
-      if (!r.ok) { out.append(el("div", { class: "calc-read err" }, r.message ?? "Echec")); return; }
+      if (!r.ok) { out.append(el("div", { class: "calc-read err" }, r.message ?? "Échec")); return; }
       const box = el("div", { class: "calc-read" });
       // Le discriminant et la nature des racines : c'est ce qu'on ecrit
       // sur la copie, pas seulement le resultat.
@@ -493,7 +514,7 @@ export class Calculator {
         if (r.nature) box.append(el("div", { class: "small muted" }, r.nature));
       }
       if (r.method === "numerique") {
-        box.append(el("div", { class: "small muted" }, "Resolution numerique sur [-100, 100]"));
+        box.append(el("div", { class: "small muted" }, "Résolution numérique sur [-100, 100]"));
       }
       for (const root of r.roots ?? []) {
         box.append(el("div", {}, `x = ${root.text}`));
@@ -505,19 +526,19 @@ export class Calculator {
     const solveSys = () => {
       const r = solveSystem(sys.value.split("\n"));
       out.replaceChildren();
-      if (!r.ok) { out.append(el("div", { class: "calc-read err" }, r.message ?? "Echec")); return; }
+      if (!r.ok) { out.append(el("div", { class: "calc-read err" }, r.message ?? "Échec")); return; }
       out.append(el("div", { class: "calc-read" },
         ...Object.entries(r.solution ?? {}).map(([k, v]) => el("div", {}, `${k} = ${v}`)),
       ));
     };
 
     this.body.append(
-      el("span", { class: "lbl small muted" }, "Equation"),
+      el("span", { class: "lbl small muted" }, "Équation"),
       eq,
-      el("div", { class: "row" }, el("button", { class: "primary", onclick: solveOne }, "Resoudre")),
-      el("span", { class: "lbl small muted" }, "Systeme, une equation par ligne"),
+      el("div", { class: "row" }, el("button", { class: "primary", onclick: solveOne }, "Résoudre")),
+      el("span", { class: "lbl small muted" }, "Système, une équation par ligne"),
       sys,
-      el("div", { class: "row" }, el("button", { onclick: solveSys }, "Resoudre le systeme")),
+      el("div", { class: "row" }, el("button", { onclick: solveSys }, "Résoudre le système")),
       out,
     );
   }
@@ -543,16 +564,16 @@ export class Calculator {
       const r = order === 1
         ? derivative(expr.value, varInput.value)
         : nthDerivative(expr.value, varInput.value, order);
-      const title = order === 1 ? "Derivee" : `Derivee ${order}e`;
+      const title = order === 1 ? "Dérivée" : `Dérivée ${order}e`;
       showResult(title, r.resultLatex, r.ok ? undefined : r.message);
       if (r.ok && r.steps && order === 1) {
         const btn = el("button", {
           onclick: () => {
             details = !details;
             stepsBox.style.display = details ? "block" : "none";
-            btn.textContent = details ? "Masquer les details" : "Afficher les details";
+            btn.textContent = details ? "Masquer les détails" : "Afficher les détails";
           },
-        }, details ? "Masquer les details" : "Afficher les details");
+        }, details ? "Masquer les détails" : "Afficher les détails");
         const stepsBox = el("div", { class: "steps", style: { display: details ? "block" : "none" } },
           renderSteps(r.steps));
         out.append(btn, stepsBox);
@@ -564,24 +585,24 @@ export class Calculator {
       expr,
       el("div", { class: "row" },
         el("span", { class: "muted small" }, "variable"), varInput,
-        el("button", { class: "primary", onclick: () => doDerive(1) }, "Deriver"),
-        el("button", { onclick: () => doDerive(2) }, "Derivee 2e"),
+        el("button", { class: "primary", onclick: () => doDerive(1) }, "Dériver"),
+        el("button", { onclick: () => doDerive(2) }, "Dérivée 2e"),
       ),
       el("div", { class: "row" },
         el("button", {
           onclick: () => {
             const r = simplifyExpr(expr.value);
-            showResult("Simplifie", r.resultLatex, r.ok ? undefined : r.message);
+            showResult("Simplifié", r.resultLatex, r.ok ? undefined : r.message);
           },
         }, "Simplifier"),
         el("button", {
           onclick: () => {
             const r = antiderivative(expr.value, varInput.value);
             const box = showResult("Primitive", r.resultLatex, r.ok ? undefined : r.message);
-            if (r.ok && r.rule) box.append(el("div", { class: "small muted" }, `Regle : ${r.rule}`));
+            if (r.ok && r.rule) box.append(el("div", { class: "small muted" }, `Règle : ${r.rule}`));
             if (!r.ok) {
               box.append(el("div", { class: "small muted" },
-                "Une integrale definie reste possible ci-dessous, par calcul numerique."));
+                "Une intégrale définie reste possible ci-dessous, par calcul numérique."));
             }
           },
         }, "Primitive"),
@@ -589,18 +610,18 @@ export class Calculator {
       el("div", { class: "row" },
         el("span", { class: "muted small" }, "de"),
         el("input", { type: "number", value: "0", id: "int-a", style: { width: "78px" } }),
-        el("span", { class: "muted small" }, "a"),
+        el("span", { class: "muted small" }, "à"),
         el("input", { type: "number", value: "1", id: "int-b", style: { width: "78px" } }),
         el("button", {
           onclick: () => {
             const a = Number((this.body.querySelector("#int-a") as HTMLInputElement).value);
             const b = Number((this.body.querySelector("#int-b") as HTMLInputElement).value);
             const r = definiteIntegral(expr.value, varInput.value, a, b);
-            const box = showResult("Integrale definie",
+            const box = showResult("Intégrale définie",
               r.ok ? String(round8(r.value!)) : undefined, r.ok ? undefined : r.message);
-            if (r.ok) box.append(el("div", { class: "small muted" }, `Methode : ${r.method}`));
+            if (r.ok) box.append(el("div", { class: "small muted" }, `Méthode : ${r.method}`));
           },
-        }, "Integrale definie"),
+        }, "Intégrale définie"),
       ),
       el("div", { class: "row" },
         subst,

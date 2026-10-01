@@ -72,3 +72,22 @@ export function orderedSymbols(now = Date.now()): [string, string][] {
     .sort((a, b) => b.score - a.score || a.i - b.i)
     .map((x) => x.sym);
 }
+
+/**
+ * Nom lisible d'un symbole, pour l'infobulle du ruban : au survol on lit
+ * « alpha » ou « implique », pas « \alpha ».
+ */
+const SYMBOL_NAMES: Record<string, string> = {
+  "\\alpha": "alpha", "\\beta": "bêta", "\\lambda": "lambda", "\\pi": "pi",
+  "\\theta": "thêta", "\\omega": "oméga", "\\Delta": "Delta majuscule", "\\infty": "infini",
+  "\\to": "flèche, tend vers", "\\Rightarrow": "implique", "\\Leftrightarrow": "équivalent à",
+  "\\leq": "inférieur ou égal", "\\geq": "supérieur ou égal", "\\neq": "différent de",
+  "\\approx": "environ égal", "\\in": "appartient à", "\\forall": "pour tout",
+  "\\exists": "il existe", "\\mathbb{R}": "ensemble des réels", "\\times": "multiplié par",
+  "\\pm": "plus ou moins", "\\partial": "dérivée partielle", "\\Omega": "Oméga majuscule (ohm)",
+  "\\eta": "êta", "\\varepsilon": "epsilon",
+};
+
+export function symbolName(insert: string): string {
+  return SYMBOL_NAMES[insert] ?? insert.replace(/^\\/, "");
+}
