@@ -10,6 +10,8 @@ export interface Settings {
   /** Couleur de l'encre ; "normal" (noir) par defaut, comme le texte tape. */
   color: InkColor;
   width: number;
+  /** Gomme au trait entier ou precise (encre-14 : coupe le trait). */
+  eraserMode: "stroke" | "precise";
   /** Convertir l'ecriture au fil de la plume plutot qu'a la demande. */
   autoConvert: boolean;
   /** Couleur du texte tape, null = noir. Toujours alignee sur l'encre. */
@@ -43,6 +45,7 @@ const DEFAULTS: Settings = {
   tool: "pen",
   color: "normal",
   width: 2.2,
+  eraserMode: "stroke",
   autoConvert: false,
   calcOpen: false,
   mathOpen: true,

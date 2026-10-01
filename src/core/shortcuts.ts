@@ -14,7 +14,8 @@ export type Command =
   | "menu" | "search" | "calc" | "undo" | "redo" | "flag" | "convert" | "finger"
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
-  | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset";
+  | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
+  | "copy" | "cut" | "paste";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -65,7 +66,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("k", false, "search", "Recherche dans tous les cahiers", "Pendant le cours"),
   { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),
-  { keys: "Échap", label: "Quitter le texte ; une seconde fois, retour au menu", group: "Pendant le cours" },
+  { keys: "Échap", label: "Lâcher la sélection du lasso ; quitter le texte ; une seconde fois, retour au menu", group: "Pendant le cours" },
+  {
+    keys: "# puis Espace",
+    label: "En début de ligne : titre (## sous-titre, ### niveau 3) ; - puce ; 1. liste numérotée ; Tab / Maj+Tab : retrait ; Ctrl+Z rend le texte tapé",
+    group: "Pendant le cours",
+  },
 
   ctrl("pagedown", false, "nextPage", "Page suivante (Pg↓ seul hors du texte)", "Pages et intercalaires"),
   ctrl("pageup", false, "prevPage", "Page précédente (Pg↑ seul hors du texte)", "Pages et intercalaires"),
@@ -84,11 +90,16 @@ export const SHORTCUTS: readonly Shortcut[] = [
 
   { keys: "Alt+E", label: "Stylo", group: "Outils et couleurs" },
   { keys: "Alt+H", label: "Surligneur", group: "Outils et couleurs" },
-  { keys: "Alt+G", label: "Gomme (le bout gomme du stylet gomme aussi)", group: "Outils et couleurs" },
+  { keys: "Alt+G", label: "Gomme (le bout gomme du stylet gomme aussi) ; deux fois : trait entier ou précise", group: "Outils et couleurs" },
+  { keys: "Alt+A", label: "Lasso : entourer, glisser pour déplacer, poignée d'angle pour retailler ; deux fois : insérer de l'espace", group: "Outils et couleurs" },
+  { keys: "Suppr", label: "Supprimer la sélection du lasso", group: "Outils et couleurs" },
+  ctrl("c", false, "copy", "Copier la sélection du lasso (hors du texte)", "Outils et couleurs"),
+  ctrl("x", false, "cut", "Couper la sélection du lasso", "Outils et couleurs"),
+  ctrl("v", false, "paste", "Coller l'encre copiée sur la page en vue, même dans un autre cahier", "Outils et couleurs"),
   { keys: "Alt+Z", label: "Zone math : une zone, puis retour au stylo ; deux fois = verrou", group: "Outils et couleurs" },
   { keys: "Alt+T", label: "Zone texte : une zone, puis retour au stylo ; deux fois = verrou", group: "Outils et couleurs" },
   { keys: `Alt+${NEUTRAL_INK.shortcut}`, label: `${NEUTRAL_INK.label}, en noir`, group: "Outils et couleurs" },
-  ...PALETTE.map((p): Shortcut => ({ keys: `Alt+${p.shortcut}`, label: p.label, group: "Outils et couleurs" })),
+  ...PALETTE.map((p): Shortcut => ({ keys: `Alt+${p.shortcut}`, label: `${p.label} (recolore la sélection du lasso)`, group: "Outils et couleurs" })),
   ctrl("d", false, "finger", "Doigt : écrire ou naviguer (avec un stylet : l'oublier)", "Outils et couleurs"),
 
   { keys: "Alt+=", label: "Nouvelle formule", group: "Formules" },

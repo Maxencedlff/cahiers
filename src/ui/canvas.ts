@@ -7,12 +7,23 @@ import {
 import { PAGE_W, PAGE_H } from "../core/ink/sheet";
 import { gestureTool, isPalm } from "../core/ink/pointer";
 import { paperLines, paperDots, PAPER_STYLE, DOT_STYLE, type PaperKind } from "../core/paper";
+import {
+  applyBounds, clampMove, resizeTransform, splitStroke, translation, isIdentity, polygonBounds,
+  type Pt, type Transform,
+} from "../core/ink/selection";
+import { uuid } from "../core/id";
 
 /** Unites de page. Rapport proche d'une feuille A4 en portrait. */
 export { PAGE_W, PAGE_H };
 
 export type PointerRole = "write" | "navigate" | "ignore";
-export type SurfaceTool = ToolKind | "region" | "textregion";
+export type SurfaceTool = ToolKind | "region" | "textregion" | "lasso" | "space";
+export type EraserMode = "stroke" | "precise";
+
+/** Poignee d'angle de la selection : 44 px a l'ecran, a tout zoom (section 3). */
+const HANDLE_PX = 44;
+/** Marge du cadre de selection autour des traits, en unites de page. */
+const SEL_PAD = 6;
 
 /** Rayon de la gomme, en unites de page. */
 const ERASER_R = 12;
@@ -24,8 +35,27 @@ export interface InkSurfaceOptions {
   onStrokeEnd: (stroke: Stroke) => void;
   /** Debut d'un geste de gomme : une seule entree d'annulation par geste. */
   onEraseStart?: () => void;
-  /** Appele quand la gomme a retire des traits. */
-  onErase: (removedIds: string[]) => void;
+  /**
+   * Appele quand la gomme a retire des traits. `split` (gomme precise) :
+   * chaque trait touche et ses morceaux restants (nouveaux ids, liste vide
+   * si tout est parti).
+   */
+  onErase: (removedIds: string[], split?: Map<string, Stroke[]>) => void;
+  /** Gomme au trait entier ou precise (encre-14), lue au debut du geste. */
+  getEraserMode?: () => EraserMode;
+  /** Lasso referme : la vue choisit les traits (core/ink/selection.ts). */
+  onLasso?: (poly: Pt[]) => void;
+  /** Appui hors de la selection avec le lasso : elle tombe. */
+  onSelectionCleared?: () => void;
+  /** Premier mouvement d'un deplacement, d'un retaillage ou d'un espace. */
+  onTransformStart?: () => void;
+  /** Fin du geste : la vue applique la transformation aux blocs. */
+  onTransform?: (ids: Set<string>, t: Transform, kind: "move" | "resize" | "space") => void;
+  /**
+   * Insertion d'espace : traits sous la ligne y, et borne du deplacement
+   * vers le haut (core/ink/selection.ts strokesBelow, clampSpace).
+   */
+  spaceBelow?: (y: number) => { ids: Set<string>; clamp: (dy: number) => number };
   /** Zone rectangulaire tracee au lasso "selection math" ou "zone texte". */
   onRegion?: (bounds: Bounds, tool: "region" | "textregion") => void;
   getTool: () => SurfaceTool;
@@ -94,6 +124,23 @@ export class InkSurface {
   private hoverPos: { x: number; y: number } | null = null;
   private regionStart: { x: number; y: number } | null = null;
   private regionNow: { x: number; y: number } | null = null;
+  /** Gomme precise pour le geste en cours (lue au pointerdown). */
+  private precise = false;
+  /** Trace du lasso en cours, en unites de page. */
+  private lasso: Pt[] | null = null;
+  /** Selection affichee (cadre pointille + poignee), bornes sans marge. */
+  private selection: { ids: Set<string>; bounds: Bounds } | null = null;
+  /**
+   * Apercu d'un deplacement : ces traits sont peints transformes, sans
+   * toucher au modele avant la fin du geste (une seule entree d'annulation,
+   * ids inchanges).
+   */
+  private preview: { ids: Set<string>; t: Transform } | null = null;
+  /** Geste de selection en cours : deplacer, retailler, inserer de l'espace. */
+  private drag: {
+    kind: "move" | "resize" | "space"; start: Pt; ids: Set<string>; bounds: Bounds;
+    started: boolean; clamp?: (dy: number) => number;
+  } | null = null;
   private disposed = false;
   /**
    * Couleur de fond peinte dans le canvas.
@@ -147,7 +194,54 @@ export class InkSurface {
   setStrokes(strokes: Stroke[], hidden: Stroke[] = []): void {
     this.strokes = strokes;
     this.hidden = hidden;
+    this.preview = null;
     this.repaintAll();
+  }
+
+  /* ---------------- selection (lasso) ---------------- */
+
+  /** Montre la selection (bornes des traits, sans marge), ou rien. */
+  setSelection(ids: Set<string> | null, bounds?: Bounds): void {
+    if (this.selection) this.markDirty(this.selectionZone(this.selection.bounds));
+    this.selection = ids && ids.size && bounds ? { ids, bounds } : null;
+    if (this.selection) this.markDirty(this.selectionZone(this.selection.bounds));
+  }
+
+  get hasSelection(): boolean { return this.selection !== null; }
+
+  /** Cadre de selection affiche (marge comprise), apercu du geste applique. */
+  selectionFrame(): Bounds | null {
+    if (!this.selection) return null;
+    const b = this.preview ? applyBounds(this.preview.t, this.selection.bounds) : this.selection.bounds;
+    return padBounds(b, SEL_PAD);
+  }
+
+  /** Taille de la poignee en unites de page (44 px a l'ecran). */
+  private handleUnits(): number {
+    const r = this.canvas.getBoundingClientRect();
+    const k = r.width > 0 ? r.width / PAGE_W : this.scale || 1;
+    return HANDLE_PX / k;
+  }
+
+  /** Zone a repeindre pour un cadre : cadre, poignee et epaisseur du trait. */
+  private selectionZone(b: Bounds): Bounds {
+    return padBounds(b, SEL_PAD + this.handleUnits() / 2 + 4);
+  }
+
+  /** Ce que touche un appui : la poignee, le cadre, ou rien. */
+  private hitSelection(p: Pt): "resize" | "move" | null {
+    const f = this.selectionFrame();
+    if (!f) return null;
+    const h = this.handleUnits() / 2;
+    if (Math.abs(p.x - (f.x + f.w)) <= h && Math.abs(p.y - (f.y + f.h)) <= h) return "resize";
+    if (p.x >= f.x && p.x <= f.x + f.w && p.y >= f.y && p.y <= f.y + f.h) return "move";
+    return null;
+  }
+
+  /** Abandonne un geste de selection (Echap, page quittee). */
+  cancelSelectionGesture(): void {
+    if (this.lasso) { this.markDirty(padBounds(polygonBounds(this.lasso), 4)); this.lasso = null; }
+    if (this.drag) { this.drag = null; this.preview = null; this.repaintAll(); }
   }
 
   /** Hauteur logique actuelle du canvas, en unites de page. */
@@ -244,13 +338,21 @@ export class InkSurface {
   }
 
   private onDown = (e: PointerEvent) => {
-    if (this.roleOf(e) === "navigate") {
+    // Le doigt deplace une selection meme quand il navigue : c'est le geste
+    // attendu au doigt, et sur le cadre il n'y a rien a faire defiler.
+    const grab = this.selection && this.activePointer === null
+      && (e.pointerType !== "mouse" || e.button === 0)
+      && gestureTool(e, "lasso") !== "eraser"
+      && !(e.pointerType === "touch" && isPalm(e.timeStamp, this.penWriting, lastPenAt))
+      && (this.opts.getTool() === "lasso" || this.opts.getTool() === "space")
+      ? this.hitSelection(this.toPage(e)) : null;
+    if (this.roleOf(e) === "navigate" && !grab) {
       // Paume posee pendant ou juste apres un trait : elle ne fait pas
       // defiler la page sous la plume.
       if (!isPalm(e.timeStamp, this.penWriting, lastPenAt)) this.startPan(e);
       return;
     }
-    if (this.roleOf(e) !== "write") return;
+    if (this.roleOf(e) !== "write" && !grab) return;
     // Clic droit ou molette : jamais un trait. Le clic droit corrige un mot.
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (this.activePointer !== null) return; // un seul pointeur ecrit a la fois
@@ -267,7 +369,30 @@ export class InkSurface {
 
     const p = this.toPage(e);
 
+    if (grab && this.selection) {
+      this.tool = "lasso";
+      this.drag = {
+        kind: grab, start: p, ids: this.selection.ids, bounds: this.selection.bounds, started: false,
+      };
+      return;
+    }
+    if (tool === "lasso") {
+      if (this.selection) { this.opts.onSelectionCleared?.(); this.setSelection(null); }
+      this.lasso = [p];
+      return;
+    }
+    if (tool === "space") {
+      const below = this.opts.spaceBelow?.(p.y);
+      if (this.selection) { this.opts.onSelectionCleared?.(); this.setSelection(null); }
+      this.drag = {
+        kind: "space", start: p, ids: below?.ids ?? new Set(), bounds: { x: 0, y: p.y, w: PAGE_W, h: 0 },
+        started: false, clamp: below?.clamp,
+      };
+      this.markDirty(this.spaceZone());
+      return;
+    }
     if (tool === "eraser") {
+      this.precise = this.opts.getEraserMode?.() === "precise";
       this.opts.onEraseStart?.();
       this.moveEraser(p);
       this.eraseAt(p);
@@ -291,6 +416,16 @@ export class InkSurface {
     const tool = this.tool;
     e.preventDefault();
 
+    if (this.drag) { this.moveDrag(this.toPage(e)); return; }
+    if (this.lasso) {
+      const p = this.toPage(e);
+      const last = this.lasso[this.lasso.length - 1];
+      if (Math.hypot(p.x - last.x, p.y - last.y) < 1.5) return;
+      this.lasso.push(p);
+      // Seul le nouveau segment (et la fermeture vers le depart) est repeint.
+      this.markDirty(padBounds(polygonBounds([last, p, this.lasso[0]]), 3));
+      return;
+    }
     if (tool === "eraser") {
       const p = this.toPage(e);
       this.moveEraser(p);
@@ -332,6 +467,15 @@ export class InkSurface {
     this.tool = null;
     this.release(e.pointerId);
 
+    if (this.drag) { this.endDrag(); return; }
+    if (this.lasso) {
+      const poly = this.lasso;
+      this.lasso = null;
+      this.markDirty(padBounds(polygonBounds(poly), 4));
+      const b = polygonBounds(poly);
+      if (poly.length >= 3 && (b.w > 4 || b.h > 4)) this.opts.onLasso?.(poly);
+      return;
+    }
     if (this.regionStart && this.regionNow) {
       const b = rectOf(this.regionStart, this.regionNow);
       this.regionStart = this.regionNow = null;
@@ -439,7 +583,54 @@ export class InkSurface {
     if (this.eraserPos) { this.markDirty(circleBounds(this.eraserPos)); this.eraserPos = null; }
     if (this.regionStart && this.regionNow) this.markDirty(padBounds(rectOf(this.regionStart, this.regionNow), 3));
     this.regionStart = this.regionNow = null;
+    this.cancelSelectionGesture();
     if (zone) this.markDirty(zone);
+  }
+
+  /** Zone de l'apercu d'un espace : de la ligne au bas de la feuille. */
+  private spaceZone(): Bounds {
+    const d = this.drag;
+    const y = d ? d.start.y + Math.min(0, this.preview?.t.dy ?? 0) : 0;
+    return { x: 0, y: y - 4, w: PAGE_W, h: this.pageH - y + 8 };
+  }
+
+  private moveDrag(p: Pt): void {
+    const d = this.drag!;
+    const dx = p.x - d.start.x, dy = p.y - d.start.y;
+    let t: Transform;
+    if (d.kind === "move") {
+      const c = clampMove(d.bounds, dx, dy);
+      t = translation(c.dx, c.dy);
+    } else if (d.kind === "resize") {
+      t = resizeTransform(d.bounds, dx, dy);
+    } else {
+      t = translation(0, d.clamp ? d.clamp(dy) : Math.max(0, dy));
+    }
+    if (!d.started) {
+      // Un simple appui sur le cadre n'est pas un deplacement.
+      if (Math.hypot(dx, dy) < 2) return;
+      d.started = true;
+      this.opts.onTransformStart?.();
+    }
+    const before = d.kind === "space" ? this.spaceZone() : this.selectionZone(this.selectionFrame() ?? d.bounds);
+    this.preview = { ids: d.ids, t };
+    const after = d.kind === "space" ? this.spaceZone() : this.selectionZone(this.selectionFrame() ?? d.bounds);
+    this.markDirty(unionBounds([before, after]));
+  }
+
+  private endDrag(): void {
+    const d = this.drag!;
+    if (d.kind === "space") this.markDirty(this.spaceZone());
+    this.drag = null;
+    const t = this.preview?.t;
+    if (!d.started || !t || isIdentity(t)) {
+      this.preview = null;
+      if (d.kind !== "space") this.markDirty(this.selectionZone(d.bounds));
+      return;
+    }
+    // La vue applique la transformation aux blocs puis repeint (setStrokes
+    // efface l'apercu) : une seule ecriture et une seule annulation.
+    this.opts.onTransform?.(d.ids, t, d.kind);
   }
 
   /** Un trait ou une gomme au stylet ou a la souris est en cours. */
@@ -509,6 +700,7 @@ export class InkSurface {
   }
 
   private eraseAt(p: { x: number; y: number }) {
+    if (this.precise) { this.cutAt(p); return; }
     const removed: string[] = [];
     const boxes: Bounds[] = [];
     this.strokes = this.strokes.filter((s) => {
@@ -526,6 +718,29 @@ export class InkSurface {
     if (removed.length) {
       if (boxes.length) this.markDirty(unionBounds(boxes));
       this.opts.onErase(removed);
+    }
+    this.markDirty(circleBounds(p));
+  }
+
+  /**
+   * Gomme precise (encre-14) : le trait est coupe par le disque, les
+   * morceaux restants prennent sa place avec de nouveaux ids.
+   */
+  private cutAt(p: { x: number; y: number }) {
+    const split = new Map<string, Stroke[]>();
+    const boxes: Bounds[] = [];
+    const cut = (list: Stroke[]) => list.flatMap((s) => {
+      const parts = splitStroke(s, p.x, p.y, ERASER_R, uuid);
+      if (!parts) return [s];
+      split.set(s.id, parts);
+      boxes.push(cachedBounds(s, 2));
+      return parts;
+    });
+    this.strokes = cut(this.strokes);
+    this.hidden = cut(this.hidden);
+    if (split.size) {
+      this.markDirty(unionBounds(boxes));
+      this.opts.onErase([...split.keys()], split);
     }
     this.markDirty(circleBounds(p));
   }
@@ -584,12 +799,27 @@ export class InkSurface {
     // l'encre, meme pose apres elle.
     const zone: Bounds = { x: x / k, y: y / k, w: w / k, h: h / k };
     const marks: Stroke[] = [], pens: Stroke[] = [];
+    const pv = this.preview;
+    const moving: Stroke[] = [];
     for (const s of this.strokes) {
+      if (pv && pv.ids.has(s.id)) { moving.push(s); continue; }
       if (boundsIntersect(cachedBounds(s, 1), zone)) (s.tool === "highlighter" ? marks : pens).push(s);
     }
     if (this.live) (this.live.tool === "highlighter" ? marks : pens).push(this.live);
     for (const s of marks) this.drawStroke(ctx, s);
     for (const s of pens) this.drawStroke(ctx, s);
+    if (pv && moving.length) {
+      // Apercu : les traits deplaces peints transformes, modele intact.
+      const t = pv.t;
+      ctx.save();
+      ctx.translate(t.ox + t.dx, t.oy + t.dy);
+      ctx.scale(t.s, t.s);
+      ctx.translate(-t.ox, -t.oy);
+      for (const s of moving) if (s.tool === "highlighter") this.drawStroke(ctx, s);
+      for (const s of moving) if (s.tool !== "highlighter") this.drawStroke(ctx, s);
+      ctx.restore();
+    }
+    this.drawSelection(ctx);
 
     const circle = this.eraserPos ?? this.hoverPos;
     if (circle) {
@@ -610,6 +840,55 @@ export class InkSurface {
       ctx.fillRect(r.x, r.y, r.w, r.h);
     }
     ctx.restore();
+  }
+
+  /** Cadre de selection, trace du lasso, ligne d'insertion d'espace. */
+  private drawSelection(ctx: CanvasRenderingContext2D): void {
+    const u = 1 / (this.scale || 1); // un pixel CSS, en unites de page
+    if (this.lasso && this.lasso.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(this.lasso[0].x, this.lasso[0].y);
+      for (const q of this.lasso) ctx.lineTo(q.x, q.y);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(37,99,235,.06)";
+      ctx.fill();
+      ctx.setLineDash([5 * u, 4 * u]);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 1.5 * u;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    const f = this.drag?.kind === "space" ? null : this.selectionFrame();
+    if (f) {
+      ctx.setLineDash([6 * u, 4 * u]);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 1.5 * u;
+      ctx.strokeRect(f.x, f.y, f.w, f.h);
+      ctx.setLineDash([]);
+      // Poignee bas-droite : 44 px de cible, un rond visible de 18 px.
+      ctx.beginPath();
+      ctx.arc(f.x + f.w, f.y + f.h, 9 * u, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.lineWidth = 2 * u;
+      ctx.stroke();
+    }
+    if (this.drag?.kind === "space") {
+      const y0 = this.drag.start.y;
+      const dy = this.preview?.t.dy ?? 0;
+      if (dy > 0) {
+        ctx.fillStyle = "rgba(37,99,235,.07)";
+        ctx.fillRect(0, y0, PAGE_W, dy);
+      }
+      ctx.setLineDash([8 * u, 5 * u]);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 1.5 * u;
+      ctx.beginPath();
+      ctx.moveTo(0, y0); ctx.lineTo(PAGE_W, y0);
+      if (dy !== 0) { ctx.moveTo(0, y0 + dy); ctx.lineTo(PAGE_W, y0 + dy); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   /**

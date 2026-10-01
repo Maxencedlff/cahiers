@@ -35,7 +35,9 @@ import type { Presence } from "../platform";
 import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
 
 type Screen = "menu" | "notebook" | "search" | "flags" | "probe";
-type Tool = ToolKind | "region" | "textregion";
+type Tool = ToolKind | "region" | "textregion" | "lasso" | "space";
+/** Lasso et insertion d'espace : la selection n'existe qu'avec eux. */
+const isSelect = (t: Tool): t is "lasso" | "space" => t === "lasso" || t === "space";
 
 const isZone = (t: Tool): t is "region" | "textregion" => t === "region" || t === "textregion";
 
@@ -127,6 +129,8 @@ export class App {
   private prevTool: Tool = "pen";
   /** Zone verrouillee (Alt+Z deux fois) : on enchaine plusieurs zones. */
   private toolLocked = false;
+  /** Gomme au trait entier ou precise (encre-14). */
+  private eraserMode: "stroke" | "precise" = "stroke";
   /** Couleur de l'encre ET du texte tape : une seule pastille active. */
   private color: InkColor = "normal";
   /** Couleur du texte tape ; null = noir, le texte normal. */
@@ -168,6 +172,7 @@ export class App {
     this.positions = new Positions(localStore());
     // Une zone n'est jamais l'outil de depart : elle est ponctuelle.
     this.tool = isZone(this.settings.tool) ? "pen" : this.settings.tool;
+    this.eraserMode = this.settings.eraserMode === "precise" ? "precise" : "stroke";
     this.color = this.settings.color;
     // Stylet deja vu sur cette machine : le doigt navigue des le lancement,
     // il ne trace plus sur les notes en attendant le premier contact.
@@ -607,6 +612,7 @@ export class App {
       recognitionReady: () => this.queueState.backendReady,
       autoConvert: () => this.autoConvert,
       getTool: () => this.tool,
+      getEraserMode: () => this.eraserMode,
       getColor: () => this.color,
       getWidth: () => this.width,
       touchRole: () => this.touchRole(),
@@ -1276,14 +1282,40 @@ export class App {
     bar.append(
       toolButton("pen", "Stylo", "Écrire (Alt+E). La souris tape du texte."),
       toolButton("highlighter", "Surligneur", "Surligner (Alt+H)"),
-      toolButton("eraser", "Gomme", "Effacer les traits touchés (Alt+G). Le bout gomme du stylet gomme aussi."),
+      toolButton("eraser", "Gomme", "Effacer les traits touchés (Alt+G ; deux fois : trait entier ou précise). "
+        + "Le bout gomme du stylet gomme aussi."),
       toolButton("region", "Zone math",
         "Entourer une formule manuscrite pour la convertir (Alt+Z). Une zone, puis retour au stylo ; "
           + "deux fois pour enchaîner plusieurs zones."),
       toolButton("textregion", "Zone texte",
         "Entourer du texte manuscrit pour le convertir (Alt+T). Une zone, puis retour au stylo ; "
           + "deux fois pour enchaîner plusieurs zones."),
+      el("button", {
+        class: isSelect(this.tool) ? "on" : "",
+        title: "Lasso (Alt+A) : entourer des traits, puis les déplacer, les retailler par la poignée, "
+          + "les recolorer, Suppr, Ctrl+C / Ctrl+V. Deux fois : insérer de l'espace.",
+        onclick: () => this.selectTool(isSelect(this.tool) ? this.tool : "lasso"),
+      }, "Lasso"),
     );
+    // Options de l'outil : gomme entiere ou precise, lasso ou espace.
+    if (this.tool === "eraser") {
+      bar.append(el("div", { class: "seg tool-opt" }, ...([
+        ["stroke", "Trait entier", "La gomme efface tout le trait touché"],
+        ["precise", "Précise", "La gomme coupe le trait : seule la partie frottée part"],
+      ] as const).map(([m, label, title]) => el("button", {
+        class: this.eraserMode === m ? "on" : "", title, "aria-pressed": String(this.eraserMode === m),
+        onclick: () => this.setEraserMode(m),
+      }, label))));
+    }
+    if (isSelect(this.tool)) {
+      bar.append(el("div", { class: "seg tool-opt" }, ...([
+        ["lasso", "Entourer", "Entourer des traits pour les déplacer, recolorer, copier, supprimer"],
+        ["space", "Espace", "Glisser une ligne vers le bas : tout ce qui est dessous descend"],
+      ] as const).map(([t, label, title]) => el("button", {
+        class: this.tool === t ? "on" : "", title, "aria-pressed": String(this.tool === t),
+        onclick: () => this.selectTool(t),
+      }, label))));
+    }
     // Sans stylet, ce que fait le doigt : a cote des outils, c'en est un.
     if (!this.sawPen) {
       bar.append(el("button", {
@@ -1767,6 +1799,12 @@ export class App {
     // ne doit pas en plus renvoyer au menu.
     if (dialog) return;
 
+    // Selection au lasso : Echap la lache, Suppr l'efface.
+    if (this.screen === "notebook" && view?.hasSelection) {
+      if (e.key === "Escape") { e.preventDefault(); view.clearSelection(); return; }
+      if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); view.deleteSelection(); return; }
+    }
+
     // Menu : Entree reprend, des lettres filtrent les matieres, fleches.
     if (this.screen === "menu" && this.menuKeys?.(e)) { e.preventDefault(); return; }
 
@@ -1812,6 +1850,15 @@ export class App {
       case "calc": void this.toggleCalculator(); return true;
       // Dans le texte, Ctrl+Z appartient au texte (son propre historique).
       case "undo": if (ctx.typing) return false; view?.undo(); return true;
+      // Copier/coller de l'encre : seulement hors du texte (le texte garde
+      // le sien, collage de photo compris) et avec une selection ou un
+      // presse-papiers d'encre ; sinon la touche suit son cours.
+      case "copy": return !ctx.typing && notebook && !!view?.copySelection();
+      case "cut": return !ctx.typing && notebook && !!view?.copySelection(true);
+      case "paste":
+        if (ctx.typing || !notebook || !view?.paste()) return false;
+        if (!isSelect(this.tool)) this.selectTool("lasso");
+        return true;
       case "redo": if (ctx.typing) return false; view?.redo(); return true;
       // Toujours pris, meme en pleine frappe : le repere ne touche pas au
       // texte, et le curseur reste ou il etait (D3).
@@ -1999,12 +2046,31 @@ export class App {
     if (idx >= 0) { this.pickColor(PALETTE[idx].key); return true; }
     if (e.code === "Digit0") { this.pickColor(null); return true; }
 
+    // Alt+G deux fois : gomme entiere ou precise. Alt+A deux fois : lasso
+    // ou insertion d'espace.
+    if (e.code === "KeyG" && this.tool === "eraser") {
+      this.setEraserMode(this.eraserMode === "precise" ? "stroke" : "precise");
+      return true;
+    }
+    if (e.code === "KeyA") {
+      this.selectTool(this.tool === "lasso" ? "space" : "lasso");
+      toast(this.tool === "space" ? "Espace : glisser une ligne vers le bas" : "Lasso : entourer des traits", "info", 1400);
+      return true;
+    }
     const tools: Record<string, Tool> = {
       KeyE: "pen", KeyH: "highlighter", KeyG: "eraser", KeyZ: "region", KeyT: "textregion",
     };
     const t = tools[e.code];
     if (t) { this.selectTool(t); return true; }
     return false;
+  }
+
+  private setEraserMode(m: "stroke" | "precise"): void {
+    this.eraserMode = m;
+    if (this.tool !== "eraser") this.tool = "eraser";
+    this.persist();
+    this.paintToolbar();
+    toast(m === "precise" ? "Gomme précise : coupe le trait" : "Gomme : trait entier", "info", 1400);
   }
 
   /** Retour au meme endroit apres un passage par le menu (section 5). */
@@ -2021,6 +2087,8 @@ export class App {
    * l'outil d'avant.
    */
   private selectTool(t: Tool): void {
+    // Quitter le lasso fait tomber la selection (elle ne se deplace qu'avec lui).
+    if (!isSelect(t)) for (const v of this.views()) v.clearSelection();
     if (isZone(t)) {
       if (this.tool === t && !this.toolLocked) {
         this.toolLocked = true;
@@ -2054,6 +2122,8 @@ export class App {
    * (noire) et le texte normal.
    */
   private pickColor(key: ColorKey | null): void {
+    // Une selection au lasso : la couleur va a ses traits, pas au stylo.
+    if (this.screen === "notebook" && this.focusedTab()?.view?.recolorSelection(key ?? "normal")) return;
     this.color = key ?? "normal";
     this.textColor = key;
     setTypingColor(key);
@@ -2064,7 +2134,10 @@ export class App {
   private persist(): void {
     this.settings.textColor = this.textColor;
     // Une zone ponctuelle n'est pas memorisee : on rouvre sur l'outil d'avant.
-    this.settings.tool = isZone(this.tool) && !this.toolLocked ? this.prevTool : this.tool;
+    // Le lasso non plus : on rouvre sur le stylo.
+    const kept = isZone(this.tool) && !this.toolLocked ? this.prevTool : this.tool;
+    this.settings.tool = isSelect(kept) ? "pen" : kept;
+    this.settings.eraserMode = this.eraserMode;
     this.settings.color = this.color;
     this.settings.width = this.width;
     saveSettings(this.settings);

@@ -1,11 +1,11 @@
 import { el, askText, toast, confirmDialog, pick } from "./dom";
-import { InkSurface, PAGE_W, PAGE_H } from "./canvas";
+import { InkSurface, PAGE_W, PAGE_H, type EraserMode, type SurfaceTool } from "./canvas";
 import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
 import { cachedBounds, strokeBounds, unionBounds } from "../core/ink/stroke";
 import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
-  Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock, ToolKind,
+  Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock,
 } from "../core/types";
 import { isFutureVersion } from "../core/types";
 import { dayLabel } from "../core/nav";
@@ -19,7 +19,12 @@ import {
 import { blockKey, isPending, type BlockRef } from "../core/ink/recokey";
 import { confusionCandidates } from "../core/ink/confusions";
 import { askLatex } from "./mathdialog";
-import { colorOf } from "../core/palette";
+import { colorOf, labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
+import {
+  PASTE_STEP, clampMove, clampSpace, copySelection, pasteClip, recolorStrokes, replaceStrokes,
+  selectInLasso, selectionBounds, strokesBelow, strokesById, transformBlocks,
+  type InkClip, type Pt as InkPt, type Transform,
+} from "../core/ink/selection";
 import { TextDoc } from "./textdoc";
 import { absorbTextBoxes } from "../core/text/doc";
 import { flagContext, fold, parseQuery } from "../core/text/find";
@@ -44,7 +49,9 @@ export interface PageViewHost {
   recognitionReady: () => boolean;
   /** Convertir l'ecriture au fil de la plume, sans entourer de zone. */
   autoConvert: () => boolean;
-  getTool: () => ToolKind | "region" | "textregion";
+  getTool: () => SurfaceTool;
+  /** Gomme au trait entier ou precise (encre-14). */
+  getEraserMode?: () => EraserMode;
   getColor: () => InkColor;
   getWidth: () => number;
   touchRole: () => "write" | "navigate";
@@ -94,6 +101,14 @@ export interface ViewNotice {
   text: string;
   actions?: { label: string; run: () => void }[];
 }
+
+/**
+ * Presse-papiers de l'encre, commun a toutes les vues : on copie un schema
+ * de la page 4 et on le colle dans l'intercalaire Exos ou dans un autre
+ * cahier. `pageId` + `pastes` : des collages successifs sur la page
+ * d'origine se decalent, au lieu de s'empiler exactement sur l'original.
+ */
+let inkClip: { clip: InkClip; pageId: string; pastes: number } | null = null;
 
 interface LoadedPage {
   number: number;
@@ -152,6 +167,9 @@ export class PageView {
   private history = new PageHistory();
   /** Derniere page modifiee, que suit Ctrl+Z en mode defilement. */
   private lastEditedId: string | null = null;
+  /** Selection au lasso (une page a la fois) et sa barre d'actions. */
+  private sel: { loaded: LoadedPage; ids: Set<string> } | null = null;
+  private selBar: HTMLElement | null = null;
   /**
    * Page du dernier geste, texte ou trait (LoadedPage.lastEdit) : en
    * defilement, le repere « pas compris » y va, meme si une autre page
@@ -381,6 +399,7 @@ export class PageView {
 
   /** Detache les pages affichees et libere leur memoire (canvas, ecouteurs). */
   private teardown(): void {
+    this.clearSelection();
     for (const p of this.list) {
       p.dead = true;
       p.ro?.disconnect();
@@ -784,7 +803,16 @@ export class PageView {
       touchRole: this.host.touchRole,
       onStrokeEnd: (s) => this.onStrokeEnd(loaded, s),
       onEraseStart: () => { loaded.eraseNoted = false; },
-      onErase: (ids) => this.onErase(loaded, ids),
+      onErase: (ids, split) => (split ? this.onCut(loaded, split) : this.onErase(loaded, ids)),
+      getEraserMode: this.host.getEraserMode,
+      onLasso: (poly) => this.onLasso(loaded, poly),
+      onSelectionCleared: () => this.clearSelection(),
+      onTransformStart: () => { this.pushUndo(loaded); this.selBar?.remove(); },
+      onTransform: (ids, t, kind) => this.applyTransform(loaded, ids, t, kind),
+      spaceBelow: (y) => {
+        const ids = strokesBelow(loaded.page.blocks, y);
+        return { ids, clamp: (dy: number) => clampSpace(loaded.page.blocks, ids, y, dy) };
+      },
       // L'outil du geste, fige au pointerdown : pas celui du moment.
       onRegion: (b, tool) => {
         this.host.onRegionDone?.();
@@ -1112,6 +1140,8 @@ export class PageView {
       if (this.root.isConnected && this.root.clientWidth > 0) this.adoptFloatingImages(p);
       this.paintOverlay(p);
     }
+    // Le cadre est sur le canvas (unites de page), la barre en pixels : elle suit.
+    if (this.sel) this.paintSelBar();
   }
 
   /** Repere la page en vue pour que "derniere position" reste juste. */
@@ -1232,6 +1262,204 @@ export class PageView {
     // « courants » gomme en « courant » : le mot tape doit suivre. Sans
     // relecture, la recherche et l'export gardaient l'ancien mot.
     if (amputated && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+  }
+
+  /**
+   * Gomme precise (encre-14) : les traits touches sont remplaces par leurs
+   * morceaux, a leur place. Une entree d'annulation par geste, comme la
+   * gomme entiere.
+   */
+  private onCut(loaded: LoadedPage, split: Map<string, Stroke[]>): void {
+    if (!loaded.eraseNoted) { this.pushUndo(loaded); loaded.eraseNoted = true; }
+    const r = replaceStrokes(loaded.page.blocks, split);
+    loaded.page.blocks = r.blocks;
+    if (this.sel?.loaded === loaded && [...split.keys()].some((id) => this.sel!.ids.has(id))) this.clearSelection();
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
+    if (r.wordsTouched && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+  }
+
+  /* ---------------- selection au lasso (encre-13) ---------------- */
+
+  private canEdit(loaded: LoadedPage): boolean {
+    if (!loaded.readOnly && !this.readOnly) return true;
+    this.warnedReadOnly = false;
+    this.warnReadOnly();
+    return false;
+  }
+
+  /** Lasso referme : les traits majoritairement dedans sont pris. */
+  private onLasso(loaded: LoadedPage, poly: InkPt[]): void {
+    if (!this.canEdit(loaded)) return;
+    const ids = selectInLasso(loaded.page.blocks, poly);
+    if (!ids.size) { toast("Aucun trait entouré", "info", 1500); return; }
+    this.select(loaded, ids);
+    // Le clavier va a la selection (Suppr, Ctrl+C), pas au texte.
+    const a = document.activeElement as HTMLElement | null;
+    if (a && loaded.wrap.contains(a)) a.blur();
+  }
+
+  private select(loaded: LoadedPage, ids: Set<string>): void {
+    if (this.sel && this.sel.loaded !== loaded) this.sel.loaded.surface?.setSelection(null);
+    const strokes = strokesById(loaded.page.blocks, ids);
+    if (!strokes.length) { this.clearSelection(); return; }
+    // Seuls les traits encore presents restent pris (annulation, gomme).
+    const kept = new Set(strokes.map((st) => st.id));
+    this.sel = { loaded, ids: kept };
+    loaded.surface?.setSelection(kept, selectionBounds(strokes));
+    this.paintSelBar();
+  }
+
+  get hasSelection(): boolean { return this.sel !== null; }
+
+  /** Echap, changement d'outil ou de page : plus rien n'est selectionne. */
+  clearSelection(): void {
+    const s = this.sel;
+    this.sel = null;
+    this.selBar?.remove();
+    this.selBar = null;
+    s?.loaded.surface?.cancelSelectionGesture();
+    s?.loaded.surface?.setSelection(null);
+  }
+
+  /**
+   * Barre d'actions au-dessus du cadre : couleurs de la palette, copier,
+   * supprimer. Boutons de 44 px, utilisables au doigt.
+   */
+  private paintSelBar(): void {
+    this.selBar?.remove();
+    this.selBar = null;
+    const s = this.sel;
+    const f = s?.loaded.surface?.selectionFrame();
+    if (!s || !f) return;
+    const k = (s.loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    const stop = (e: Event) => { e.stopPropagation(); };
+    const btn = (label: string, title: string, run: () => void, cls = "") => {
+      const b = el("button", { class: cls, title, "aria-label": title, onclick: (e: Event) => { e.stopPropagation(); run(); } }, label);
+      b.addEventListener("mousedown", (e) => e.preventDefault());
+      return b;
+    };
+    const swatch = (key: InkColor, ink: string, label: string) => {
+      const b = btn("", `Passer en ${label}`, () => this.recolorSelection(key), "swatch");
+      b.append(el("i", { style: { background: ink } }));
+      return b;
+    };
+    const bar = el("div", { class: "lasso-bar" },
+      swatch("normal", NEUTRAL_INK.ink, NEUTRAL_INK.label),
+      ...PALETTE.map((p) => swatch(p.key, p.ink, p.label)),
+      btn("Copier", "Copier (Ctrl+C), puis Ctrl+V sur n'importe quelle page", () => this.copySelection()),
+      btn("Supprimer", "Supprimer (Suppr)", () => this.deleteSelection(), "danger"),
+    );
+    bar.addEventListener("pointerdown", stop);
+    s.loaded.sheet.append(bar);
+    // Au-dessus du cadre, sinon dessous ; jamais hors de la feuille.
+    const w = bar.offsetWidth || 420, h = bar.offsetHeight || 52;
+    const sheetW = s.loaded.sheet.clientWidth;
+    const left = Math.max(4, Math.min(f.x * k, sheetW - w - 4));
+    let top = f.y * k - h - 8;
+    if (top < 4) top = (f.y + f.h) * k + 30;
+    bar.style.left = `${left}px`;
+    bar.style.top = `${top}px`;
+    this.selBar = bar;
+  }
+
+  /**
+   * Fin d'un deplacement, d'un retaillage ou d'un espace : la transformation
+   * passe dans les blocs (ids gardes), la feuille s'allonge si besoin.
+   */
+  private applyTransform(loaded: LoadedPage, ids: Set<string>, t: Transform, kind: "move" | "resize" | "space"): void {
+    transformBlocks(loaded.page.blocks, ids, t);
+    for (const st of strokesById(loaded.page.blocks, ids)) growForStroke(loaded.page, st);
+    loaded.lastEdit = "ink";
+    this.lastGestureId = loaded.page.id;
+    this.fitSheet(loaded);
+    this.paintStrokes(loaded);
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
+    if (kind === "space") return;
+    this.select(loaded, ids);
+  }
+
+  /** Recolore la selection (palette semantique). Faux sans selection. */
+  recolorSelection(color: InkColor): boolean {
+    const s = this.sel;
+    if (!s) return false;
+    if (!this.canEdit(s.loaded)) return true;
+    this.pushUndo(s.loaded);
+    recolorStrokes(s.loaded.page.blocks, s.ids, color);
+    this.paintStrokes(s.loaded);
+    s.loaded.surface?.setSelection(s.ids, selectionBounds(strokesById(s.loaded.page.blocks, s.ids)));
+    this.queueSave(s.loaded);
+    toast(`Sélection en ${labelOf(color)}`, "info", 1200);
+    return true;
+  }
+
+  /** Suppr : comme la gomme, une seule entree d'annulation. */
+  deleteSelection(): boolean {
+    const s = this.sel;
+    if (!s) return false;
+    if (!this.canEdit(s.loaded)) return true;
+    this.clearSelection();
+    s.loaded.eraseNoted = false;
+    this.onErase(s.loaded, [...s.ids]);
+    this.paintStrokes(s.loaded);
+    return true;
+  }
+
+  /** Ctrl+C / Ctrl+X. Faux sans selection (la touche reste au texte). */
+  copySelection(cut = false): boolean {
+    const s = this.sel;
+    if (!s) return false;
+    const clip = copySelection(s.loaded.page.blocks, s.ids);
+    if (!clip) return false;
+    inkClip = { clip, pageId: s.loaded.page.id, pastes: 0 };
+    if (cut) this.deleteSelection();
+    else toast("Copié : Ctrl+V sur n'importe quelle page", "info", 1500);
+    return true;
+  }
+
+  /** Il y a de l'encre a coller. */
+  static get canPaste(): boolean { return inkClip !== null; }
+
+  /**
+   * Ctrl+V : l'encre copiee arrive sur la page en vue, avec de nouveaux
+   * ids, et devient la selection (on la place aussitot). Sur la page
+   * d'origine, chaque collage se decale un peu.
+   */
+  paste(): boolean {
+    const c = inkClip;
+    const loaded = this.sel?.loaded ?? this.activePage();
+    if (!c || !loaded) return false;
+    if (!this.canEdit(loaded)) return true;
+    const same = loaded.page.id === c.pageId;
+    const step = same ? (c.pastes + 1) * PASTE_STEP : 0;
+    const d = clampMove(c.clip.bounds, step, step);
+    if (same) c.pastes++;
+    this.pushUndo(loaded);
+    const out = pasteClip(c.clip, d.dx, d.dy, uuid);
+    const ink = this.mainInk(loaded.page);
+    ink.strokes.push(...out.strokes);
+    loaded.page.blocks.push(...out.zones);
+    const ids = new Set<string>();
+    for (const st of [...out.strokes, ...out.zones.flatMap((z) => z.strokes)]) {
+      ids.add(st.id);
+      growForStroke(loaded.page, st);
+    }
+    loaded.lastEdit = "ink";
+    this.lastGestureId = loaded.page.id;
+    this.fitSheet(loaded);
+    this.paintStrokes(loaded);
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
+    // Une zone collee en attente de lecture repart a la reconnaissance.
+    for (const z of out.zones) {
+      if (!z.pending) continue;
+      const pens = z.strokes.filter((st) => st.tool === "pen");
+      if (pens.length) this.host.requestRecognition(this.keyOf(loaded, z.id), kindOf(z), pens);
+    }
+    if (out.strokes.some((st) => st.tool === "pen") && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+    this.select(loaded, ids);
+    return true;
   }
 
   /**
@@ -2659,6 +2887,8 @@ export class PageView {
     this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
+    // La selection suit ses traits (deplacement annule) ; partie avec eux sinon.
+    if (this.sel?.loaded === loaded) this.select(loaded, this.sel.ids);
   }
 
   /* ---------------- ecriture disque groupee ---------------- */

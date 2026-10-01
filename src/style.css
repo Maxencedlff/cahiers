@@ -242,6 +242,16 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .sheet canvas { display: block; width: 100%; height: 100%; }
 .sheet .overlay { position: absolute; inset: 0; pointer-events: none; }
 .sheet .overlay > * { pointer-events: auto; }
+/* Barre d'actions de la selection au lasso (encre-13) : cibles de 44 px. */
+.lasso-bar {
+  position: absolute; z-index: 5; display: flex; gap: 4px; align-items: center;
+  padding: 4px; background: var(--panel, #fff); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); touch-action: none;
+}
+.lasso-bar > button { min-height: 44px; min-width: 44px; padding: 0 10px; font-size: 14px; }
+.lasso-bar > button.swatch { padding: 0; }
+.lasso-bar > button.danger { color: #b42318; }
+.toolbar .seg.tool-opt > button { font-size: 13px; }
 
 .block-box {
   position: absolute; border-radius: 6px;

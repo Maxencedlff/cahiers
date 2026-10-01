@@ -27,7 +27,7 @@ describe("table des raccourcis", () => {
   });
 
   it("les modeles Alt ne prennent pas une touche d'outil", () => {
-    const tools = ["e", "h", "g", "z", "t"];
+    const tools = ["e", "h", "g", "z", "t", "a"];
     for (const t of MATH_TEMPLATES) if (t.key) expect(tools).not.toContain(t.key);
   });
 
@@ -69,6 +69,13 @@ describe("ctrlCommand", () => {
     expect(ctrlCommand(press("\\", { ctrlKey: true, code: "Backslash" }))).toBe("split");
   });
 
+  it("copier, couper, coller l'encre du lasso ; Ctrl+Maj+X reste la permutation", () => {
+    expect(ctrlCommand(ctrl("c"))).toBe("copy");
+    expect(ctrlCommand(ctrl("x"))).toBe("cut");
+    expect(ctrlCommand(ctrl("v"))).toBe("paste");
+    expect(ctrlCommand(ctrl("x", true))).toBe("swap");
+  });
+
   it("aide : F1, Ctrl+/ et Ctrl+Maj+: (AZERTY)", () => {
     expect(ctrlCommand(press("F1"))).toBe("help");
     expect(ctrlCommand(press("/", { ctrlKey: true }))).toBe("help");
@@ -78,8 +85,8 @@ describe("ctrlCommand", () => {
   it("lettres seules, Alt et raccourcis inconnus : rien", () => {
     expect(ctrlCommand(press("f"))).toBeNull();
     expect(ctrlCommand(press("f", { altKey: true }))).toBeNull();
-    expect(ctrlCommand(ctrl("c"))).toBeNull();
-    expect(ctrlCommand(ctrl("v"))).toBeNull();
+    expect(ctrlCommand(ctrl("b"))).toBeNull();
+    expect(ctrlCommand(ctrl("q"))).toBeNull();
     expect(ctrlCommand(press("F1", { ctrlKey: true }))).toBeNull();
   });
 

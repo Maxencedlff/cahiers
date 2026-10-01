@@ -277,11 +277,13 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+W` | fermer l'onglet |
 | `Ctrl+\` (AZERTY : `Ctrl+*`) | split gauche/droite |
 | `Ctrl+Maj+X` / `Ctrl+Maj+W` | permuter les panneaux, fermer le panneau droit |
-| `Alt+E` `Alt+H` `Alt+G` | stylo, surligneur, gomme |
+| `Alt+E` `Alt+H` `Alt+G` | stylo, surligneur, gomme (`Alt+G` deux fois : trait entier ou précise, qui coupe le trait) |
+| `Alt+A` | lasso : entourer, glisser (stylet, souris ou doigt), poignée d'angle pour retailler, pastilles pour recolorer ; deux fois : insérer de l'espace (glisser une ligne vers le bas) |
+| `Suppr` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | sélection du lasso : supprimer, copier, couper, coller (sur n'importe quelle page, même d'un autre cahier ; dans le texte, ces touches restent celles du texte) |
 | `Alt+Z` `Alt+T` | zone math, zone texte (deux fois : verrou) |
-| `Alt+0` a `Alt+5` | noir, puis les 5 couleurs de la palette |
+| `Alt+0` a `Alt+5` | noir, puis les 5 couleurs de la palette (avec une sélection au lasso : la recolore) |
 | `Alt+=` | nouvelle formule ; `Alt+F P I R N S L D V M` : modeles du ruban Maths |
-| `Echap` | quitter le texte ; une seconde fois, retour au menu |
+| `Echap` | lâcher la sélection du lasso ; quitter le texte ; une seconde fois, retour au menu |
 | `#` `##` `###` puis Espace | en debut de ligne : titre, sous-titre, niveau 3 ; `-` ou `*` : puce ; `1.` ou `1)` : liste numerotee (Entree continue, Entree sur un element vide en sort, Tab / Maj+Tab : retrait, Retour arriere au debut : texte normal, Ctrl+Z juste apres : le marqueur revient) |
 | `F1` | fiche des raccourcis |
 
