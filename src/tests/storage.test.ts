@@ -178,6 +178,33 @@ describe("fichiers de page", () => {
     expect(meta.lastPosition).toBeUndefined();
   });
 
+  it("memorise le fond de page par intercalaire (D12), suit un renommage", async () => {
+    const nb = await repo.createNotebook("Elec", "#000");
+    await repo.createDivider(nb, "Cours");
+    await repo.createDivider(nb, "TP");
+    expect((await repo.readMeta(nb)).paper).toBeUndefined();
+    await repo.setPaper(nb, "TP", "quadrille");
+    await repo.setPaper(nb, "Cours", "seyes");
+    expect((await repo.readMeta(nb)).paper).toEqual({ TP: "quadrille", Cours: "seyes" });
+    await repo.renameDivider(nb, "TP", "Travaux");
+    expect((await repo.readMeta(nb)).paper).toEqual({ Travaux: "quadrille", Cours: "seyes" });
+    // Retour a « uni » : l'entree part, puis le champ entier.
+    await repo.setPaper(nb, "Travaux", "uni");
+    await repo.setPaper(nb, "Cours", "uni");
+    const raw = await fs.readText(`${nb}/cahier.json`);
+    expect(JSON.parse(raw).paper).toBeUndefined();
+  });
+
+  it("un fond inconnu (version plus recente) est garde tel quel", async () => {
+    const nb = await repo.createNotebook("Elec", "#000");
+    await repo.createDivider(nb, "Cours");
+    const raw = JSON.parse(await fs.readText(`${nb}/cahier.json`));
+    raw.paper = { Cours: "hexagones" };
+    await fs.writeText(`${nb}/cahier.json`, JSON.stringify(raw));
+    await repo.setViewMode(nb, "Cours", "scroll");
+    expect((await repo.readMeta(nb)).paper).toEqual({ Cours: "hexagones" });
+  });
+
   it("survit a un cahier.json corrompu", async () => {
     const nb = await repo.createNotebook("Maths", "#000");
     await fs.writeText(`${nb}/cahier.json`, "{ ceci n'est pas du JSON");

@@ -27,6 +27,7 @@ import {
 } from "../core/ink/usage";
 import type { Block, NotebookMeta, Stroke } from "../core/types";
 import { isPhotoImportKey, PHOTO_IMPORT_KEYS } from "../core/image/photo";
+import { PAPERS } from "../core/paper";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
 import { showShortcuts } from "./help";
@@ -797,7 +798,9 @@ export class App {
     // onglet ne ramene plus en haut de l'intercalaire.
     for (const t of other ? [tab, other] : [tab]) {
       if (!t.view) continue;
-      t.host.append(t.view.root);
+      // Indicateur de zoom du panneau, a cote de la vue (pas dedans : il
+      // defilerait avec les pages).
+      t.host.append(t.view.root, t.view.zoomChip);
       t.view.attached();
     }
   }
@@ -1400,11 +1403,12 @@ export class App {
     // ne s'ouvre pas sous lui.
     const action = (label: string, title: string, run: () => void, cls = "") =>
       el("button", { class: `more-item ${cls}`.trim(), title, role: "menuitem", onclick: () => { close(); run(); } }, label);
-    const segment = (name: string, title: string, options: [string, boolean, () => unknown][]) =>
+    const segment = (name: string, title: string, options: [string, boolean, () => unknown][], titles?: string[]) =>
       el("div", { class: "more-seg", title },
         el("span", { class: "small muted" }, name),
-        el("div", { class: "seg" }, ...options.map(([label, on, run]) => el("button", {
+        el("div", { class: `seg${options.length > 3 ? " wrap" : ""}` }, ...options.map(([label, on, run], i) => el("button", {
           class: on ? "on" : "",
+          title: titles?.[i],
           "aria-pressed": String(on),
           onclick: async () => {
             if (on) return;
@@ -1434,6 +1438,10 @@ export class App {
           ["Pages", mode === "pages", () => this.setViewMode("pages")],
           ["Défilement", mode === "scroll", () => this.setViewMode("scroll")],
         ]),
+        segment("Fond de page", "Fond de cet intercalaire, sous l'encre ; aussi à l'export PDF, très clair",
+          PAPERS.map((p): [string, boolean, () => unknown] =>
+            [p.label, (view()?.paper ?? "uni") === p.kind, () => view()?.setPaper(p.kind)]),
+          PAPERS.map((p) => p.title)),
         segment("Encre", "Montrer l'encre telle qu'écrite, ou le rendu converti", [
           ["Brute", this.renderMode === "ink", () => this.setRenderMode("ink")],
           ["Propre", this.renderMode === "clean", () => this.setRenderMode("clean")],
@@ -1826,6 +1834,11 @@ export class App {
       case "swap": void this.swapPanes(); return true;
       case "closeSplit": void this.closeSplit(); return true;
       case "help": showShortcuts(); return true;
+      // Zoom du panneau vise (chaque panneau du split a le sien). Toujours
+      // pris : sinon le WebView2 zoomerait toute l'interface.
+      case "zoomIn": if (notebook) view?.zoomIn(); return true;
+      case "zoomOut": if (notebook) view?.zoomOut(); return true;
+      case "zoomReset": if (notebook) view?.setZoom(1); return true;
     }
   }
 
@@ -1862,7 +1875,7 @@ export class App {
       current: view.pageNumber,
       typeNumber,
       pages: pages.map((p) => ({
-        n: p.n, day: dayLabel(p.index?.created), line: p.index?.firstLine ?? "", unreadable: !p.index,
+        n: p.n, day: dayLabel(p.index?.created), line: p.index?.firstLine ?? "", title: !!p.index?.title, unreadable: !p.index,
       })),
       parse: (input) => parsePageInput(input, nums),
     });

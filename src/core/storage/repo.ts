@@ -2,7 +2,7 @@ import type { FileStat, FsAdapter } from "./fs";
 import { joinPath } from "./fs";
 import {
   SCHEMA_VERSION, emptyPage, isFutureVersion, pageFileName, parsePageNumber,
-  type NotebookMeta, type Page,
+  type NotebookMeta, type Page, type PaperKind,
 } from "../types";
 import { uuid, nowIso } from "../id";
 import { indexPage, type FlagHit, type PageIndex } from "./search";
@@ -441,6 +441,10 @@ export class Repo {
         meta.viewMode[next] = meta.viewMode[from];
         delete meta.viewMode[from];
       }
+      if (meta.paper && from in meta.paper) {
+        meta.paper[next] = meta.paper[from];
+        delete meta.paper[from];
+      }
     });
     return next;
   }
@@ -729,6 +733,21 @@ export class Repo {
 
   async setViewMode(dir: string, divider: string, mode: "pages" | "scroll"): Promise<void> {
     await this.updateMeta(dir, (meta) => { meta.viewMode = { ...(meta.viewMode ?? {}), [divider]: mode }; });
+  }
+
+  /**
+   * Fond de page d'un intercalaire (D12). « uni » retire l'entree : un
+   * cahier.json sans fond reste tel qu'avant.
+   */
+  async setPaper(dir: string, divider: string, kind: PaperKind): Promise<void> {
+    await this.updateMeta(dir, (meta) => {
+      const map: Record<string, PaperKind> =
+        meta.paper && typeof meta.paper === "object" && !Array.isArray(meta.paper) ? { ...meta.paper } : {};
+      if (kind === "uni") delete map[divider];
+      else map[divider] = kind;
+      if (Object.keys(map).length) meta.paper = map;
+      else delete meta.paper;
+    });
   }
 
   /**

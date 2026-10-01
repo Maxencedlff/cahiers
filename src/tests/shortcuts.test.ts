@@ -82,6 +82,24 @@ describe("ctrlCommand", () => {
     expect(ctrlCommand(ctrl("v"))).toBeNull();
     expect(ctrlCommand(press("F1", { ctrlKey: true }))).toBeNull();
   });
+
+  it("zoom en AZERTY : Ctrl+=, Ctrl+Maj+= (« + »), Ctrl+- (touche 6), Ctrl+à (touche 0)", () => {
+    expect(ctrlCommand(press("=", { ctrlKey: true, code: "Equal" }))).toBe("zoomIn");
+    expect(ctrlCommand(press("+", { ctrlKey: true, shiftKey: true, code: "Equal" }))).toBe("zoomIn");
+    expect(ctrlCommand(press("-", { ctrlKey: true, code: "Digit6" }))).toBe("zoomOut");
+    expect(ctrlCommand(press("à", { ctrlKey: true, code: "Digit0" }))).toBe("zoomReset");
+    // QWERTY et pave numerique.
+    expect(ctrlCommand(press("-", { ctrlKey: true, code: "Minus" }))).toBe("zoomOut");
+    expect(ctrlCommand(press("+", { ctrlKey: true, code: "NumpadAdd" }))).toBe("zoomIn");
+    expect(ctrlCommand(press("-", { ctrlKey: true, code: "NumpadSubtract" }))).toBe("zoomOut");
+    expect(ctrlCommand(press("0", { ctrlKey: true, code: "Numpad0" }))).toBe("zoomReset");
+    // AZERTY : la touche « ) » est code Minus, ce n'est pas un zoom.
+    expect(ctrlCommand(press(")", { ctrlKey: true, code: "Minus" }))).toBeNull();
+    // AltGr+0 (« @ ») et Alt+= (nouvelle formule) restent hors du zoom.
+    expect(ctrlCommand(press("@", { ctrlKey: true, altKey: true, code: "Digit0" }))).toBeNull();
+    expect(ctrlCommand(press("=", { altKey: true, code: "Equal" }))).toBeNull();
+    expect(keysOf("zoomReset")).toBe("Ctrl+0");
+  });
 });
 
 describe("infobulles et indicateur de page", () => {

@@ -264,6 +264,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+N` / `Ctrl+Maj+N` | nouvelle page a la fin, inserer apres la page courante |
 | `Ctrl+G` | liste des pages, taper un numero y va (ou un appui sur « p. 4 / 12 ») |
 | `Alt+←` | revenir d'avant un saut (aussi le bouton retour de la souris) |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | zoom avant, arrière (50 à 300 %), retour à 100 % ; aussi Ctrl+molette et pinch à deux doigts, chaque panneau le sien |
 | `Ctrl+P` / `Ctrl+Maj+P` | exporter en PDF la page, tout l'intercalaire |
 | `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |

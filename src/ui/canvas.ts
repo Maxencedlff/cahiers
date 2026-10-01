@@ -6,6 +6,7 @@ import {
 } from "../core/ink/stroke";
 import { PAGE_W, PAGE_H } from "../core/ink/sheet";
 import { gestureTool, isPalm } from "../core/ink/pointer";
+import { paperLines, paperDots, PAPER_STYLE, DOT_STYLE, type PaperKind } from "../core/paper";
 
 /** Unites de page. Rapport proche d'une feuille A4 en portrait. */
 export { PAGE_W, PAGE_H };
@@ -103,8 +104,15 @@ export class InkSurface {
    * que de compter dessus : la latence est gardee, la feuille est blanche.
    */
   private paperColor = "#fffffe";
+  /**
+   * Fond de page (D12) : lignes, carreaux ou points, peints avec le papier
+   * sous les traits, dans la seule zone sale.
+   */
+  private paper: PaperKind = "uni";
   /** Defilement au doigt, pris en charge ici faute de geste natif. */
-  private pan: { pointerId: number; startY: number; startScroll: number } | null = null;
+  private pan: {
+    pointerId: number; startX: number; startY: number; startLeft: number; startScroll: number;
+  } | null = null;
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -145,6 +153,16 @@ export class InkSurface {
   /** Hauteur logique actuelle du canvas, en unites de page. */
   get height(): number { return this.pageH; }
 
+  /** Densite actuelle (pixels physiques par pixel CSS). */
+  get density(): number { return this.dpr; }
+
+  /** Change le fond de page et repeint (une fois, pas a chaque frame). */
+  setPaper(kind: PaperKind): void {
+    if (kind === this.paper) return;
+    this.paper = kind;
+    this.repaintAll();
+  }
+
   /**
    * Redimensionne le canvas et redessine. `pageH` = hauteur logique de la
    * feuille : au-dela de l'A4 quand le texte ou l'encre la prolongent. Le
@@ -154,7 +172,8 @@ export class InkSurface {
   layout(cssWidth: number, pageH = PAGE_H, density?: number): void {
     const declared = getComputedStyle(this.canvas).getPropertyValue("--page-bg").trim();
     if (declared) this.paperColor = declared;
-    // `density` : densite imposee (export PDF en densite 3), sinon l'ecran.
+    // `density` : densite imposee (export PDF en densite 3, zoom : voir
+    // core/zoom.ts inkDensity), sinon l'ecran.
     this.dpr = density ?? Math.min(window.devicePixelRatio || 1, 2);
     this.cssWidth = cssWidth;
     this.pageH = Math.max(PAGE_H, pageH);
@@ -173,11 +192,11 @@ export class InkSurface {
   }
 
   /** Comme layout, mais seulement si la taille change (appele souvent). */
-  fit(cssWidth: number, pageH: number): void {
+  fit(cssWidth: number, pageH: number, density?: number): void {
     const h = Math.max(PAGE_H, pageH);
-    if (cssWidth === this.cssWidth && h === this.pageH
-        && this.dpr === Math.min(window.devicePixelRatio || 1, 2)) return;
-    this.layout(cssWidth, h);
+    const d = density ?? Math.min(window.devicePixelRatio || 1, 2);
+    if (cssWidth === this.cssWidth && h === this.pageH && this.dpr === d) return;
+    this.layout(cssWidth, h, d);
   }
 
   /* ---------------- role du pointeur ---------------- */
@@ -194,11 +213,17 @@ export class InkSurface {
     return "ignore";
   }
 
+  /**
+   * Point de l'ecran -> unites de page. L'echelle est lue sur la taille
+   * reellement affichee (getBoundingClientRect) : le stylet tombe sous la
+   * pointe a tout zoom, meme pendant l'apercu CSS d'un pinch.
+   */
   private toPage(e: PointerEvent): { x: number; y: number } {
     const r = this.canvas.getBoundingClientRect();
+    const k = r.width > 0 ? r.width / PAGE_W : this.scale;
     return {
-      x: (e.clientX - r.left) / this.scale,
-      y: (e.clientY - r.top) / this.scale,
+      x: (e.clientX - r.left) / k,
+      y: (e.clientY - r.top) / k,
     };
   }
 
@@ -388,7 +413,38 @@ export class InkSurface {
     const box = this.scroller();
     if (!box) return;
     this.capture(e.pointerId);
-    this.pan = { pointerId: e.pointerId, startY: e.clientY, startScroll: box.scrollTop };
+    this.pan = {
+      pointerId: e.pointerId, startX: e.clientX, startY: e.clientY,
+      startLeft: box.scrollLeft, startScroll: box.scrollTop,
+    };
+  }
+
+  /**
+   * Un pinch commence (PageView) : le defilement au doigt s'arrete net, et
+   * un trait commence au doigt (machine sans stylet) est abandonne : c'etait
+   * le premier doigt du pinch, pas de l'ecriture.
+   */
+  cancelPan(): void {
+    this.stopPan();
+    if (this.activePointer === null || this.activeType !== "touch") return;
+    const id = this.activePointer;
+    const live = this.live;
+    const zone = live && live.points.length ? cachedBounds(live, 2) : null;
+    this.activePointer = null;
+    this.activeType = "";
+    this.tool = null;
+    this.live = null;
+    this.liveLast = null;
+    this.release(id);
+    if (this.eraserPos) { this.markDirty(circleBounds(this.eraserPos)); this.eraserPos = null; }
+    if (this.regionStart && this.regionNow) this.markDirty(padBounds(rectOf(this.regionStart, this.regionNow), 3));
+    this.regionStart = this.regionNow = null;
+    if (zone) this.markDirty(zone);
+  }
+
+  /** Un trait ou une gomme au stylet ou a la souris est en cours. */
+  get busyPen(): boolean {
+    return this.activePointer !== null && this.activeType !== "touch";
   }
 
   private stopPan(): void {
@@ -417,6 +473,9 @@ export class InkSurface {
     if (this.penWriting) { this.stopPan(); return; }
     e.preventDefault();
     box.scrollTop = this.pan.startScroll - (e.clientY - this.pan.startY);
+    // Feuille zoomee plus large que la vue : le doigt la deplace aussi
+    // de cote (sans largeur a defiler, scrollLeft reste a 0).
+    box.scrollLeft = this.pan.startLeft - (e.clientX - this.pan.startX);
   }
 
   private addPoint(e: PointerEvent, p: { x: number; y: number }) {
@@ -518,6 +577,7 @@ export class InkSurface {
     ctx.beginPath();
     ctx.rect(x, y, w, h);
     ctx.clip();
+    if (this.paper !== "uni") this.drawPaper(ctx, x, y, w, h, k);
     ctx.scale(k, k);
 
     // Surligneurs d'abord, stylos ensuite : le surlignage passe sous
@@ -550,6 +610,41 @@ export class InkSurface {
       ctx.fillRect(r.x, r.y, r.w, r.h);
     }
     ctx.restore();
+  }
+
+  /**
+   * Fond de page dans la zone (x, y, w, h), en pixels du canvas. Les lignes
+   * sont calees sur les pixels physiques (nettes, sans flou d'antialias) et
+   * gardent une epaisseur fixe a l'ecran : au zoom, les carreaux
+   * grandissent, pas l'epaisseur des traits du fond.
+   */
+  private drawPaper(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, k: number): void {
+    // Un pixel de plus de chaque cote : une ligne arrondie sur le bord de la
+    // zone repeinte serait sinon effacee sans etre retracee (trou dans la ligne).
+    const zone = { x: (x - 1) / k, y: (y - 1) / k, w: (w + 2) / k, h: (h + 2) / k };
+    for (const g of paperLines(this.paper, zone, this.scale)) {
+      const st = PAPER_STYLE[g.weight];
+      const lw = Math.max(1, Math.round(st.width * this.dpr));
+      const half = lw % 2 ? 0.5 : 0;
+      ctx.strokeStyle = st.color;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      for (const v of g.vertical) {
+        const px = Math.round(v * k) + half;
+        ctx.moveTo(px, y); ctx.lineTo(px, y + h);
+      }
+      for (const v of g.horizontal) {
+        const py = Math.round(v * k) + half;
+        ctx.moveTo(x, py); ctx.lineTo(x + w, py);
+      }
+      ctx.stroke();
+    }
+    const dots = paperDots(this.paper, zone);
+    if (dots.length) {
+      const sz = Math.max(1.5, DOT_STYLE.size * this.dpr);
+      ctx.fillStyle = DOT_STYLE.color;
+      for (const d of dots) ctx.fillRect(Math.round(d.x * k - sz / 2), Math.round(d.y * k - sz / 2), sz, sz);
+    }
   }
 
   /** Trace un seul segment de stylo, sans toucher au reste de la page. */

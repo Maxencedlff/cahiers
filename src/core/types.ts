@@ -243,7 +243,15 @@ export interface NotebookMeta {
   lastPosition?: { divider: string; page: number };
   /** Mode de lecture memorise par intercalaire (section 5). */
   viewMode?: Record<string, "pages" | "scroll">;
+  /**
+   * Fond de page par intercalaire (D12). Absent = « uni ». Une valeur
+   * inconnue (version plus recente) est lue comme « uni » et gardee.
+   */
+  paper?: Record<string, PaperKind>;
 }
+
+/** Fonds de page (D12), voir core/paper.ts. */
+export type PaperKind = "uni" | "ligne" | "seyes" | "quadrille" | "millimetre" | "points";
 
 /** Reference d'une page dans l'arborescence. */
 export interface PageRef {

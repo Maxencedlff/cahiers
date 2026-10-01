@@ -28,6 +28,12 @@ import { PageHistory, applyStrokeCommand, restoreBlocks } from "../core/history"
 import { planPrint, type Span } from "../core/print";
 import type { ImportResult } from "./image-import";
 import { FINAL_MAX, JPEG_QUALITY, fitRatio, unreadableMessage } from "../core/image/photo";
+import { paperOf, type PaperKind } from "../core/paper";
+import {
+  ZOOM_MAX, ZOOM_MIN, anchorAt, clampZoom, inkDensity, mid, pinchOf, previewTransform,
+  scrollToAnchor, stepZoom, wheelFactor, zoomLabel, type Pt,
+} from "../core/zoom";
+import { titleOf } from "../core/shortcuts";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -193,6 +199,34 @@ export class PageView {
   private peek: ConflictCopy | null = null;
   /** Copies dont l'encre a deja ete reprise pendant la seance. */
   private merged = new Set<string>();
+  /** Fond de page de l'intercalaire (D12), lu dans cahier.json. */
+  private paperKind: PaperKind = "uni";
+  /**
+   * Zoom de la vue (lot 11), propre a chaque panneau, en memoire seulement.
+   * Il multiplie la largeur affichee des feuilles ; les traits restent en
+   * unites de page, le zoom ne touche jamais aux donnees.
+   */
+  private zoom = 1;
+  /** Indicateur « 150 % », pose par l'appli a cote de la vue ; un appui = 100 %. */
+  readonly zoomChip: HTMLButtonElement;
+  /**
+   * Geste de zoom en cours (pinch ou Ctrl+molette) : apercu en transformation
+   * CSS seulement, aucun re-rendu de l'encre avant le lacher (batterie).
+   */
+  private gesture: {
+    focus: Pt;
+    /** Point de page vise, sur la feuille sous le point de depart. */
+    anchor: { page: LoadedPage; at: Pt } | null;
+    boxes: { node: HTMLElement; x: number; y: number }[];
+    scale: number; dx: number; dy: number;
+  } | null = null;
+  private previewRaf = 0;
+  private wheelTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Doigts poses sur la vue ; deux = pinch. */
+  private touches = new Map<number, Pt>();
+  private pinch: { ids: [number, number]; start: [Pt, Pt] } | null = null;
+  /** Defilement au doigt hors de la feuille (marges, bandeaux, numeros). */
+  private rootPan: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | null = null;
 
   constructor(
     private host: PageViewHost,
@@ -213,6 +247,13 @@ export class PageView {
     this.root.addEventListener("scroll", () => {
       if (this.root.isConnected && !this.restore) this.savedScroll = this.root.scrollTop;
     }, { passive: true });
+    this.zoomChip = el("button", {
+      class: "zoom-chip",
+      title: titleOf("Revenir à 100 %", "zoomReset"),
+      onclick: () => this.setZoom(1),
+    });
+    this.zoomChip.style.display = "none";
+    this.watchZoomGestures();
   }
 
   get pageNumber(): number { return this.current; }
@@ -252,6 +293,7 @@ export class PageView {
   async load(startPage?: number): Promise<void> {
     const meta = await this.host.repo.readMeta(this.notebook);
     this.viewMode = meta.viewMode?.[this.divider] ?? "pages";
+    this.paperKind = paperOf(meta.paper, this.divider);
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (nums.length === 0) {
       // Dossier range en sous-dossiers (E3A/S1/Chapitre 1) : aucune page n'y
@@ -750,6 +792,7 @@ export class PageView {
       },
     });
     loaded.surface = surface;
+    surface.setPaper(this.paperKind);
     this.routePointers(loaded);
     // Une photo qui finit de charger allonge le texte : la feuille suit.
     loaded.ro = new ResizeObserver(() => this.fitSheet(loaded));
@@ -889,8 +932,43 @@ export class PageView {
     root.style.minHeight = minH;
     const h = sheetHeight(loaded.page, textPx / k);
     loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
-    if (force) loaded.surface?.layout(width, h, density);
-    else loaded.surface?.fit(width, h);
+    const d = density ?? this.densityOf(loaded, width, h * k);
+    if (force) loaded.surface?.layout(width, h, d);
+    else loaded.surface?.fit(width, h, d);
+  }
+
+  /** Zoom en vigueur : 100 % pendant un export PDF (feuilles A4). */
+  private get effectiveZoom(): number {
+    return this.exporting ? 1 : this.zoom;
+  }
+
+  /**
+   * Densite du canvas d'une page (core/zoom.ts) : celle de l'ecran a 100 %,
+   * plafonnee au zoom ; en defilement, une page loin de l'ecran garde le
+   * poids qu'elle avait a 100 % et redevient nette en revenant (onScroll).
+   */
+  private densityOf(p: LoadedPage, cssW: number, cssH: number): number {
+    return inkDensity(cssW, cssH, window.devicePixelRatio || 1, this.effectiveZoom, this.isNear(p));
+  }
+
+  /** Page a l'ecran, ou a moins d'un ecran de distance. */
+  private isNear(p: LoadedPage): boolean {
+    if (this.viewMode === "pages" || this.effectiveZoom <= 1) return true;
+    const view = this.root.getBoundingClientRect();
+    if (!view.height) return true;
+    const r = p.wrap.getBoundingClientRect();
+    return r.bottom > view.top - view.height && r.top < view.bottom + view.height;
+  }
+
+  /** Apres un defilement au zoom : densite revue page par page, sans relire le texte. */
+  private refreshDensity(): void {
+    if (this.effectiveZoom <= 1 || this.viewMode !== "scroll") return;
+    for (const p of this.list) {
+      const s = p.surface;
+      if (!s) continue;
+      const width = p.sheet.clientWidth || PAGE_W;
+      s.fit(width, s.height, this.densityOf(p, width, s.height * width / PAGE_W));
+    }
   }
 
   /** Donne le clavier au texte de la page en cours. */
@@ -1018,9 +1096,14 @@ export class PageView {
   }
 
   private relayout(): void {
-    const width = Math.min(900, Math.max(280, this.root.clientWidth - 36));
+    const base = Math.min(900, Math.max(280, this.root.clientWidth - 36));
+    // Zoom : la feuille est simplement plus large (ou plus etroite). Texte,
+    // blocs et canvas suivent --k ; au-dela de la vue, on defile de cote.
+    const z = this.effectiveZoom;
+    const width = Math.round(base * z);
     for (const p of this.list) {
       p.wrap.style.maxWidth = `${width}px`;
+      p.wrap.style.width = z > 1 ? `${width}px` : "";
       p.sheet.style.height = "";
       p.sheet.style.setProperty("--k", String(width / PAGE_W));
       this.fitSheet(p, true);
@@ -1033,6 +1116,7 @@ export class PageView {
 
   /** Repere la page en vue pour que "derniere position" reste juste. */
   private onScroll(): void {
+    this.refreshDensity();
     if (this.viewMode !== "scroll" || !this.list.length) return;
     // Position de chaque page par rapport au haut de la vue. offsetTop se
     // mesurait depuis le body (la vue n'est pas positionnee) : les barres du
@@ -2094,6 +2178,210 @@ export class PageView {
     if (mode === "scroll") {
       this.list.find((p) => p.number === this.current)?.wrap.scrollIntoView({ block: "start" });
     }
+  }
+
+  get paper(): PaperKind { return this.paperKind; }
+
+  /**
+   * Fond de page de l'intercalaire (D12) : repeint les pages affichees, sans
+   * les relire, et le retient dans cahier.json (sauf en lecture seule).
+   */
+  async setPaper(kind: PaperKind): Promise<void> {
+    this.paperKind = kind;
+    for (const p of this.list) p.surface?.setPaper(kind);
+    if (!this.readOnly) await this.host.repo.setPaper(this.notebook, this.divider, kind);
+  }
+
+  /* ---------------- zoom (lot 11) ---------------- */
+
+  get zoomLevel(): number { return this.zoom; }
+
+  zoomIn(): void { this.setZoom(stepZoom(this.zoom, 1)); }
+  zoomOut(): void { this.setZoom(stepZoom(this.zoom, -1)); }
+
+  /**
+   * Change le zoom en gardant sous `focus` (point de l'ecran ; le centre de
+   * la vue par defaut) le meme point de la page. Le rendu net de l'encre se
+   * fait ici, une fois.
+   */
+  setZoom(z: number, focus?: Pt, anchor?: { page: LoadedPage; at: Pt } | null): void {
+    const next = clampZoom(z);
+    const view = this.root.getBoundingClientRect();
+    const target = focus ?? { x: view.left + view.width / 2, y: view.top + Math.min(view.height / 2, 300) };
+    const a = anchor === undefined ? this.anchorUnder(target) : anchor;
+    if (next !== this.zoom) {
+      this.zoom = next;
+      this.relayout();
+      if (a && this.list.includes(a.page)) {
+        const r = a.page.sheet.getBoundingClientRect();
+        const d = scrollToAnchor(a.at, { x: r.left, y: r.top }, r.width / PAGE_W, target);
+        this.root.scrollLeft += d.dx;
+        this.root.scrollTop += d.dy;
+      }
+      this.refreshDensity();
+    }
+    this.paintZoomChip();
+  }
+
+  private paintZoomChip(): void {
+    this.zoomChip.textContent = zoomLabel(this.zoom);
+    this.zoomChip.style.display = this.zoom === 1 ? "none" : "";
+  }
+
+  /** Feuille sous un point de l'ecran (la plus proche en hauteur) et le point de page vise. */
+  private anchorUnder(pt: Pt): { page: LoadedPage; at: Pt } | null {
+    let best: LoadedPage | null = null;
+    let bestD = Infinity;
+    for (const p of this.list) {
+      const r = p.sheet.getBoundingClientRect();
+      const d = pt.y < r.top ? r.top - pt.y : pt.y > r.bottom ? pt.y - r.bottom : 0;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    if (!best) return null;
+    const r = best.sheet.getBoundingClientRect();
+    if (!r.width) return null;
+    return { page: best, at: anchorAt(pt, { x: r.left, y: r.top }, r.width / PAGE_W) };
+  }
+
+  /** Debut d'un geste : position de chaque element de la vue, sans transformation. */
+  private beginGesture(focus: Pt): void {
+    if (this.gesture) return;
+    const boxes: { node: HTMLElement; x: number; y: number }[] = [];
+    for (const c of Array.from(this.root.children) as HTMLElement[]) {
+      const r = c.getBoundingClientRect();
+      boxes.push({ node: c, x: r.left, y: r.top });
+    }
+    this.gesture = { focus, anchor: this.anchorUnder(focus), boxes, scale: 1, dx: 0, dy: 0 };
+  }
+
+  /** Apercu du geste, a la frame : transformation CSS, l'encre n'est pas repeinte. */
+  private previewGesture(scale: number, dx: number, dy: number): void {
+    const g = this.gesture;
+    if (!g) return;
+    // Bornes 50-300 % des l'apercu : la feuille ne grossit pas au-dela de
+    // ce qu'elle sera au lacher.
+    const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, this.zoom * scale));
+    g.scale = z / this.zoom; g.dx = dx; g.dy = dy;
+    if (this.previewRaf) return;
+    this.previewRaf = requestAnimationFrame(() => {
+      this.previewRaf = 0;
+      const cur = this.gesture;
+      if (!cur) return;
+      for (const b of cur.boxes) {
+        const t = previewTransform(cur.focus, b, cur.scale, cur.dx, cur.dy);
+        b.node.style.transformOrigin = t.origin;
+        b.node.style.transform = t.transform;
+      }
+    });
+  }
+
+  /** Fin du geste : transformations retirees, zoom applique et rendu net, dans la meme frame. */
+  private endGesture(): void {
+    const g = this.gesture;
+    if (!g) return;
+    this.gesture = null;
+    if (this.previewRaf) { cancelAnimationFrame(this.previewRaf); this.previewRaf = 0; }
+    for (const b of g.boxes) { b.node.style.transform = ""; b.node.style.transformOrigin = ""; }
+    const target = { x: g.focus.x + g.dx, y: g.focus.y + g.dy };
+    const z = clampZoom(this.zoom * g.scale);
+    if (z === this.zoom) {
+      // Zoom inchange (petit pinch) : le deplacement des doigts reste un defilement.
+      this.root.scrollLeft -= g.dx;
+      this.root.scrollTop -= g.dy;
+      return;
+    }
+    this.setZoom(z, target, g.anchor);
+  }
+
+  /**
+   * Pinch a deux doigts, Ctrl+molette (et pinch du pave tactile, que
+   * Windows envoie comme Ctrl+molette), defilement au doigt hors des
+   * feuilles. Les doigts sont lus en capture, avant la feuille : le second
+   * doigt n'arrive jamais au canvas (pas de defilement parasite).
+   */
+  private watchZoomGestures(): void {
+    const root = this.root;
+    root.addEventListener("wheel", (e) => {
+      if (!e.ctrlKey) return;
+      // Sinon le WebView2 zoomerait toute l'interface.
+      e.preventDefault();
+      if (!this.list.length) return;
+      if (!this.gesture) this.beginGesture({ x: e.clientX, y: e.clientY });
+      const g = this.gesture!;
+      this.previewGesture(g.scale * wheelFactor(e.deltaY, e.deltaMode), 0, 0);
+      if (this.wheelTimer) clearTimeout(this.wheelTimer);
+      this.wheelTimer = setTimeout(() => { this.wheelTimer = null; this.endGesture(); }, 220);
+    }, { passive: false });
+
+    const pt = (e: PointerEvent): Pt => ({ x: e.clientX, y: e.clientY });
+    const capture = (id: number) => { try { root.setPointerCapture(id); } catch { /* deja relache */ } };
+    root.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return;
+      this.touches.set(e.pointerId, pt(e));
+      if (this.pinch) { e.stopPropagation(); e.preventDefault(); return; }
+      if (this.touches.size !== 2 || !this.list.length) return;
+      // Stylet ou souris en train d'ecrire : pas de pinch. Un trait commence
+      // au doigt (sans stylet) est abandonne par cancelPan.
+      if (this.list.some((p) => p.surface?.busyPen)) return;
+      const ids = [...this.touches.keys()] as [number, number];
+      const start: [Pt, Pt] = [this.touches.get(ids[0])!, this.touches.get(ids[1])!];
+      this.pinch = { ids, start };
+      for (const p of this.list) p.surface?.cancelPan();
+      this.rootPan = null;
+      for (const id of ids) capture(id);
+      this.beginGesture(mid(start));
+      e.stopPropagation();
+      e.preventDefault();
+    }, { capture: true });
+    root.addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "touch" || !this.touches.has(e.pointerId)) return;
+      this.touches.set(e.pointerId, pt(e));
+      const pinch = this.pinch;
+      if (!pinch) return;
+      e.stopPropagation();
+      e.preventDefault();
+      if (!pinch.ids.includes(e.pointerId)) return;
+      const now: [Pt, Pt] = [this.touches.get(pinch.ids[0])!, this.touches.get(pinch.ids[1])!];
+      const p = pinchOf(pinch.start, now);
+      this.previewGesture(p.scale, p.dx, p.dy);
+    }, { capture: true });
+    const up = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      this.touches.delete(e.pointerId);
+      const pinch = this.pinch;
+      if (!pinch) return;
+      e.stopPropagation();
+      if (!pinch.ids.includes(e.pointerId)) return;
+      this.pinch = null;
+      this.endGesture();
+    };
+    root.addEventListener("pointerup", up, { capture: true });
+    root.addEventListener("pointercancel", up, { capture: true });
+
+    // Un doigt hors des feuilles (marges, bandeaux, numeros) : la vue n'a
+    // plus de geste natif (touch-action: none, sinon le WebView2 zoomerait
+    // toute l'interface au pinch), on defile donc ici. La capture ne vient
+    // qu'apres 8 px : un appui sur un bouton reste un clic.
+    root.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch" || this.pinch) return;
+      if ((e.target as Element).closest?.("canvas, .text-doc")) return;
+      this.rootPan = { id: e.pointerId, x: e.clientX, y: e.clientY, left: root.scrollLeft, top: root.scrollTop, moved: false };
+    });
+    root.addEventListener("pointermove", (e) => {
+      const pan = this.rootPan;
+      if (!pan || pan.id !== e.pointerId) return;
+      const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+      if (!pan.moved) {
+        if (Math.hypot(dx, dy) < 8) return;
+        pan.moved = true;
+        capture(e.pointerId);
+      }
+      root.scrollLeft = pan.left - dx;
+      root.scrollTop = pan.top - dy;
+    });
+    const panEnd = (e: PointerEvent) => { if (this.rootPan?.id === e.pointerId) this.rootPan = null; };
+    root.addEventListener("pointerup", panEnd);
+    root.addEventListener("pointercancel", panEnd);
   }
 
   /** Un export en cours : un second Ctrl+P ne relance pas l'impression. */

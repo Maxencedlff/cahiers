@@ -206,7 +206,16 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 }
 .pane.drop-target { outline: 3px dashed var(--accent); outline-offset: -3px; }
 
-.pages { flex: 1; overflow: auto; padding: 18px; background: var(--bg); }
+/* touch-action: none : pas de pinch natif (il zoomerait toute l'interface) ;
+   pinch, zoom et defilement au doigt sont geres par PageView. */
+.pages { flex: 1; overflow: auto; padding: 18px; background: var(--bg); touch-action: none; }
+.pane { position: relative; }
+/* Niveau de zoom du panneau, discret ; un appui revient a 100 %. */
+.zoom-chip {
+  position: absolute; right: 24px; bottom: 14px; z-index: 5;
+  font-size: 13px; color: var(--muted); background: rgba(255,255,255,.92);
+  border-radius: 22px; box-shadow: 0 2px 8px rgba(10,14,25,.12);
+}
 .pages.scroll-mode { padding-bottom: 60vh; }
 
 .page-wrap { margin: 0 auto 18px; max-width: 900px; }
@@ -518,6 +527,23 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .text-doc .eq:hover { background: #f1f5ff; box-shadow: 0 0 0 2px #f1f5ff; }
 .text-doc .eq .katex { font-size: 1.08em; }
 
+/* Titres et listes du texte tape (D11) : un bloc par ligne, dans la police
+   de la page. Les lignes de texte normal restent a plat entre les blocs. */
+.text-doc .dl { position: relative; min-height: 1.5em; }
+.text-doc .dl-h1 { font-size: 1.6em; font-weight: 700; line-height: 1.25; margin: .6em 0 .25em; }
+.text-doc .dl-h2 { font-size: 1.3em; font-weight: 700; line-height: 1.3; margin: .5em 0 .2em; }
+.text-doc .dl-h3 { font-size: 1.1em; font-weight: 700; line-height: 1.4; margin: .35em 0 .1em; }
+.text-doc > .dl-h1:first-child, .text-doc > .dl-h2:first-child, .text-doc > .dl-h3:first-child { margin-top: 0; }
+.text-doc .dl-li { padding-left: calc(1.5em * (var(--lvl, 0) + 1)); }
+.text-doc .dl-li::before {
+  position: absolute; left: calc(1.5em * var(--lvl, 0)); width: 1.5em; padding-right: .4em;
+  box-sizing: border-box; text-align: right; user-select: none; pointer-events: none;
+}
+.text-doc .dl-ul::before { content: "•"; }
+.text-doc .dl-ul[data-lvl="1"]::before, .text-doc .dl-ul[data-lvl="3"]::before { content: "◦"; }
+.text-doc .dl-ul[data-lvl="2"]::before, .text-doc .dl-ul[data-lvl="4"]::before { content: "▪"; }
+.text-doc .dl-ol::before { content: attr(data-num) "."; font-variant-numeric: tabular-nums; }
+
 /* ---------------- colonnes : outils a gauche, calculatrice a droite ---------------- */
 /* Toute la hauteur de l'ecran revient a la feuille. */
 .work { flex: 1; min-height: 0; display: flex; }
@@ -584,6 +610,11 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .more-seg { display: flex; align-items: center; gap: 8px; padding: 2px 4px; }
 .more-seg > span { flex: 0 0 92px; line-height: 1.2; }
 .more-seg .seg { flex: 1 1 auto; }
+/* Plus de trois choix (fond de page) : trois par ligne, boutons separes. */
+.seg.wrap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.seg.wrap > button, .seg.wrap > button:first-child, .seg.wrap > button:last-child {
+  border-radius: 8px; margin-left: 0; padding: 0 4px; font-size: 13px;
+}
 
 /* Fiche des raccourcis (F1). */
 .modal.shortcuts-sheet { width: min(980px, 100%); }
@@ -772,4 +803,5 @@ kbd {
 .page-row .pn { font-weight: 600; }
 .page-row .day { color: var(--muted); font-size: 13px; }
 .page-row .line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-row .line.title { font-weight: 600; }
 .page-row.current .pn::after { content: " ●"; color: var(--accent); font-size: 10px; vertical-align: middle; }

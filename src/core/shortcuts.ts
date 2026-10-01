@@ -14,7 +14,7 @@ export type Command =
   | "menu" | "search" | "calc" | "undo" | "redo" | "flag" | "convert" | "finger"
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
-  | "exportPage" | "exportAll" | "help";
+  | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -76,6 +76,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("g", false, "goto", "Liste des pages ; taper un numéro y va", "Pages et intercalaires"),
   { keys: "Alt+←", label: "Revenir d'où l'on vient après un saut (recherche, repère, lien, liste) ; aussi le bouton retour de la souris", group: "Pages et intercalaires" },
   { keys: "Appui long", label: "Sur un intercalaire : ouvrir à droite, renommer, déplacer, supprimer", group: "Pages et intercalaires" },
+  ctrl("=", false, "zoomIn", "Zoom avant, jusqu'à 300 % (aussi Ctrl+molette, pinch à deux doigts)", "Pages et intercalaires"),
+  ctrl("-", false, "zoomOut", "Zoom arrière, jusqu'à 50 %", "Pages et intercalaires"),
+  ctrl("0", false, "zoomReset", "Zoom à 100 % (aussi un appui sur « 150 % » en bas du panneau)", "Pages et intercalaires"),
   ctrl("p", false, "exportPage", "Exporter la page en PDF", "Pages et intercalaires"),
   ctrl("p", true, "exportAll", "Exporter tout l'intercalaire en PDF", "Pages et intercalaires"),
 
@@ -118,6 +121,12 @@ export function ctrlCommand(e: KeyLike): Command | null {
   // Ctrl+\ est introuvable en AZERTY sans AltGr : la touche du meme
   // emplacement (« * ») fait l'affaire.
   if (!e.shiftKey && e.code === "Backslash") return "split";
+  // Zoom, par emplacement autant que par caractere. AZERTY : « = » est sa
+  // propre touche (Maj donne « + ») ; « - » est sur le 6 ; Ctrl+0 donne
+  // e.key « à ». Pave numerique compris.
+  if (k === "+" || e.code === "NumpadAdd" || (e.code === "Equal" && k !== "-")) return "zoomIn";
+  if (!e.shiftKey && (k === "-" || e.code === "NumpadSubtract")) return "zoomOut";
+  if (!e.shiftKey && (e.code === "Digit0" || e.code === "Numpad0" || k === "0")) return "zoomReset";
   for (const s of SHORTCUTS) {
     if (s.ctrl && s.ctrl.key === k && s.ctrl.shift === e.shiftKey) return s.ctrl.command;
   }
