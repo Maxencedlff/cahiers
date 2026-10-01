@@ -1,5 +1,6 @@
 import { PALETTE, NEUTRAL_INK } from "./palette";
 import { MATH_TEMPLATES } from "./templates";
+import { PHOTO_IMPORT_KEYS } from "./image/photo";
 
 /**
  * Table UNIQUE des raccourcis clavier. Elle sert a la fois :
@@ -62,6 +63,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("z", true, "redo", "Rétablir", "Pendant le cours"),
   ctrl("l", false, "calc", "Calculatrice", "Pendant le cours"),
   ctrl("k", false, "search", "Recherche dans tous les cahiers", "Pendant le cours"),
+  { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),
   { keys: "Échap", label: "Quitter le texte ; une seconde fois, retour au menu", group: "Pendant le cours" },
 

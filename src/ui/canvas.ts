@@ -151,10 +151,11 @@ export class InkSurface {
    * canvas couvre toujours toute la feuille, sinon l'encre ecrite dessous
    * n'aurait nulle part ou aller.
    */
-  layout(cssWidth: number, pageH = PAGE_H): void {
+  layout(cssWidth: number, pageH = PAGE_H, density?: number): void {
     const declared = getComputedStyle(this.canvas).getPropertyValue("--page-bg").trim();
     if (declared) this.paperColor = declared;
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // `density` : densite imposee (export PDF en densite 3), sinon l'ecran.
+    this.dpr = density ?? Math.min(window.devicePixelRatio || 1, 2);
     this.cssWidth = cssWidth;
     this.pageH = Math.max(PAGE_H, pageH);
     this.scale = cssWidth / PAGE_W;

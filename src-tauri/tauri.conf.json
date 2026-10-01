@@ -21,11 +21,12 @@
         "center": true,
         "decorations": true,
         "maximized": true,
-        "theme": "Light"
+        "theme": "Light",
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset:; font-src 'self' data:; connect-src 'self' https://cloud.myscript.com"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset:; font-src 'self' data:; connect-src 'self' https://cloud.myscript.com"
     }
   },
   "bundle": {

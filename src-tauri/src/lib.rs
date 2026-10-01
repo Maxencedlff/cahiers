@@ -214,8 +214,10 @@ fn write_binary(state: State<'_, Root>, rel: String, base64: String) -> Res<()> 
     write_durable(&path, &rel, &bytes)
 }
 
-#[tauri::command]
-fn read_binary(state: State<Root>, rel: String) -> Res<String> {
+/// Async : hors du thread principal. Chaque photo affichee passe par ici, et
+/// une page qui en porte plusieurs figeait la fenetre le temps de les lire.
+#[tauri::command(async)]
+fn read_binary(state: State<'_, Root>, rel: String) -> Res<String> {
     use base64::Engine;
     let path = resolve(&root_of(&state)?, &rel)?;
     let bytes = fs::read(&path).map_err(|e| fail(format!("{rel} : {e}")))?;
@@ -266,13 +268,22 @@ fn set_myscript_keys(application_key: String, hmac_key: String) -> Res<()> {
 ///
 /// Sans OCR, une photo de tableau est un trou noir dans la recherche
 /// (section 6). Le moteur est celui du systeme : rien ne sort de la machine.
+///
+/// Une a plusieurs secondes de calcul, avec des attentes bloquantes (`.get()`)
+/// sur les operations WinRT : la commande tourne donc sur un fil de travail
+/// dedie (`spawn_blocking`), jamais sur le thread principal, sinon la fenetre
+/// et le stylet gelent pendant toute la lecture.
 #[tauri::command]
-fn ocr_image(base64: String) -> Res<String> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64.as_bytes())
-        .map_err(|e| fail(format!("image illisible : {e}")))?;
-    ocr_bytes(&bytes)
+async fn ocr_image(base64: String) -> Res<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64.as_bytes())
+            .map_err(|e| fail(format!("image illisible : {e}")))?;
+        ocr_bytes(&bytes)
+    })
+    .await
+    .map_err(|e| fail(format!("OCR interrompu : {e}")))?
 }
 
 #[cfg(windows)]

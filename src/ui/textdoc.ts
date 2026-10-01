@@ -1,7 +1,7 @@
 import { MathfieldElement } from "mathlive";
 import "mathlive/fonts.css";
 import katex from "katex";
-import { el } from "./dom";
+import { el, toast } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import {
@@ -57,9 +57,39 @@ window.addEventListener("keydown", (e) => {
 /** Ce que la page sait d'une photo posee dans le texte. */
 export interface DocImages {
   /** Fichier de la photo et sa largeur, null si le bloc n'existe plus. */
-  lookup: (id: string) => { url: Promise<string>; width: number; ocr: string | null } | null;
+  lookup: (id: string) => {
+    url: Promise<string>; width: number; ocr: string | null;
+    /** Original garde (D9) : « Redresser a nouveau » possible. */
+    original?: boolean;
+  } | null;
   /** Largeur choisie a la poignee, en unites de page. */
   resized: (id: string, width: number) => void;
+  /**
+   * Image collee (capture Win+Maj+S) ou deposee depuis l'Explorateur :
+   * enregistree telle quelle, sans recadrage. Rend l'id du bloc cree, ou
+   * null (page en lecture seule, fichier illisible). L'OCR suit en fond.
+   */
+  addFile?: (file: File) => Promise<string | null>;
+  /** « Redresser a nouveau » : rouvre le dialogue sur l'original. */
+  recrop?: (id: string) => void;
+}
+
+/** Fichier image d'un presse-papiers ou d'un depot, s'il y en a un. */
+export function imageFiles(dt: DataTransfer | null): File[] {
+  if (!dt) return [];
+  const out: File[] = [];
+  for (const item of Array.from(dt.items ?? [])) {
+    if (item.kind !== "file") continue;
+    const f = item.getAsFile();
+    if (f && isImageFile(f)) out.push(f);
+  }
+  if (!out.length) for (const f of Array.from(dt.files ?? [])) if (isImageFile(f)) out.push(f);
+  return out;
+}
+
+/** Image d'apres son type, ou son extension quand Windows ne donne pas de type (HEIC). */
+function isImageFile(f: File): boolean {
+  return f.type.startsWith("image/") || /\.(png|jpe?g|gif|bmp|webp|heic|heif|avif)$/i.test(f.name);
 }
 
 /**
@@ -88,8 +118,6 @@ export function setTypingColor(color: ColorKey | null): void {
   lastDoc?.colorSelection(color);
 }
 
-/** Type de glisser-deposer interne : une photo deplacee dans le texte. */
-const DRAG_TYPE = "application/x-cahiers-image";
 /** Presse-papiers interne : le morceau copie, formules et couleurs comprises. */
 const CLIP_TYPE = "application/x-cahiers-doc";
 
@@ -175,6 +203,8 @@ export class TextDoc {
    */
   dispose(): void {
     document.removeEventListener("selectionchange", this.onSelectionChange);
+    document.removeEventListener("pointerdown", this.onOutsideDown, { capture: true });
+    this.dropMarker?.remove();
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     this.savedRange = null;
     if (lastDoc === this) lastDoc = null;
@@ -246,24 +276,26 @@ export class TextDoc {
       if (eq instanceof HTMLElement && this.root.contains(eq)) this.editEq(eq, "end");
     });
     document.addEventListener("selectionchange", this.onSelectionChange);
-    // Photo glissee a la souris : elle se pose la ou on la lache, dans le
-    // texte, qui se remet en page autour d'elle.
+    // Fichier image depose depuis l'Explorateur (dragDropEnabled: false
+    // dans tauri.conf.json, sinon Tauri garde le depot pour lui) : pose la
+    // ou on le lache. Les photos deja dans le texte se deplacent par
+    // pointer events (voir makeImage), plus par glisser-deposer HTML5.
     this.root.addEventListener("dragover", (e) => {
-      if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
+      if (!e.dataTransfer?.types.includes("Files") || !this.images?.addFile) return;
       e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
+      e.dataTransfer.dropEffect = "copy";
     });
     this.root.addEventListener("drop", (e) => {
-      const id = e.dataTransfer?.getData(DRAG_TYPE);
-      if (!id) return;
+      if (!e.dataTransfer?.types.includes("Files") || !this.images?.addFile) return;
       e.preventDefault();
-      const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+      e.stopPropagation();
+      const files = imageFiles(e.dataTransfer);
+      if (!files.length) { toast("Seules les images se déposent dans la page (PNG, JPEG, WebP).", "warn"); return; }
       const range = document.caretRangeFromPoint(e.clientX, e.clientY);
-      if (!fig || !range || !this.root.contains(range.startContainer) || fig.contains(range.startContainer)) return;
-      range.insertNode(fig);
-      if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
-      this.emit();
+      void this.addFiles(files, range && this.root.contains(range.startContainer) ? range : null);
     });
+    // Photo selectionnee : un appui ailleurs la deselectionne.
+    document.addEventListener("pointerdown", this.onOutsideDown, { capture: true });
     // Copier, couper : le morceau part avec ses formules (qui ne sont pas
     // du texte selectionnable) dans un format interne, et en $LaTeX$ pour
     // les autres logiciels. Sans cela un Ctrl+X, Ctrl+V les perdait.
@@ -276,6 +308,17 @@ export class TextDoc {
       if (this.field) return;
       e.preventDefault();
       const dt = e.clipboardData;
+      // Capture d'ecran (Win+Maj+S) : une image seule, posee au curseur.
+      // Un copier depuis Word amene aussi une image du passage : le texte
+      // passe alors avant.
+      const files = imageFiles(dt);
+      if (files.length && this.images?.addFile && !dt?.getData(CLIP_TYPE) && !dt?.getData("text/plain").trim()) {
+        const sel = document.getSelection();
+        const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
+        if (r && this.root.contains(r.startContainer)) r.deleteContents();
+        void this.addFiles(files, r && this.root.contains(r.startContainer) ? r.cloneRange() : null);
+        return;
+      }
       const internal = dt?.getData(CLIP_TYPE) || docFromHtml(dt?.getData("text/html") ?? "");
       if (internal) { this.insertTokens(parseDoc(internal)); return; }
       this.insertPlain((dt?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n"));
@@ -517,62 +560,364 @@ export class TextDoc {
 
   /**
    * Photo posee dans le texte, comme une image "alignee sur le texte" de
-   * Word : elle occupe sa ligne, le texte passe au-dessus et en dessous. On
-   * la deplace en la glissant a la souris, on la retaille par son coin.
+   * Word : elle occupe sa ligne, le texte passe au-dessus et en dessous.
+   * Souris et stylet : glisser la deplace, un appui la selectionne. Doigt :
+   * un appui la selectionne, glisser une photo selectionnee la deplace (sinon
+   * le doigt fait defiler). Selectionnee : poignee de 44 px pour la
+   * retailler et mini-barre monter / descendre / supprimer.
    */
   private makeImage(id: string): HTMLElement {
     const info = this.images?.lookup(id) ?? null;
     const img = el("img", { alt: "photo", draggable: "false" });
     const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
     const fig = el("span", {
-      class: "doc-img", contenteditable: "false", draggable: "true",
+      class: "doc-img", contenteditable: "false",
       dataset: { id }, title: info?.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour déplacer",
     }, img, grip);
     fig.style.setProperty("--w", String(info?.width ?? 640));
     if (info) {
-      void info.url.then((u) => { img.src = u; }).catch(() => fig.classList.add("missing"));
+      // Image decodee avant de la dire prete : l'export PDF mesure les
+      // hauteurs apres (en Tauri, le src n'arrive qu'apres l'IPC).
+      this.imgReady.set(fig, info.url.then((u) => {
+        img.src = u;
+        return img.decode().catch(() => undefined);
+      }).catch(() => { fig.classList.add("missing"); }));
     } else {
       fig.classList.add("missing");
     }
-    fig.addEventListener("dragstart", (e) => {
-      if (!e.dataTransfer) return;
-      e.dataTransfer.setData(DRAG_TYPE, id);
-      e.dataTransfer.effectAllowed = "move";
-      fig.classList.add("dragging");
-    });
-    fig.addEventListener("dragend", () => fig.classList.remove("dragging"));
+    fig.addEventListener("pointerdown", (e) => this.onImageDown(e, fig));
 
-    // Retaille a la souris par le coin bas droit.
+    // Retaille par le coin bas droit, a la souris, au stylet ou au doigt.
     grip.addEventListener("pointerdown", (e) => {
-      if (e.pointerType !== "mouse" || e.button !== 0) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
-      fig.draggable = false;
       grip.setPointerCapture(e.pointerId);
       const k = Number(getComputedStyle(this.root).getPropertyValue("--k")) || 1;
       const startX = e.clientX;
       const startW = Number(fig.style.getPropertyValue("--w")) || 640;
       const move = (m: PointerEvent) => {
+        if (m.pointerId !== e.pointerId) return;
         const w = Math.round(Math.max(120, Math.min(772, startW + (m.clientX - startX) / k)));
         fig.style.setProperty("--w", String(w));
       };
-      const up = () => {
+      const up = (u: PointerEvent) => {
+        if (u.pointerId !== e.pointerId) return;
         grip.removeEventListener("pointermove", move);
         grip.removeEventListener("pointerup", up);
-        fig.draggable = true;
+        grip.removeEventListener("pointercancel", up);
         this.images?.resized(id, Number(fig.style.getPropertyValue("--w")));
       };
       grip.addEventListener("pointermove", move);
       grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
     });
     return fig;
   }
 
-  /** Pose une nouvelle photo au curseur, ou a la fin du texte. */
-  insertImage(id: string): void {
+  /** Chargement de chaque photo (src pose et image decodee). */
+  private imgReady = new WeakMap<HTMLElement, Promise<void>>();
+  /** Photo selectionnee (poignee visible, mini-barre). */
+  private selectedImg: HTMLElement | null = null;
+  /** Trait qui montre ou la photo deplacee va se poser. */
+  private dropMarker: HTMLElement | null = null;
+
+  /** Toutes les photos du texte chargees : a attendre avant de mesurer. */
+  imagesReady(): Promise<void> {
+    const all = Array.from(this.root.querySelectorAll<HTMLElement>(".doc-img"))
+      .map((f) => this.imgReady.get(f) ?? Promise.resolve());
+    return Promise.all(all).then(() => undefined);
+  }
+
+  /** Appui hors de la photo selectionnee : elle se deselectionne. */
+  private onOutsideDown = (e: PointerEvent): void => {
+    const fig = this.selectedImg;
+    if (fig && !fig.contains(e.target as Node)) this.selectImage(null);
+  };
+
+  /** Selectionne une photo (null : aucune). */
+  selectImage(fig: HTMLElement | null): void {
+    const old = this.selectedImg;
+    if (old === fig) return;
+    if (old) {
+      old.classList.remove("selected");
+      old.querySelector(".doc-img-bar")?.remove();
+    }
+    this.selectedImg = fig;
+    if (!fig) return;
+    fig.classList.add("selected");
+    // Le clavier suit : Suppr et Echap agissent sur la photo.
+    if (!this.root.contains(document.activeElement)) this.root.focus({ preventScroll: true });
+    const button = (label: string, title: string, run: () => void) => {
+      const b = el("button", { type: "button", title, "aria-label": title }, label);
+      b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); });
+      b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); run(); });
+      return b;
+    };
+    const id = fig.dataset.id ?? "";
+    const recrop = this.images?.recrop && this.images.lookup(id)?.original
+      ? button("⟲", "Redresser à nouveau (coins, noir et blanc)", () => { this.selectImage(null); this.images?.recrop?.(id); })
+      : null;
+    fig.append(el("span", { class: "doc-img-bar" },
+      button("↑", "Monter d'une ligne", () => this.moveImage(fig, -1)),
+      button("↓", "Descendre d'une ligne", () => this.moveImage(fig, 1)),
+      recrop,
+      button("✕", "Retirer la photo", () => this.removeImage(fig)),
+    ));
+  }
+
+  /**
+   * Appui sur une photo. Le doigt sur une photo non selectionnee : un appui
+   * la selectionne, un glisser fait defiler (PageView le rend au canvas).
+   * Sinon : glisser deplace la photo, au relachement elle se pose a
+   * l'endroit du texte sous le pointeur ; sans mouvement, elle est
+   * selectionnee.
+   */
+  private onImageDown(e: PointerEvent, fig: HTMLElement): void {
+    if ((e.target as Element).closest?.(".doc-img-bar, .doc-img-grip")) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (this.field || this.root.contentEditable === "false") return;
+    const x0 = e.clientX, y0 = e.clientY;
+    const far = (m: PointerEvent) => Math.hypot(m.clientX - x0, m.clientY - y0) > 8;
+    if (e.pointerType === "touch" && !fig.classList.contains("selected")) {
+      let moved = false;
+      const move = (m: PointerEvent) => { if (m.pointerId === e.pointerId && far(m)) moved = true; };
+      const up = (u: PointerEvent) => {
+        if (u.pointerId !== e.pointerId) return;
+        window.removeEventListener("pointermove", move, true);
+        window.removeEventListener("pointerup", up, true);
+        window.removeEventListener("pointercancel", up, true);
+        if (!moved && u.type === "pointerup") this.selectImage(fig);
+      };
+      window.addEventListener("pointermove", move, true);
+      window.addEventListener("pointerup", up, true);
+      window.addEventListener("pointercancel", up, true);
+      return;
+    }
+    e.preventDefault();
+    let moving = false;
+    let target: Range | null = null;
+    const move = (m: PointerEvent) => {
+      if (m.pointerId !== e.pointerId) return;
+      if (!moving) {
+        if (!far(m)) return;
+        moving = true;
+        this.selectImage(null);
+        fig.classList.add("dragging");
+        // Plus de cible sous le pointeur : le texte en dessous se lit.
+        fig.style.pointerEvents = "none";
+      }
+      target = this.dropRangeAt(m.clientX, m.clientY, fig);
+      this.showDropMarker(target);
+    };
+    const up = (u: PointerEvent) => {
+      if (u.pointerId !== e.pointerId) return;
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+      fig.style.pointerEvents = "";
+      fig.classList.remove("dragging");
+      this.showDropMarker(null);
+      if (!moving) { if (u.type === "pointerup") this.selectImage(fig); return; }
+      if (u.type !== "pointerup" || !target) return;
+      this.placeImage(fig, target);
+    };
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+  }
+
+  /**
+   * Position du texte sous le pointeur, hors de la photo deplacee, ramenee
+   * au debut ou a la fin de la ligne (le plus proche) : une photo occupe
+   * sa ligne, la poser au milieu d'un mot le couperait en deux.
+   */
+  private dropRangeAt(x: number, y: number, fig: HTMLElement): Range | null {
+    const r = document.caretRangeFromPoint(x, y);
+    if (!r || !this.root.contains(r.startContainer) || fig.contains(r.startContainer)) return null;
+    const units = lineUnits(this.root).filter((u) => u.node !== fig);
+    if (!units.length) { r.setStart(this.root, this.root.childNodes.length); r.collapse(true); return r; }
+    // Premier element a partir du point vise (recherche dichotomique).
+    const before = (u: LineUnit) => {
+      const p = document.createRange();
+      if (u.kind === "ch") p.setStart(u.node, u.off); else p.setStartBefore(u.node);
+      return p.compareBoundaryPoints(Range.START_TO_START, r) < 0;
+    };
+    let lo = 0, hi = units.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (before(units[mid])) lo = mid + 1; else hi = mid; }
+    const isBreak = (u: LineUnit) => u.kind === "br" || u.kind === "img" || (u.kind === "ch" && u.ch === "\n");
+    let s0 = lo - 1;
+    while (s0 >= 0 && !isBreak(units[s0])) s0--;
+    let e0 = lo;
+    while (e0 < units.length && !isBreak(units[e0])) e0++;
+    const out = document.createRange();
+    if (lo - (s0 + 1) <= e0 - lo) {
+      if (s0 < 0) out.setStart(this.root, 0); else setAfter(out, units[s0]);
+      out.collapse(true);
+      liftToRoot(out, this.root, -1);
+    } else {
+      if (e0 >= units.length) setAfter(out, units[units.length - 1]);
+      else { const u = units[e0]; if (u.kind === "ch") out.setStart(u.node, u.off); else out.setStartBefore(u.node); }
+      out.collapse(true);
+      liftToRoot(out, this.root, 1);
+    }
+    return out;
+  }
+
+  private showDropMarker(r: Range | null): void {
+    if (!r) { this.dropMarker?.remove(); this.dropMarker = null; return; }
+    const rect = caretRect(r, this.root);
+    if (!rect) return;
+    if (!this.dropMarker) {
+      this.dropMarker = el("div", { class: "doc-img-drop" });
+      document.body.append(this.dropMarker);
+    }
+    Object.assign(this.dropMarker.style, {
+      left: `${Math.round(rect.left) - 1}px`, top: `${Math.round(rect.top)}px`,
+      height: `${Math.max(16, Math.round(rect.height))}px`,
+    });
+  }
+
+  /** Pose la photo a un endroit du texte. */
+  private placeImage(fig: HTMLElement, at: Range): void {
+    const after = fig.nextSibling;
+    at.collapse(true);
+    at.insertNode(fig);
+    // L'ancre laissee derriere elle part si elle n'a plus rien a ancrer.
+    if (after?.nodeType === Node.TEXT_NODE && after.textContent === "\u200b" && after !== fig.nextSibling) {
+      after.remove();
+    }
+    if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
+    this.emit();
+  }
+
+  /**
+   * Monte (-1) ou descend (+1) la photo d'une ligne : elle passe avant la
+   * ligne du dessus, ou apres celle du dessous. Une ligne finit par un "\n"
+   * (Entree tape un saut de ligne dans le texte), un <br> (texte relu) ou
+   * une photo ; une photo voisine compte pour une ligne.
+   */
+  private moveImage(fig: HTMLElement, dir: -1 | 1): void {
+    const units = lineUnits(this.root);
+    const i = units.findIndex((u) => u.node === fig);
+    if (i < 0) return;
+    const isBreak = (u: LineUnit) => u.kind === "br" || u.kind === "img" || (u.kind === "ch" && u.ch === "\n");
+    const r = document.createRange();
+    if (dir < 0) {
+      let j = i - 1;
+      if (j < 0) return;
+      if (units[j].kind === "img") {
+        r.setStartBefore(units[j].node);
+      } else {
+        // Le saut qui termine la ligne du dessus n'est pas une ligne.
+        if (isBreak(units[j])) j--;
+        while (j >= 0 && !isBreak(units[j])) j--;
+        if (j < 0) r.setStart(this.root, 0);
+        else setAfter(r, units[j]);
+      }
+    } else {
+      let j = i + 1;
+      if (j >= units.length) return;
+      while (j < units.length && !isBreak(units[j])) j++;
+      if (j >= units.length) setAfter(r, units[units.length - 1]);
+      else setAfter(r, units[j]);
+    }
+    // Jamais dans un segment colore ou gras : la photo reste au premier niveau.
+    liftToRoot(r, this.root, dir);
+    r.insertNode(fig);
+    this.afterMove(fig);
+  }
+
+  private afterMove(fig: HTMLElement): void {
+    // Ancres orphelines (deux ancres de suite, ancre en tete) : retirees.
+    for (const c of Array.from(this.root.childNodes)) {
+      if (c.nodeType !== Node.TEXT_NODE || c.textContent !== "\u200b") continue;
+      const prev = c.previousSibling;
+      if (!prev || (prev.nodeType === Node.TEXT_NODE && prev.textContent === "\u200b")) c.remove();
+    }
+    if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
+    fig.scrollIntoView({ block: "nearest" });
+    this.emit();
+  }
+
+  /** Retire la photo du texte, avec « Annuler » (le fichier reste dans assets/). */
+  private removeImage(fig: HTMLElement): void {
+    this.selectImage(null);
+    const parent = fig.parentNode;
+    if (!parent) return;
+    const next = fig.nextSibling;
+    const anchorNode = next?.nodeType === Node.TEXT_NODE && next.textContent === "\u200b" ? next : null;
+    const ref = (anchorNode ?? fig).nextSibling;
+    fig.remove();
+    anchorNode?.remove();
+    this.emit();
+    toast("Photo retirée", "info", 8000, {
+      label: "Annuler",
+      run: () => {
+        if (!this.root.isConnected) return;
+        if (ref && ref.parentNode === parent) parent.insertBefore(fig, ref);
+        else this.root.append(fig);
+        if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
+        this.emit();
+      },
+    });
+  }
+
+  /**
+   * Images collees ou deposees : chacune enregistree puis posee a la suite
+   * de la precedente, a l'endroit vise (ou au curseur).
+   */
+  private async addFiles(files: File[], at: Range | null): Promise<void> {
+    let range = at;
+    let last: HTMLElement | null = null;
+    for (const f of files) {
+      const id = await this.images?.addFile?.(f);
+      if (!id || !this.root.isConnected) continue;
+      last = this.insertImage(id, range);
+      const r = document.createRange();
+      r.setStartAfter(last.nextSibling ?? last);
+      range = r;
+    }
+    // Comme dans Word : la frappe reprend sous l'image posee.
+    if (last && this.root.contains(document.activeElement ?? null)) {
+      const next = last.nextSibling;
+      const sel = document.getSelection();
+      const r = document.createRange();
+      if (next?.nodeType === Node.TEXT_NODE) r.setStart(next, (next.textContent ?? "").startsWith("\u200b") ? 1 : 0);
+      else r.setStartAfter(last);
+      r.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(r);
+    }
+  }
+
+  /**
+   * Bloc d'une photo modifie (OCR arrive en fond, photo redressee a
+   * nouveau) : image et infobulle a jour.
+   */
+  refreshImage(id: string): void {
+    const info = this.images?.lookup(id);
+    const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+    if (!fig || !info) return;
+    fig.title = info.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour déplacer";
+    const img = fig.querySelector("img");
+    if (!img) return;
+    this.imgReady.set(fig, info.url.then((u) => {
+      if (img.src === u) return;
+      img.src = u;
+      fig.classList.remove("missing");
+      return img.decode().catch(() => undefined);
+    }).catch(() => { fig.classList.add("missing"); }));
+  }
+
+  /**
+   * Pose une nouvelle photo au curseur (ou a `at`), sinon a la fin du
+   * texte. Rend la photo posee.
+   */
+  insertImage(id: string, at?: Range | null): HTMLElement {
     if (this.field) this.commit(null);
     const fig = this.makeImage(id);
-    const r = this.savedRange;
+    const r = at ?? this.savedRange;
     if (r && this.root.contains(r.startContainer)) {
       r.collapse(true);
       r.insertNode(fig);
@@ -581,6 +926,7 @@ export class TextDoc {
     }
     if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
     this.emit();
+    return fig;
   }
 
   /**
@@ -1325,6 +1671,14 @@ export class TextDoc {
 
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
+    // Photo selectionnee : Suppr la retire, Echap la deselectionne, toute
+    // autre touche rend la main au texte.
+    if (this.selectedImg && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
+      const fig = this.selectedImg;
+      if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); this.removeImage(fig); return; }
+      this.selectImage(null);
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return; }
+    }
     // Mise en forme qu'on vient de faire : Ctrl+Z ou Retour arriere l'annule.
     if (this.lastAuto) {
       const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
@@ -1440,6 +1794,48 @@ function colorAt(node: Node, root: HTMLElement): ColorKey | null {
 }
 
 /** Point d'ancrage invisible : le curseur a toujours un texte ou se poser. */
+/** Element du texte vu ligne a ligne : un caractere, un saut, une photo, une formule. */
+type LineUnit =
+  | { kind: "ch"; node: Text; off: number; ch: string }
+  | { kind: "br" | "img" | "atom"; node: Node };
+
+/** Le texte a plat, dans l'ordre, ancres (\u200b) ignorees. */
+function lineUnits(root: HTMLElement): LineUnit[] {
+  const out: LineUnit[] = [];
+  const walk = (node: Node) => {
+    for (const c of Array.from(node.childNodes)) {
+      if (c.nodeType === Node.TEXT_NODE) {
+        const t = c.textContent ?? "";
+        for (let k = 0; k < t.length; k++) if (t[k] !== "\u200b") out.push({ kind: "ch", node: c as Text, off: k, ch: t[k] });
+      } else if (c.nodeName === "BR") {
+        out.push({ kind: "br", node: c });
+      } else if (c instanceof HTMLElement) {
+        if (c.classList.contains("doc-img")) out.push({ kind: "img", node: c });
+        else if (c.classList.contains("eq") || c.contentEditable === "false") out.push({ kind: "atom", node: c });
+        else walk(c);
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
+function setAfter(r: Range, u: LineUnit): void {
+  if (u.kind === "ch") r.setStart(u.node, u.off + 1);
+  else r.setStartAfter(u.node);
+  r.collapse(true);
+}
+
+/** Ramene un point d'insertion au premier niveau du texte (hors <b>, <i>, couleur). */
+function liftToRoot(r: Range, root: HTMLElement, dir: -1 | 1): void {
+  let n: Node = r.startContainer;
+  if (n === root || (n.nodeType === Node.TEXT_NODE && n.parentNode === root)) return;
+  while (n.parentNode && n.parentNode !== root) n = n.parentNode;
+  if (dir < 0) r.setStartBefore(n);
+  else r.setStartAfter(n);
+  r.collapse(true);
+}
+
 function anchor(): Text {
   return document.createTextNode("\u200b");
 }

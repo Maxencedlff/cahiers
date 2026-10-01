@@ -1,3 +1,5 @@
+import { DataUrlCache } from "../image/cache";
+
 /**
  * Abstraction du disque. L'application LIT l'arborescence, elle ne la possede
  * pas (section 1) : aucun index cache ne fait autorite, tout part d'un listing.
@@ -67,6 +69,8 @@ type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
 export class TauriFs implements FsAdapter {
   readonly kind = "tauri" as const;
+  /** Images deja lues : un rendu de page ne relit plus chaque photo par IPC. */
+  private images = new DataUrlCache();
   constructor(private invoke: InvokeFn) {}
 
   listDirs(rel: string) { return this.invoke<string[]>("list_dirs", { rel }); }
@@ -76,19 +80,32 @@ export class TauriFs implements FsAdapter {
   writeText(rel: string, content: string) { return this.invoke<void>("write_text", { rel, content }); }
   exists(rel: string) { return this.invoke<boolean>("path_exists", { rel }); }
   mkdir(rel: string) { return this.invoke<void>("make_dir", { rel }); }
-  remove(rel: string) { return this.invoke<void>("remove_path", { rel }); }
-  rename(from: string, to: string) { return this.invoke<void>("rename_path", { from, to }); }
+  remove(rel: string) {
+    this.images.forget(rel);
+    return this.invoke<void>("remove_path", { rel });
+  }
+  rename(from: string, to: string) {
+    this.images.forget(from);
+    this.images.forget(to);
+    return this.invoke<void>("rename_path", { from, to });
+  }
   rootLabel() { return this.invoke<string>("root_path"); }
   reveal(rel: string) { return this.invoke<void>("reveal_path", { rel }); }
 
   async writeDataUrl(rel: string, dataUrl: string) {
     const { base64 } = splitDataUrl(dataUrl);
+    this.images.delete(rel);
     await this.invoke<void>("write_binary", { rel, base64 });
+    this.images.set(rel, `data:${mimeOf(rel)};base64,${base64}`);
   }
 
   async readDataUrl(rel: string) {
+    const hit = this.images.get(rel);
+    if (hit) return hit;
     const base64 = await this.invoke<string>("read_binary", { rel });
-    return `data:${mimeOf(rel)};base64,${base64}`;
+    const url = `data:${mimeOf(rel)};base64,${base64}`;
+    this.images.set(rel, url);
+    return url;
   }
 }
 

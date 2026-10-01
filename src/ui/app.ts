@@ -26,6 +26,7 @@ import {
   MONTHLY_QUOTA, bumpUsage, currentUsage, shouldWarn, usageLabel, type Usage,
 } from "../core/ink/usage";
 import type { Block, NotebookMeta, Stroke } from "../core/types";
+import { isPhotoImportKey, PHOTO_IMPORT_KEYS } from "../core/image/photo";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
 import { showShortcuts } from "./help";
@@ -198,6 +199,17 @@ export class App {
     this.queue.subscribe((s) => { this.queueState = s; this.paintStatus(); });
 
     this.root.append(this.tabbar, this.main, this.statusbar);
+    // Glisser-deposer HTML5 rendu au WebView (dragDropEnabled: false) : un
+    // fichier lache hors d'une page ouvrirait le fichier a la place de
+    // l'appli. Seule la page (TextDoc) accepte un depot de fichier.
+    for (const type of ["dragover", "drop"] as const) {
+      window.addEventListener(type, (e) => {
+        if (!e.dataTransfer?.types.includes("Files") || e.defaultPrevented) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "none";
+        if (type === "drop") toast("Déposez l'image sur une page ouverte.", "warn");
+      });
+    }
     document.addEventListener("keydown", (e) => this.onKey(e));
     // Fenetre retaillee (moitie d'ecran, portable tourne) : la calculatrice
     // passe de la colonne a la fenetre flottante, ou l'inverse.
@@ -612,6 +624,7 @@ export class App {
       onTrashed: (entry) => this.offerRestore(entry),
       rememberPage: (nb, d, n) => this.positions.record(nb, d, n),
       onConflictsChanged: () => this.paintConflictBadges(),
+      ...(this.ocr ? { ocr: this.ocr } : {}),
     }, tab.notebook, tab.divider);
     await view.setNotice(this.noticeFor(tab.notebook));
     // Une vue quittee en echec sur ce meme intercalaire : la nouvelle reprend
@@ -826,12 +839,15 @@ export class App {
     };
     pane.addEventListener("dragover", (e) => {
       e.preventDefault();
+      // Fichier venu de l'Explorateur : c'est la page qui le prend, pas le split.
+      if (e.dataTransfer?.types.includes("Files")) return;
       pane.classList.toggle("drop-target", rightHalf(e));
     });
     pane.addEventListener("dragleave", () => pane.classList.remove("drop-target"));
     pane.addEventListener("drop", (e) => {
       e.preventDefault();
       pane.classList.remove("drop-target");
+      if (e.dataTransfer?.types.includes("Files")) { toast("Déposez l'image sur la feuille.", "warn"); return; }
       const id = e.dataTransfer?.getData("text/plain");
       if (!id || !this.tabs.some((t) => t.id === id)) return;
       if (rightHalf(e) && id !== this.activeId) {
@@ -1402,7 +1418,7 @@ export class App {
       const mode = view()?.mode ?? "pages";
       const calcShown = !!this.calculator?.isVisible;
       panel.replaceChildren(
-        action("Photo du tableau", "Photo redressée et lue, posée dans le texte", () => void this.importImage()),
+        action("Photo du tableau", `Photos redressées et lues, posées dans le texte (${PHOTO_IMPORT_KEYS})`, () => void this.importImage()),
         action(calcShown ? "Fermer la calculatrice" : "Calculatrice", titleOf("Calculatrice", "calc"),
           () => void this.toggleCalculator()),
         action("Insérer une page ici", titleOf("Insérer une page après la page courante", "insertPage"),
@@ -1462,18 +1478,18 @@ export class App {
   }
 
   /**
-   * Import d'une photo prise au telephone : recadrage, redressement, OCR.
-   * Sans OCR, une photo serait un trou noir dans la recherche (section 6).
+   * Import de photos prises au telephone (une ou plusieurs) : recadrage,
+   * redressement, OCR, un dialogue par photo. Chaque photo validee est
+   * posee aussitot dans la page du panneau vise.
    */
   private async importImage(): Promise<void> {
     const view = this.focusedTab()?.view;
     if (!view) return;
-    const { pickImage, cropDialog } = await import("./image-import");
-    const img = await pickImage();
-    if (!img) return;
-    const result = await cropDialog(img, this.ocr ? { ocr: this.ocr } : {});
-    if (!result) return;
-    await view.addImageBlock(result.dataUrl, result.width, result.height, result.ocr);
+    const { importPhotos } = await import("./image-import");
+    await importPhotos({
+      ...(this.ocr ? { ocr: this.ocr } : {}),
+      insert: (r) => view.addImageBlock(r),
+    });
   }
 
   private paintToolbar(): void {
@@ -1948,6 +1964,8 @@ export class App {
   /** Raccourcis Alt. Renvoie true si la touche a ete prise. */
   private onAltKey(e: KeyboardEvent, inDoc: boolean): boolean {
     const view = this.focusedTab()?.view;
+    // Alt+Maj+P : photos du tableau (Alt+P seul = modele Puissance).
+    if (isPhotoImportKey(e)) { void this.importImage(); return true; }
     // Alt+= : nouvelle formule, comme l'equation de Word.
     if (e.key === "=" && !e.shiftKey) {
       if (!inDoc) view?.focusText();

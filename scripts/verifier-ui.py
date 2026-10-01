@@ -176,8 +176,14 @@ def main() -> int:
         verifier("résultat" in page.inner_text(".screen-inner"), "la recherche trouve le texte saisi")
         page.screenshot(path=OUT / "09-recherche.png")
 
-        # Split, puis retour sur l'onglet mis en panneau droit.
+        # « Retour » depuis la recherche revient a l'ecran d'origine (le
+        # cahier), puis le menu ouvre une autre matiere.
         page.get_by_role("button", name="Retour").click()
+        page.wait_for_timeout(700)
+        verifier(page.locator(".side-tools").count() > 0, "« Retour » depuis la recherche revient au cahier")
+
+        # Split, puis retour sur l'onglet mis en panneau droit.
+        page.get_by_role("button", name="Menu").click()
         page.wait_for_timeout(700)
         page.get_by_text("Elec", exact=True).first.click()
         page.wait_for_timeout(800)
@@ -194,10 +200,10 @@ def main() -> int:
             "revenir sur l'onglet du panneau droit ne casse pas la vue",
         )
 
-        # Sonde stylet.
-        page.get_by_role("button", name="Menu").click()
-        page.wait_for_timeout(700)
-        page.get_by_role("button", name="Sonde stylet").click()
+        # Sonde stylet (menu « ⋯ » du cahier).
+        page.get_by_role("button", name="Plus d'actions").first.click()
+        page.wait_for_timeout(400)
+        page.get_by_role("menuitem", name="Sonde stylet (diagnostic)").click()
         page.wait_for_timeout(400)
         zone = page.locator(".probe-canvas").bounding_box()
         page.mouse.move(zone["x"] + 120, zone["y"] + 120)

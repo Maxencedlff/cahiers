@@ -142,7 +142,24 @@ export interface ImageBlock extends BlockBase {
    * (sans rect) : elle suit alors le texte, comme une image dans Word.
    */
   width?: number;
+  /**
+   * Photo d'origine, avant redressement (D9) : JPEG dans assets/. Jamais
+   * jetee, dans l'esprit de « l'encre brute n'est jamais jetee » : des coins
+   * mal places ou un noir et blanc qui bouche tout se refont depuis elle.
+   * Optionnel : les photos importees avant le lot 10 n'en ont pas.
+   */
+  original?: string;
+  /**
+   * Coins du redressement dans `original`, en pixels de ce fichier :
+   * haut-gauche, haut-droit, bas-droit, bas-gauche.
+   */
+  quad?: [ImagePoint, ImagePoint, ImagePoint, ImagePoint];
+  /** Noir et blanc applique au redressement. Absent = inconnu (ancien bloc). */
+  bw?: boolean;
 }
+
+/** Point d'une photo, en pixels. */
+export interface ImagePoint { x: number; y: number }
 
 export interface PdfBlock extends BlockBase {
   type: "pdf";

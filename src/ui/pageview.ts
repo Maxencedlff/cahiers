@@ -2,7 +2,7 @@ import { el, askText, toast, confirmDialog, pick } from "./dom";
 import { InkSurface, PAGE_W, PAGE_H } from "./canvas";
 import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
-import { strokeBounds, unionBounds } from "../core/ink/stroke";
+import { cachedBounds, strokeBounds, unionBounds } from "../core/ink/stroke";
 import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock, ToolKind,
@@ -25,6 +25,9 @@ import { absorbTextBoxes } from "../core/text/doc";
 import { flagContext, fold, parseQuery } from "../core/text/find";
 import { DEFAULT_FLAG_NOTE } from "../core/storage/search";
 import { PageHistory, applyStrokeCommand, restoreBlocks } from "../core/history";
+import { planPrint, type Span } from "../core/print";
+import type { ImportResult } from "./image-import";
+import { FINAL_MAX, JPEG_QUALITY, fitRatio, unreadableMessage } from "../core/image/photo";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -71,6 +74,8 @@ export interface PageViewHost {
   rememberPage?: (notebook: string, divider: string, n: number) => void;
   /** Une copie de conflit OneDrive est partie ou revenue : pastilles a refaire. */
   onConflictsChanged?: () => void;
+  /** OCR de la plateforme (Windows), pour une image collee ou deposee. */
+  ocr?: (dataUrl: string) => Promise<string>;
 }
 
 /**
@@ -698,14 +703,17 @@ export class PageView {
           url: this.host.repo.readAsset(this.notebook, this.divider, b.src),
           width: b.width ?? Math.min(PAGE_W - 128, 640),
           ocr: b.ocr,
+          original: !!b.original,
         };
       },
+      recrop: (id) => void this.recropImage(loaded, id),
       resized: (id, width) => {
         const b = imageOf(id);
         if (!b) return;
         b.width = width;
         this.queueSave(loaded);
       },
+      addFile: (file) => this.addImageFile(loaded, file),
     });
     const readOnly = isFutureVersion(page) || this.readOnly || !!copy;
     const sheet = el("div", { class: `sheet${readOnly ? " readonly" : ""}` }, canvas, doc.root, overlay);
@@ -810,6 +818,17 @@ export class PageView {
    */
   private routePointers(loaded: LoadedPage): void {
     loaded.doc.root.addEventListener("pointerdown", (e) => {
+      // Photo dans le texte : elle se selectionne, se deplace et se retaille
+      // au stylet comme a la souris (TextDoc). Seul le doigt sur une photo
+      // non selectionnee fait encore defiler la page.
+      const fig = (e.target as Element).closest?.(".doc-img");
+      if (fig) {
+        if (e.pointerType === "touch" && !fig.classList.contains("selected")
+            && this.host.touchRole() === "navigate" && !(e.target as Element).closest(".doc-img-bar, .doc-img-grip")) {
+          loaded.surface?.forwardDown(e);
+        }
+        return;
+      }
       const tool = this.host.getTool();
       const toInk = e.pointerType === "pen" || e.pointerType === "touch"
         || (e.pointerType === "mouse" && e.button === 0 && tool !== "pen");
@@ -856,7 +875,7 @@ export class PageView {
    * partie allongee etait ecrasee sur le bord bas (y = PAGE_H). `force`
    * redimensionne le canvas meme sans changement (fenetre retaillee).
    */
-  private fitSheet(loaded: LoadedPage, force = false): void {
+  private fitSheet(loaded: LoadedPage, force = false, density?: number): void {
     const width = loaded.sheet.clientWidth || PAGE_W;
     const k = width / PAGE_W;
     // Le texte couvre au moins toute la feuille (min-height: 100 %) : mesure
@@ -870,7 +889,7 @@ export class PageView {
     root.style.minHeight = minH;
     const h = sheetHeight(loaded.page, textPx / k);
     loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
-    if (force) loaded.surface?.layout(width, h);
+    if (force) loaded.surface?.layout(width, h, density);
     else loaded.surface?.fit(width, h);
   }
 
@@ -1777,31 +1796,139 @@ export class PageView {
     this.queueSave(loaded);
   }
 
-  /** Insere une photo redressee : le fichier part dans assets/. */
-  async addImageBlock(
-    dataUrl: string, width: number, _height: number, ocr: string | null,
-  ): Promise<void> {
+  /**
+   * Insere une photo redressee : l'image et son original partent dans
+   * assets/ (savePhoto, bon format : PNG en noir et blanc, JPEG en couleur).
+   * Rend false si rien n'a ete pose (lecture seule, ecriture refusee) :
+   * l'import de plusieurs photos s'arrete alors.
+   */
+  async addImageBlock(result: ImportResult): Promise<boolean> {
     const loaded = this.activePage();
-    if (!loaded) return;
-    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
+    if (!loaded) return false;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
     const id = uuid();
-    const name = `${id}.png`;
-    let src: string;
+    const { savePhoto } = await import("./image-import");
+    let fields;
     try {
-      src = await this.host.repo.writeAsset(this.notebook, this.divider, name, dataUrl);
+      fields = await savePhoto(result, id, (name, url) => this.host.repo.writeAsset(this.notebook, this.divider, name, url));
     } catch (e) {
       toast(`Image non enregistrée : ${(e as Error).message}`, "err", 6000);
-      return;
+      return false;
     }
     // Posee dans le texte, au curseur : le texte passe au-dessus et en
     // dessous, comme une image dans Word.
     loaded.page.blocks.push({
       // Une petite image n'est pas etiree.
-      id, type: "image", src, ocr, width: Math.max(120, Math.min(PAGE_W - 128, 640, width)),
+      id, type: "image", ...fields, width: Math.max(120, Math.min(PAGE_W - 128, 640, result.width)),
     });
     loaded.doc.insertImage(id);
     this.fitSheet(loaded);
-    toast(ocr ? "Photo insérée, texte extrait pour la recherche" : "Photo insérée");
+    toast(result.ocr ? "Photo insérée, texte extrait pour la recherche" : "Photo insérée");
+    return true;
+  }
+
+  /**
+   * « Redresser a nouveau » (mini-barre de la photo) : le dialogue rouvre
+   * l'original avec ses coins. La nouvelle image prend un nouveau nom,
+   * l'ancienne reste dans assets/ : « Annuler » remet l'ancien bloc.
+   */
+  private async recropImage(loaded: LoadedPage, id: string): Promise<void> {
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
+    const block = loaded.page.blocks.find((b): b is ImageBlock => b.type === "image" && b.id === id);
+    if (!block) return;
+    const { recropPhoto, savePhoto } = await import("./image-import");
+    const r = await recropPhoto(block, (src) => this.host.repo.readAsset(this.notebook, this.divider, src),
+      this.host.ocr ? { ocr: this.host.ocr } : {});
+    if (!r) return;
+    let fields;
+    try {
+      fields = await savePhoto(r, uuid(), (name, url) => this.host.repo.writeAsset(this.notebook, this.divider, name, url),
+        block.original);
+    } catch (e) {
+      toast(`Image non enregistrée : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    const before = { src: block.src, ocr: block.ocr, bw: block.bw, quad: block.quad, original: block.original };
+    const apply = (f: typeof before) => {
+      // La vue a pu etre rendue a nouveau : on vise la page en memoire.
+      const now = this.list.find((p) => p.page.id === loaded.page.id) ?? loaded;
+      const b = now.page.blocks.find((x): x is ImageBlock => x.type === "image" && x.id === id);
+      if (!b || now.readOnly) return;
+      b.src = f.src; b.ocr = f.ocr;
+      if (f.bw === undefined) delete b.bw; else b.bw = f.bw;
+      if (f.quad === undefined) delete b.quad; else b.quad = f.quad;
+      if (f.original === undefined) delete b.original; else b.original = f.original;
+      now.doc.refreshImage(id);
+      this.queueSave(now);
+    };
+    apply({ src: fields.src, ocr: fields.ocr, bw: fields.bw, quad: fields.quad ?? before.quad, original: fields.original ?? before.original });
+    toast("Photo redressée à nouveau", "info", 8000, { label: "Annuler", run: () => apply(before) });
+  }
+
+  /**
+   * Image collee (capture Win+Maj+S) ou deposee depuis l'Explorateur :
+   * enregistree telle quelle, sans recadrage ni noir et blanc (une capture
+   * est deja droite). Le bloc est cree ici, TextDoc la pose dans le texte.
+   * L'OCR part en fond et complete le bloc a son retour.
+   */
+  private async addImageFile(loaded: LoadedPage, file: File): Promise<string | null> {
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return null; }
+    const label = file.name || "image collée";
+    const dataUrl = await readAsDataUrl(file).catch(() => null);
+    const img = dataUrl ? await loadImage(dataUrl) : null;
+    if (!dataUrl || !img) {
+      toast(unreadableMessage(label, file.type), "err", 9000);
+      return null;
+    }
+    // Capture deja droite : ni recadrage ni noir et blanc. Elle passe par
+    // savePhoto comme une photo en couleur (JPEG, 1600 px au plus) : un
+    // seul format sur le disque, quel que soit le fichier depose (BMP, GIF).
+    const k = fitRatio(img.naturalWidth, img.naturalHeight, FINAL_MAX);
+    const w = Math.max(1, Math.round(img.naturalWidth * k));
+    const h = Math.max(1, Math.round(img.naturalHeight * k));
+    const c = el("canvas", { width: String(w), height: String(h) });
+    const cx = c.getContext("2d")!;
+    // Fond blanc : une capture a fond transparent sortirait noire en JPEG.
+    cx.fillStyle = "#fff";
+    cx.fillRect(0, 0, w, h);
+    cx.drawImage(img, 0, 0, w, h);
+    const jpeg = c.toDataURL("image/jpeg", JPEG_QUALITY);
+    c.width = c.height = 0;
+    const id = uuid();
+    const { savePhoto } = await import("./image-import");
+    let fields;
+    try {
+      fields = await savePhoto({
+        dataUrl: jpeg, ext: "jpg", width: w, height: h, ocr: null, bw: false, original: null,
+        quad: [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }],
+      }, id, (name, url) => this.host.repo.writeAsset(this.notebook, this.divider, name, url));
+    } catch (e) {
+      toast(`Image non enregistrée : ${(e as Error).message}`, "err", 6000);
+      return null;
+    }
+    // Largeur a l'ecran (pixels physiques ramenes en px CSS ~ unites de
+    // page) : une petite capture n'est pas etiree.
+    const width = img.naturalWidth / (window.devicePixelRatio || 1);
+    loaded.page.blocks.push({
+      id, type: "image", ...fields, width: Math.round(Math.max(120, Math.min(PAGE_W - 128, 640, width))),
+    });
+    const pageId = loaded.page.id;
+    const ocr = this.host.ocr;
+    if (ocr) {
+      void ocr(jpeg).then((text) => {
+        const t = text.trim();
+        if (!t) return;
+        // La page a pu etre rendue a nouveau entre-temps : on vise celle en vue.
+        const now = this.list.find((p) => p.page.id === pageId);
+        const b = now?.page.blocks.find((x): x is ImageBlock => x.type === "image" && x.id === id);
+        if (!now || !b || now.readOnly) return;
+        b.ocr = t;
+        now.doc.refreshImage(id);
+        this.queueSave(now);
+      }).catch(() => undefined);
+    }
+    toast("Image insérée");
+    return id;
   }
 
   /** Ajoute un bloc de texte et met le curseur dedans : on tape aussitot. */
@@ -1989,6 +2116,8 @@ export class PageView {
     const prevTitle = document.title;
     const host = el("div", { class: "print-host" });
     document.body.append(host);
+    /** Tranches d'encre a liberer apres l'impression. */
+    const urls: string[] = [];
     try {
       await this.flush();
       // Poser la vue hors ecran AVANT le rendu : les feuilles se calent
@@ -2001,17 +2130,20 @@ export class PageView {
       // Passer en media print change la largeur de la vue : sans cela les
       // feuilles se recalculent a 900 px au milieu de l'impression.
       this.resizeObserver.disconnect();
-      // Les photos doivent etre chargees avant l'apercu, sinon trous blancs.
+      // Les photos doivent etre chargees avant la mesure, sinon trous blancs
+      // et hauteurs fausses (en Tauri, le src arrive apres l'IPC).
+      await Promise.all(this.list.map((p) => p.doc.imagesReady()));
       await Promise.all([...this.root.querySelectorAll("img")].map((img) =>
-        img.decode().catch(() => undefined)));
+        img.src ? img.decode().catch(() => undefined) : undefined));
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      // Hauteur utile d'une A4 a 96 dpi : 297 mm moins 10 mm en haut et une
-      // marge de securite en bas. Au-dela, la page est reduite pour tenir.
-      const usable = 1000;
+      if (this.list.length > 3) toast("Préparation du PDF…", "info", 2000);
+      // Chaque page devient une ou plusieurs feuilles A4 imprimees a part
+      // (clones), l'encre rendue en densite 3 et decoupee par feuille.
       for (const p of this.list) {
-        const h = p.wrap.offsetHeight;
-        if (h > usable) p.wrap.style.zoom = String(usable / h);
+        const sheets = await this.printSheets(p, urls);
+        p.wrap.after(...sheets);
       }
+      for (const p of this.list) p.wrap.classList.add("print-src");
       document.title = scope === "current"
         ? `${this.notebook} - ${this.divider} p. ${prevPage}`
         : `${this.notebook} - ${this.divider}`;
@@ -2025,6 +2157,7 @@ export class PageView {
       document.title = prevTitle;
       parent?.insertBefore(this.root, nextSibling);
       host.remove();
+      for (const u of urls) URL.revokeObjectURL(u);
       this.viewMode = prevMode;
       this.current = prevPage;
       this.exporting = false;
@@ -2033,6 +2166,96 @@ export class PageView {
         this.list.find((p) => p.number === prevPage)?.wrap.scrollIntoView({ block: "start" });
       }
     }
+  }
+
+  /**
+   * Feuilles A4 d'une page pour l'impression. La page est decoupee entre
+   * deux lignes (core/print.ts) ; chaque feuille montre sa tranche : un
+   * clone du texte et des blocs decale vers le haut, et la tranche d'encre
+   * correspondante, rendue en densite 3 (traits nets a l'impression).
+   */
+  private async printSheets(p: LoadedPage, urls: string[]): Promise<HTMLElement[]> {
+    this.fitSheet(p, true);
+    const sheet = p.sheet;
+    const H = sheet.offsetHeight;
+    const numEl = p.wrap.querySelector<HTMLElement>(".page-num");
+    const numH = numEl?.offsetHeight ?? 26;
+    const label = numEl?.textContent ?? "";
+    const top = sheet.getBoundingClientRect().top;
+    const span = (r: DOMRect): Span => ({ top: r.top - top, bottom: r.bottom - top });
+    const hard: Span[] = [];
+    const walker = document.createTreeWalker(p.doc.root, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (!(n.textContent ?? "").trim()) continue;
+      range.selectNodeContents(n);
+      for (const r of range.getClientRects()) hard.push(span(r));
+    }
+    p.doc.root.querySelectorAll(".eq, .doc-img").forEach((e) => hard.push(span(e.getBoundingClientRect())));
+    for (const c of Array.from(p.overlay.children)) hard.push(span(c.getBoundingClientRect()));
+    const k = (sheet.clientWidth || PAGE_W) / PAGE_W;
+    const soft: Span[] = [];
+    for (const b of p.page.blocks) {
+      if (b.type !== "ink" && b.type !== "math") continue;
+      for (const st of b.strokes) {
+        const bb = cachedBounds(st, st.width);
+        soft.push({ top: bb.y * k, bottom: (bb.y + bb.h) * k });
+      }
+    }
+    const plan = planPrint(H, numH, hard, soft);
+
+    // Encre en densite 3, le temps de copier les tranches, puis retour a
+    // la densite de l'ecran (une page en densite 3 pese ~30 Mo).
+    const canvas = sheet.querySelector("canvas");
+    this.fitSheet(p, true, 3);
+    const slices: Blob[] = [];
+    if (canvas && canvas.height) {
+      const ratio = canvas.height / H;
+      const tmp = el("canvas");
+      const ctx = tmp.getContext("2d")!;
+      for (let i = 0; i + 1 < plan.cuts.length; i++) {
+        const a = plan.cuts[i], b = plan.cuts[i + 1];
+        tmp.width = canvas.width;
+        tmp.height = Math.max(1, Math.round((b - a) * ratio));
+        ctx.drawImage(canvas, 0, Math.round(a * ratio), canvas.width, tmp.height, 0, 0, tmp.width, tmp.height);
+        const blob = await new Promise<Blob | null>((r) => tmp.toBlob(r, "image/png"));
+        if (blob) slices.push(blob);
+      }
+      tmp.width = tmp.height = 0;
+    }
+    this.fitSheet(p, true);
+
+    const n = plan.cuts.length - 1;
+    const out: HTMLElement[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = plan.cuts[i], b = plan.cuts[i + 1];
+      const s = sheet.cloneNode(false) as HTMLElement;
+      s.classList.add("print-slice-sheet");
+      Object.assign(s.style, { height: `${b - a}px`, minHeight: "0" });
+      const inner = el("div", {
+        class: "print-inner",
+        style: { position: "absolute", left: "0", top: `${-a}px`, width: "100%", height: `${H}px` },
+      });
+      if (slices[i]) {
+        const url = URL.createObjectURL(slices[i]);
+        urls.push(url);
+        const ink = el("img", {
+          class: "print-ink", alt: "",
+          style: { position: "absolute", left: "0", top: `${a}px`, width: "100%", height: `${b - a}px` },
+        });
+        ink.src = url;
+        await ink.decode().catch(() => undefined);
+        inner.append(ink);
+      }
+      inner.append(cloneWithCanvases(p.doc.root), cloneWithCanvases(p.overlay));
+      const wrap = el("div", { class: "page-wrap print-slice" }, s,
+        el("div", { class: "page-num" }, n > 1 ? `${label} · ${i + 1}/${n}` : label));
+      wrap.style.maxWidth = p.wrap.style.maxWidth;
+      if (plan.zoom < 1) wrap.style.zoom = String(plan.zoom);
+      s.append(inner);
+      out.push(wrap);
+    }
+    return out;
   }
 
   setRenderMode(mode: RenderMode): void {
@@ -2331,5 +2554,39 @@ function drawMini(canvas: HTMLCanvasElement, fn: string, domain: [number, number
       if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
     }
     ctx.stroke();
+  });
+}
+
+/** Clone statique pour l'impression : les canvas gardent leur dessin. */
+function cloneWithCanvases(node: HTMLElement): HTMLElement {
+  const copy = node.cloneNode(true) as HTMLElement;
+  copy.removeAttribute("contenteditable");
+  const from = node.querySelectorAll("canvas");
+  const to = copy.querySelectorAll("canvas");
+  from.forEach((c, i) => {
+    const d = to[i];
+    if (c.width && c.height) d.getContext("2d")?.drawImage(c, 0, 0);
+  });
+  copy.querySelectorAll(".doc-img-bar").forEach((b) => b.remove());
+  copy.querySelectorAll(".selected").forEach((b) => b.classList.remove("selected"));
+  return copy;
+}
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+/** Image decodee, ou null si le navigateur ne sait pas la lire (HEIC). */
+function loadImage(src: string): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img.naturalWidth ? img : null);
+    img.onerror = () => resolve(null);
+    img.src = src;
   });
 }

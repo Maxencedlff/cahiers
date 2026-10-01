@@ -308,6 +308,22 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .calc-screen .expr { font-size: 17px; word-break: break-all; }
 .calc-screen .res { font-size: 21px; font-weight: 600; text-align: right; }
 .calc-screen .err { color: #ff9b9b; font-size: 13px; }
+/* Recepteur invisible du clavier de la calculatrice (voir Calculator.sink). */
+.calc-sink {
+  position: fixed; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden;
+  opacity: 0; pointer-events: none; z-index: -1; white-space: nowrap; caret-color: transparent; outline: none;
+}
+/* Caractere refuse par la calculatrice : bref liseré rouge, rien d'autre. */
+.calc-screen.reject { animation: calc-reject .45s ease-out; }
+@keyframes calc-reject { 0% { box-shadow: inset 0 0 0 2px #ff6b6b; } 100% { box-shadow: inset 0 0 0 2px transparent; } }
+/* Valeur complete a gauche du resultat ingenieur, sur la meme ligne :
+   l'ecran ne grandit pas. L'ecran ne se tasse jamais (colonne basse). */
+.calc-screen { flex-shrink: 0; }
+.calc-screen .res { display: flex; align-items: baseline; justify-content: flex-end; gap: 8px; }
+.calc-screen .eng-full {
+  order: -1; margin-right: auto; font-size: 11px; font-weight: 400; color: #7c8aa5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
 .calc-read {
   background: #f8f9fb; border: 1px solid var(--line); border-radius: 8px;
   padding: 7px 10px; font-size: 14px; min-height: 40px; overflow-x: auto;
@@ -373,6 +389,20 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .modal header { padding: 16px 18px 10px; font-size: 17px; font-weight: 600; }
 .modal .content { padding: 0 18px 6px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .modal footer { padding: 14px 18px; display: flex; gap: 8px; justify-content: flex-end; }
+/* Redressement de photo (image-import.ts) : la photo entiere tient a l'ecran
+   (taille calculee par cropLayout), apercu a droite, boutons en bas. */
+.modal.crop-modal { width: auto; max-width: 100%; }
+.crop-body { flex-direction: column; align-items: center; }
+.crop-body.side { flex-direction: row; align-items: flex-start; gap: 16px; }
+.crop-stage { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.crop-view { display: block; touch-action: none; border-radius: 6px; }
+.crop-side { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.crop-body.side .crop-side { align-items: stretch; }
+.crop-preview { display: block; width: auto; height: auto; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
+.crop-footer { flex-wrap: wrap; }
+.crop-footer button { min-height: 44px; }
+.crop-tools { display: flex; gap: 8px; margin-right: auto; }
+.crop-backdrop.busy .crop-view { opacity: .6; }
 .form-note { margin: 2px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
   background: #fff6e5; border: 1px solid #f0d49a; color: #6b4a00; }
 .form-note[hidden] { display: none; }
@@ -596,19 +626,41 @@ kbd {
 .text-doc .doc-img.flash { outline: 2px solid var(--accent); }
 .text-doc .doc-img.missing { min-height: 40px; background: #f3f4f6; }
 .text-doc .doc-img img { display: block; width: 100%; height: auto; pointer-events: none; }
+.text-doc .doc-img.selected { outline: 2px solid var(--accent); }
+/* Poignee de retaille : 22 px visibles, 44 px de prise (section 3), pour
+   la souris, le stylet et le doigt. Visible au survol ou photo selectionnee. */
 .text-doc .doc-img-grip {
-  position: absolute; right: -6px; bottom: -6px; width: 18px; height: 18px;
-  border-radius: 4px; background: #fff; border: 2px solid var(--accent);
-  cursor: nwse-resize; opacity: 0;
+  position: absolute; right: 2px; bottom: 2px; width: 22px; height: 22px;
+  border-radius: 5px; background: #fff; border: 2px solid var(--accent);
+  cursor: nwse-resize; opacity: 0; touch-action: none;
 }
-.text-doc .doc-img:hover .doc-img-grip { opacity: 1; }
+.text-doc .doc-img-grip::before { content: ""; position: absolute; inset: -12px; }
+.text-doc .doc-img:hover .doc-img-grip, .text-doc .doc-img.selected .doc-img-grip { opacity: 1; }
+/* Mini-barre d'une photo selectionnee : monter, descendre, retirer. */
+.text-doc .doc-img-bar {
+  position: absolute; top: 6px; right: 6px; display: flex; gap: 4px;
+  padding: 3px; border-radius: 8px; background: rgba(255,255,255,.95);
+  box-shadow: 0 2px 8px rgba(0,0,0,.18); font: 15px/1 system-ui, sans-serif;
+}
+.text-doc .doc-img-bar button {
+  min-width: 44px; min-height: 44px; padding: 0; border-radius: 6px; font-size: 18px; cursor: pointer;
+}
+.text-doc .doc-img-bar button:last-child { color: #b42318; }
+/* Endroit ou la photo deplacee va se poser. */
+.doc-img-drop {
+  position: fixed; width: 3px; border-radius: 2px; background: var(--accent);
+  pointer-events: none; z-index: 50;
+}
 
 /* Export PDF : la vue est posee hors ecran a la largeur d'une A4, puis
-   seule elle part a l'impression. Une page du cahier = une feuille : une
-   page plus longue qu'une A4 est reduite (zoom pose par exportPdf), jamais
-   coupee. Marges de page nulles : le WebView2 n'a plus de place pour ses
+   seule elle part a l'impression. Chaque page du cahier est remplacee par
+   ses feuilles A4 (.print-slice, PageView.printSheets) : un peu trop haute,
+   elle est reduite ; bien plus haute, elle est coupee entre deux lignes
+   (core/print.ts), encre decoupee par feuille. Marges de page nulles : le WebView2 n'a plus de place pour ses
    en-tetes (URL, date, pagination) ; la marge vient du padding. */
 .print-host { position: fixed; left: -10000px; top: 0; width: 720px; }
+.print-host .page-wrap.print-src { display: none; }
+.print-host .print-slice .sheet { overflow: hidden; }
 @media print {
   @page { size: A4; margin: 0; }
   /* Garde-fou : une impression lancee hors export (menu du WebView2)
@@ -622,6 +674,7 @@ kbd {
   .print-host .page-sep { display: none; }
   .print-host .page-wrap { margin: 0 auto; padding-top: 10mm; break-after: page; break-inside: avoid; }
   .print-host .page-wrap:last-child { break-after: auto; }
+  .print-host .doc-img, .print-host .eq { break-inside: avoid; }
   .print-host .sheet { box-shadow: none; border: none; border-radius: 0; }
   .print-host .sheet canvas { touch-action: auto; }
 }

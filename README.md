@@ -140,14 +140,46 @@ src-tauri/src/lib.rs      acces disque controle, instance unique
 
 ## Photos du tableau
 
-« Photo du tableau » dans le menu « ⋯ » de la colonne d'outils. On choisit l'image, on pose les quatre
-coins du tableau, l'application redresse la perspective, passe en noir et blanc
-par seuil adaptatif, puis lit le texte avec le moteur OCR **de Windows**. Rien
-ne part sur un service externe. Le texte extrait rend la photo trouvable par la
-recherche.
+« Photo du tableau » dans le menu « ⋯ » de la colonne d'outils. On choisit une
+ou plusieurs images (les photos d'un cours d'un coup : un dialogue par photo,
+« Insérer et suivante » ou « Passer »), on pose les quatre coins du tableau,
+l'application redresse la perspective, en couleur ou en noir et blanc (seuil
+adaptatif ; le dernier choix est retenu), puis lit le texte avec le moteur OCR
+**de Windows**, sans geler la fenêtre. Rien ne part sur un service externe. Le
+texte extrait rend la photo trouvable par la recherche.
+
+Dans le dialogue : Entrée insère, Échap annule, N bascule le noir et blanc,
+R remet les coins, S passe à la photo suivante. La photo entière tient à
+l'écran, en portrait comme en paysage, avec l'aperçu redressé à côté.
+
+Fichiers dans `assets/` : l'image redressée (PNG en noir et blanc, JPEG en
+couleur, 1600 px au plus) et **toujours l'original** (`<id>.original.jpg`,
+2560 px au plus) avec ses coins dans le bloc, pour pouvoir redresser à nouveau.
+Une photo HEIC d'iPhone n'est pas lisible : un message le dit et donne le
+réglage (« Le plus compatible »).
 
 Si Windows n'a pas de module OCR installe, l'image est inseree quand meme et
 l'application le dit : la photo est simplement absente de la recherche.
+
+**Capture d'écran et fichier déposé.** `Win+Maj+S` puis `Ctrl+V` dans la page :
+la capture est posée au curseur, telle quelle (ni recadrage ni noir et blanc),
+et l'OCR suit en fond. Une image glissée depuis l'Explorateur se pose là où on
+la lâche.
+
+**Photo dans le texte.** Un appui (stylet, doigt ou souris) la sélectionne :
+poignée de retaille au coin (44 px de prise) et mini-barre monter, descendre,
+redresser à nouveau, retirer (« Annuler » dans le message ; `Suppr` marche
+aussi). Au stylet et à la souris, glisser la photo la déplace ; au doigt,
+glisser une photo sélectionnée la déplace, sinon le doigt fait défiler.
+
+## Export PDF
+
+`Ctrl+P` (la page) ou `Ctrl+Maj+P` (l'intercalaire), puis « Enregistrer au
+format PDF ». Une page qui tient sur une A4 part telle quelle, un peu plus haute
+elle est légèrement réduite ; une page longue n'est jamais réduite : elle est
+coupée sur plusieurs feuilles A4, entre deux lignes, jamais au milieu d'une
+photo ou d'une formule. L'encre est rendue en haute densité et découpée par
+feuille.
 
 ## Reconnaissance manuscrite
 
@@ -237,6 +269,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+M` | menu, et retour au meme endroit |
 | `Ctrl+K` | recherche globale |
 | `Ctrl+L` | calculatrice |
+| `Alt+Maj+P` | photos du tableau (`Alt+P` seul = modele Puissance) |
 | `Ctrl+R` | conversion de l'ecriture : au fil de la plume ou sur zone |
 | `Ctrl+D` | doigt : ecrire ou naviguer (avec un stylet : l'oublier) |
 | `Ctrl+Tab` / `Ctrl+Maj+Tab` | onglet suivant, precedent (dans le panneau vise) |
@@ -280,6 +313,14 @@ Calculatrice, conventions de saisie (clavier francais) :
 - `^` (touche morte), `²`, fleches, Debut/Fin, Suppr, ↑/↓ pour l'historique,
   Echap pour vider ; Ctrl+V colle une expression ;
 - unites mathjs avec `µ` et `Ω` : `1/(2*pi*2,2kΩ*10nF)` donne des kHz ;
+- prefixes d'ingenieur colles a un nombre, sans unite : `2,2k` = 2200,
+  `10n`, `4,7µ` (ou `u`), `100m` = 0,1 (`5 m` avec espace reste le metre),
+  `1M`, `G`, `T`, `p` ; une variable definie du meme nom garde le produit.
+  Au pave : 2nd puis 7 8 9 / 4 5 6 / 1 2 3 = p n µ / m k M / G T Ω.
+  Resultat en lecture ingenieur (`7,234 kHz`, `22 µ`), valeur complete a cote ;
+- calculatrice armee, toute frappe lui revient, meme sans touche (Ω par
+  insertText, AltGr, IME) ; un caractere illisible est ignore, l'ecran
+  clignote. Echap sur une saisie vide rend le clavier au curseur de la page ;
 - un resultat douteux n'est jamais affiche comme exact : integrale a travers
   un pole refusee, poles de `tan` exclus des racines, `tan(90°)` en erreur,
   residus `sin(pi)` et `0.1+0.2-0.3` ramenes a 0 (seuil relatif, jamais
