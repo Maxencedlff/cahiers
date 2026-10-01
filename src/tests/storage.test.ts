@@ -38,10 +38,13 @@ describe("arborescence", () => {
   });
 
   it("voit un dossier cree hors de l'application", async () => {
-    // Simule une creation depuis l'explorateur Windows.
+    // Simule une creation depuis l'explorateur Windows : sans page ni
+    // cahier.json, il est dans « Autres dossiers » (D5) ; avec une page,
+    // c'est une matiere.
     await fs.mkdir("Maths/Cours");
-    const dirs = await repo.listNotebookDirs();
-    expect(dirs).toContain("Maths");
+    expect((await repo.classifyRoot()).others).toEqual([{ dir: "Maths", git: false }]);
+    await fs.writeText("Maths/Cours/0001.page.json", "{}");
+    expect(await new Repo(fs).listNotebookDirs()).toContain("Maths");
     expect(await repo.listDividers("Maths")).toEqual(["Cours"]);
   });
 
@@ -166,14 +169,13 @@ describe("fichiers de page", () => {
     expect(raw.length).toBeLessThan(JSON.stringify(page, null, 2).length / 2);
   });
 
-  it("memorise la derniere position et le mode par intercalaire", async () => {
+  it("memorise le mode par intercalaire (la position reste sur la machine)", async () => {
     const nb = await repo.createNotebook("Maths", "#000");
     await repo.createDivider(nb, "Cours");
-    await repo.setLastPosition(nb, "Cours", 7);
     await repo.setViewMode(nb, "Cours", "scroll");
     const meta = await repo.readMeta(nb);
-    expect(meta.lastPosition).toEqual({ divider: "Cours", page: 7 });
     expect(meta.viewMode?.Cours).toBe("scroll");
+    expect(meta.lastPosition).toBeUndefined();
   });
 
   it("survit a un cahier.json corrompu", async () => {
@@ -365,5 +367,167 @@ describe("renommer un intercalaire", () => {
     expect(await repo.renameDivider(nb, "cours", "Cours")).toBe("Cours");
     expect(await repo.listDividers(nb)).toEqual(["Cours"]);
     expect(await repo.listPageNumbers(nb, "Cours")).toEqual([1]);
+  });
+});
+
+describe("matieres et cahier.json (nav-10, nav-13, donnees-14)", () => {
+  it("lire le menu et les intercalaires n'ecrit aucun cahier.json", async () => {
+    await fs.mkdir("Docs pour ESEO/Stage");
+    await fs.mkdir("Maths/Cours");
+    await fs.writeText("Maths/Cours/0001.page.json", "{}");
+    await fs.mkdir("Maths/Exos");
+    await repo.listNotebooks();
+    await repo.listDividers("Maths");
+    expect(await fs.exists("Maths/cahier.json")).toBe(false);
+    expect(await fs.exists("Docs pour ESEO/cahier.json")).toBe(false);
+    expect(await repo.listDividers("Maths")).toEqual(["Cours", "Exos"]);
+  });
+
+  it("une matiere = cahier.json ou des pages ; le reste va dans Autres dossiers", async () => {
+    await repo.createNotebook("Maths", "#000");
+    await fs.mkdir("Rapports/2025");
+    await fs.writeText("Rapports/2025/rapport.pdf", "x");
+    await fs.mkdir("Elec/E3A/S1");
+    await fs.writeText("Elec/E3A/S1/0001.page.json", "{}");
+    const { notebooks, others } = await repo.classifyRoot();
+    expect(notebooks).toEqual(expect.arrayContaining(["Maths", "Elec", "Vrac"]));
+    expect(others).toEqual([{ dir: "Rapports", git: false }]);
+  });
+
+  it("un depot git n'est jamais une matiere, meme avec un cahier.json", async () => {
+    await fs.mkdir("C/.git");
+    await fs.writeText("C/cahier.json", JSON.stringify({ version: 1, title: "C", color: "#000", dividers: ["TD1"] }));
+    await fs.mkdir("C/TD1");
+    const { notebooks, others } = await repo.classifyRoot();
+    expect(notebooks).not.toContain("C");
+    expect(others).toEqual([{ dir: "C", git: true }]);
+    expect(await repo.listDividers("C")).toEqual(["TD1"]);
+  });
+
+  it("un depot git ne devient jamais une matiere (creation ou adoption)", async () => {
+    await fs.mkdir("cahiers/.git");
+    await expect(repo.createNotebook("Cahiers", "#000")).rejects.toThrow(/git/);
+    await expect(repo.adoptNotebook("cahiers", "#000")).rejects.toThrow(/git/);
+    expect(await fs.exists("cahiers/cahier.json")).toBe(false);
+  });
+
+  it("Vrac reste en dernier, quel que soit l'ordre des dates", async () => {
+    const a = await repo.createNotebook("Algebre", "#000");
+    await repo.createDivider(a, "Cours");
+    await repo.createPage(a, "Cours");
+    await new Promise((r) => setTimeout(r, 5));
+    await repo.createPage("Vrac", "Notes");
+    const list = await repo.listNotebooks();
+    expect(list[list.length - 1].dir).toBe("Vrac");
+    expect(list[0].dir).toBe(a);
+  });
+
+  it("garde les champs inconnus de cahier.json (version plus recente)", async () => {
+    await fs.writeText("Maths/cahier.json", JSON.stringify({
+      version: 1, title: "Maths", color: "#111", dividers: [], fondDePage: { Cours: "seyes" },
+    }));
+    await repo.createDivider("Maths", "Cours");
+    const raw = JSON.parse(await fs.readText("Maths/cahier.json"));
+    expect(raw.fondDePage).toEqual({ Cours: "seyes" });
+    expect(raw.dividers).toEqual(["Cours"]);
+  });
+
+  it("deux mises a jour de cahier.json en meme temps ne se perdent pas", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    for (const d of ["Cours", "Exos", "TD"]) await repo.createDivider(nb, d);
+    await Promise.all([
+      repo.setViewMode(nb, "Cours", "scroll"),
+      repo.reorderDividers(nb, ["TD", "Cours", "Exos"]),
+      repo.setNotebookColor(nb, "#dc2626"),
+      repo.renameDivider(nb, "Exos", "Exercices"),
+    ]);
+    const meta = await repo.readMeta(nb);
+    expect(meta.viewMode?.Cours).toBe("scroll");
+    expect(meta.dividers).toEqual(["TD", "Cours", "Exercices"]);
+    expect(meta.color).toBe("#dc2626");
+  });
+
+  it("recreer une matiere existante ne la remet pas a zero", async () => {
+    const nb = await repo.createNotebook("Maths", "#2563eb");
+    await repo.createDivider(nb, "Cours");
+    await repo.createDivider(nb, "TD");
+    await repo.reorderDividers(nb, ["TD", "Cours"]);
+    await repo.setViewMode(nb, "Cours", "scroll");
+    expect(await repo.createNotebook("maths", "#0891b2")).toBe(nb);
+    const meta = await repo.readMeta(nb);
+    expect(meta.color).toBe("#2563eb");
+    expect(meta.dividers).toEqual(["TD", "Cours"]);
+    expect(meta.viewMode?.Cours).toBe("scroll");
+  });
+
+  it("en faire une matiere : le dossier recoit son cahier.json", async () => {
+    await fs.mkdir("MOOC/Semaine 1");
+    expect(await repo.findDir("mooc")).toBe("MOOC");
+    await repo.adoptNotebook("MOOC", "#059669", "MOOC IA");
+    const meta = await repo.readMeta("MOOC");
+    expect(meta.title).toBe("MOOC IA");
+    expect(meta.color).toBe("#059669");
+    expect(await repo.listNotebookDirs()).toContain("MOOC");
+  });
+
+  it("renomme une matiere : titre et dossier, refuse un nom pris", async () => {
+    const nb = await repo.createNotebook("Elec", "#000");
+    await repo.createDivider(nb, "Cours");
+    await repo.createPage(nb, "Cours");
+    const next = await repo.renameNotebook(nb, "Électronique");
+    expect(next).toBe("Électronique");
+    expect(await fs.exists("Elec")).toBe(false);
+    expect(await repo.listPageNumbers(next, "Cours")).toEqual([1]);
+    expect((await repo.readMeta(next)).title).toBe("Électronique");
+    await repo.createNotebook("Maths", "#000");
+    await expect(repo.renameNotebook(next, "maths")).rejects.toThrow();
+    // Changement de casse seul : le dossier suit.
+    expect(await repo.renameNotebook(next, "ÉLECTRONIQUE")).toBe("ÉLECTRONIQUE");
+  });
+
+  it("supprime une matiere vers la corbeille, puis la restaure", async () => {
+    const nb = await repo.createNotebook("Info", "#000");
+    await repo.createDivider(nb, "Cours");
+    await repo.createPage(nb, "Cours");
+    const entry = await repo.deleteNotebook(nb);
+    expect(entry.kind).toBe("notebook");
+    expect(await repo.listNotebookDirs()).not.toContain(nb);
+    expect(await fs.exists(`${entry.bin}/${nb}/Cours/0001.page.json`)).toBe(true);
+    expect(await repo.restoreNotebook(entry)).toBe(nb);
+    expect(await repo.listPageNumbers(nb, "Cours")).toEqual([1]);
+    await expect(repo.deleteNotebook("Vrac")).rejects.toThrow();
+  });
+
+  it("propose de ranger les matieres sans page, et le cahier.json part a la corbeille", async () => {
+    await fs.writeText("Docs/cahier.json", JSON.stringify({ version: 1, title: "Docs", color: "#000", dividers: [] }));
+    await fs.mkdir("Docs/Stage");
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    await repo.createPage(nb, "Cours");
+    const list = await repo.listNotebooks();
+    expect(await repo.pagelessNotebooks(list)).toEqual(["Docs"]);
+    const entry = await repo.unmarkNotebook("Docs");
+    expect(await fs.exists("Docs/cahier.json")).toBe(false);
+    expect(await fs.exists("Docs/Stage")).toBe(true);
+    expect((await new Repo(fs).classifyRoot()).others.map((o) => o.dir)).toContain("Docs");
+    await repo.restoreMeta(entry);
+    expect(await fs.exists("Docs/cahier.json")).toBe(true);
+  });
+
+  it("sous-dossiers d'un intercalaire (rangement a 3 niveaux)", async () => {
+    await fs.mkdir("Elec/E3A/S1/Chapitre 1");
+    await fs.mkdir("Elec/E3A/assets");
+    expect(await repo.listSubfolders("Elec", "E3A")).toEqual(["S1"]);
+  });
+
+  it("une page d'une version plus recente n'est jamais reecrite", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    const n = await repo.createPage(nb, "Cours");
+    const future = JSON.stringify({ version: 2, id: "x", created: "", modified: "", blocks: [], nouveau: true });
+    await fs.writeText(`${nb}/Cours/0001.page.json`, future);
+    const page = await repo.readPage(nb, "Cours", n);
+    await expect(repo.writePage(nb, "Cours", n, page)).rejects.toThrow(/plus récente/);
+    expect(await fs.readText(`${nb}/Cours/0001.page.json`)).toBe(future);
   });
 });

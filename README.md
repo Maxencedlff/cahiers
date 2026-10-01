@@ -51,7 +51,7 @@ d'etre le meme sur le portable et sur le PC fixe.
 ```
 ESEO/
 ├── Maths/
-│   ├── cahier.json          titre, couleur, ordre des intercalaires, position
+│   ├── cahier.json          titre, couleur, ordre des intercalaires, mode
 │   ├── Cours/
 │   │   ├── 0001.page.json   une page = un fichier
 │   │   └── assets/
@@ -62,6 +62,30 @@ ESEO/
 Un fichier par page, du JSON en clair, indente. Un conflit OneDrive coute une
 page, pas un semestre. L'application lit l'arborescence, elle ne la possede
 pas : un dossier cree dans l'explorateur Windows apparait au lancement suivant.
+
+Un dossier de la racine est une matiere s'il a un `cahier.json` ou des pages ;
+le reste (documents, projets, depots git) est liste a part, dans « Autres
+dossiers », et l'application n'y ecrit rien. Lire le menu ou ouvrir un cahier
+n'ecrit jamais `cahier.json` : seules les actions (renommer, couleur, ordre
+des intercalaires, mode) le modifient. Un intercalaire range en sous-dossiers
+n'est pas rempli d'une page d'office. La derniere position (par cahier et par
+intercalaire) reste sur chaque PC, dans le stockage local, jamais dans le
+dossier synchronise. Une page ecrite par une version plus recente de
+l'application s'ouvre en lecture seule.
+
+## Navigation
+
+- Menu : « Reprendre » (ou `Entree`) rouvre la derniere page ; taper des
+  lettres filtre les matieres, les fleches passent de l'une a l'autre. Vrac
+  reste en dernier. Le bouton « ⋯ » d'une carte (ou un appui long) : renommer
+  (le dossier aussi), couleur, supprimer vers la corbeille.
+- Un onglet = un cahier et un intercalaire : Cours a gauche, Exos a droite
+  dans le meme cahier. Appui long (ou clic droit) sur un intercalaire : ouvrir
+  a droite, renommer, deplacer, supprimer. En split, outils et clavier visent
+  le panneau touche en dernier.
+- Un appui sur « p. 4 / 12 » (ou `Ctrl+G`) : liste des pages avec date et
+  premiere ligne. `Alt+←` (ou le bouton retour de la souris) revient d'avant un
+  saut : recherche, repere, lien, liste des pages.
 
 ## Organisation du code
 
@@ -85,6 +109,7 @@ src/
 │   ├── pageview.ts       pages, blocs, annulation, ecriture groupee
 │   ├── calculator/       les cinq onglets
 │   ├── menu.ts           accueil, recherche, reperes "pas compris"
+│   ├── pagelist.ts       liste des pages (numero, date, premiere ligne)
 │   ├── probe.ts          sonde stylet
 │   ├── help.ts           fiche des raccourcis (F1, Ctrl+/)
 │   └── app.ts            onglets, split, colonne d'outils, menu « ⋯ »
@@ -185,7 +210,8 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+Pg↓` / `Ctrl+Pg↑` | page suivante, precedente (`Pg↓` `Pg↑` seuls hors du texte) |
 | `Ctrl+Maj+Pg↓` / `Ctrl+Maj+Pg↑` | intercalaire suivant, precedent |
 | `Ctrl+N` / `Ctrl+Maj+N` | nouvelle page a la fin, inserer apres la page courante |
-| `Ctrl+G` | aller a la page (ou un appui sur « p. 4 / 12 ») |
+| `Ctrl+G` | liste des pages, taper un numero y va (ou un appui sur « p. 4 / 12 ») |
+| `Alt+←` | revenir d'avant un saut (aussi le bouton retour de la souris) |
 | `Ctrl+P` / `Ctrl+Maj+P` | exporter en PDF la page, tout l'intercalaire |
 | `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |
@@ -193,7 +219,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+L` | calculatrice |
 | `Ctrl+R` | conversion de l'ecriture : au fil de la plume ou sur zone |
 | `Ctrl+D` | doigt : ecrire ou naviguer (avec un stylet : l'oublier) |
-| `Ctrl+Tab` / `Ctrl+Maj+Tab` | onglet suivant, precedent |
+| `Ctrl+Tab` / `Ctrl+Maj+Tab` | onglet suivant, precedent (dans le panneau vise) |
 | `Ctrl+W` | fermer l'onglet |
 | `Ctrl+\` (AZERTY : `Ctrl+*`) | split gauche/droite |
 | `Ctrl+Maj+X` / `Ctrl+Maj+W` | permuter les panneaux, fermer le panneau droit |

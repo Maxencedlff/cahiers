@@ -1,5 +1,6 @@
-import { el, clear, toast, dismissToast, askText, askFields, confirmDialog, pick } from "./dom";
+import { el, clear, toast, dismissToast, askText, askFields, confirmDialog, pick, onLongPress } from "./dom";
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
+import { pageListDialog } from "./pagelist";
 import { buildProbe } from "./probe";
 import { PageView, type ViewMode, type RenderMode } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
@@ -9,6 +10,8 @@ import { PALETTE, NEUTRAL_INK, labelOf, shortcutOf } from "../core/palette";
 import type { ColorKey, InkColor, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
 import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
+import { Positions } from "../core/position";
+import { NavHistory, dayLabel, moveItem, pickSplitDivider, type NavSpot } from "../core/nav";
 import { searchAll, type FlagHit } from "../core/storage/search";
 import type { FsAdapter } from "../core/storage/fs";
 import {
@@ -22,7 +25,7 @@ import {
 import {
   MONTHLY_QUOTA, bumpUsage, currentUsage, shouldWarn, usageLabel, type Usage,
 } from "../core/ink/usage";
-import type { Block, Stroke } from "../core/types";
+import type { Block, NotebookMeta, Stroke } from "../core/types";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
 import { showShortcuts } from "./help";
@@ -39,6 +42,11 @@ const isZone = (t: Tool): t is "region" | "textregion" => t === "region" || t ==
  */
 const CALC_DOCK_MIN = 1400;
 
+/**
+ * Un onglet = un cahier ET un intercalaire : Cours et Exos du meme cahier
+ * peuvent etre cote a cote (section 5). Jamais deux onglets sur le meme
+ * intercalaire : une seule vue ecrit ses pages.
+ */
 interface Tab {
   id: string;
   notebook: string;
@@ -47,7 +55,13 @@ interface Tab {
   divider: string;
   view: PageView | null;
   host: HTMLElement;
+  /** Dernier usage (ms) : rouvrir une matiere reprend son onglet le plus recent. */
+  used: number;
 }
+
+/** L'onglet utilise le plus recemment. */
+const mostRecent = (tabs: Tab[]): Tab | undefined =>
+  tabs.reduce<Tab | undefined>((a, t) => (!a || t.used > a.used ? t : a), undefined);
 
 /**
  * Application. Instance unique, donc onglets en haut : c'est la consequence
@@ -66,6 +80,17 @@ export class App {
   private activeId: string | null = null;
   /** Onglet affiche dans le panneau droit, quand le split est ouvert. */
   private splitId: string | null = null;
+  /**
+   * Panneau qui a la main en split (dernier appui ou focus) : clavier,
+   * colonne d'outils, intercalaires et calculatrice agissent sur lui.
+   */
+  private focusedId: string | null = null;
+  /** Derniere position par cahier et intercalaire, sur cette machine (D8). */
+  private positions: Positions;
+  /** Endroits quittes par un saut : Alt+← y revient. */
+  private nav = new NavHistory();
+  /** Clavier du menu (Entree reprend, lettres filtrent, fleches). */
+  private menuKeys: ((e: KeyboardEvent) => boolean) | null = null;
   /**
    * Vues quittees (autre intercalaire, onglet ferme) dont une ecriture a
    * echoue. Elles retentent toutes les 3 s ; gardees ici pour que la barre
@@ -123,6 +148,7 @@ export class App {
   ) {
     this.repo = new Repo(fs);
     this.settings = loadSettings();
+    this.positions = new Positions(localStore());
     // Une zone n'est jamais l'outil de depart : elle est ponctuelle.
     this.tool = isZone(this.settings.tool) ? "pen" : this.settings.tool;
     this.color = this.settings.color;
@@ -178,6 +204,13 @@ export class App {
         toast("Stylet détecté : le doigt sert maintenant à naviguer");
       }
     }, true);
+    // Bouton « retour » de la souris : comme Alt+←, revient d'avant le saut.
+    window.addEventListener("mousedown", (e) => { if (e.button === 3) e.preventDefault(); });
+    window.addEventListener("mouseup", (e) => {
+      if (e.button !== 3 || document.querySelector(".backdrop")) return;
+      e.preventDefault();
+      void this.goBack();
+    });
     // Filet de securite seulement : beforeunload n'attend pas une ecriture.
     // La fermeture de la fenetre passe par main.ts (onCloseRequested).
     window.addEventListener("beforeunload", () => { void this.flushAll(); });
@@ -205,7 +238,7 @@ export class App {
     if (!this.calculatorLoading) {
       this.calculatorLoading = import("./calculator/index").then(({ Calculator }) => {
         this.calculator = new Calculator({
-          canInsert: () => this.screen === "notebook" && !!this.activeTab()?.view,
+          canInsert: () => this.screen === "notebook" && !!this.focusedTab()?.view,
           onVisibility: (visible) => {
             this.settings.calcOpen = visible;
             saveSettings(this.settings);
@@ -214,14 +247,14 @@ export class App {
               ?.classList.toggle("closed", !visible || !this.calculator?.isDocked);
           },
           insertGraph: (fn, domain) => {
-            const view = this.activeTab()?.view;
+            const view = this.focusedTab()?.view;
             view?.addBlock({
               id: uuid(), type: "graph", fn, domain,
               rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 200 },
             });
           },
           insertCalc: (expr, result) => {
-            const view = this.activeTab()?.view;
+            const view = this.focusedTab()?.view;
             view?.addBlock({
               id: uuid(), type: "calc", expr, result,
               rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 46 },
@@ -270,8 +303,12 @@ export class App {
   private async showMenu(): Promise<void> {
     this.screen = "menu";
     await this.flushAll();
+    const menu = await buildMenu(this.menuHost());
+    // Un autre ecran a pu s'ouvrir pendant la lecture du disque.
+    if (this.screen !== "menu") return;
     clear(this.main);
-    this.main.append(await buildMenu(this.menuHost()));
+    this.menuKeys = menu.onKey;
+    this.main.append(menu.root);
     this.paintTabs();
     this.paintStatus();
   }
@@ -287,7 +324,13 @@ export class App {
       openSearch: () => void this.showSearch(),
       openFlags: (notebook?: string) => void this.showFlags(notebook),
       setFlagResolved: (f: FlagHit, resolved: boolean) => this.setFlagResolved(f, resolved),
-      openProbe: () => this.showProbe(),
+      lastSpot: (dirs: string[]) => this.positions.latest(dirs),
+      createNotebook: (title: string, color: string) => this.createNotebook(title, color),
+      renameNotebook: (dir: string, title: string) => this.renameNotebook(dir, title),
+      setNotebookColor: (dir: string, color: string) => this.setNotebookColor(dir, color),
+      deleteNotebook: (dir: string) => this.deleteNotebook(dir),
+      adoptNotebook: (dir: string, title: string, color: string) => this.adoptNotebook(dir, title, color),
+      unmarkNotebooks: (dirs: string[]) => this.unmarkNotebooks(dirs),
     };
   }
 
@@ -306,7 +349,7 @@ export class App {
     this.noteAuxFrom();
     // Lancee depuis un cahier : la recherche part dans cette matiere (on
     // peut l'elargir d'un appui).
-    const tab = this.auxFrom === "notebook" ? this.activeTab() : undefined;
+    const tab = this.auxFrom === "notebook" ? this.focusedTab() : undefined;
     this.screen = "search";
     await this.flushAll();
     clear(this.main);
@@ -335,8 +378,42 @@ export class App {
 
   /** Ouvre une page et va au bloc (resultat de recherche, repere). */
   private async openAt(dir: string, divider: string, page: number, blockId: string, query?: string): Promise<void> {
-    await this.openNotebook(dir, divider, page);
-    await this.activeTab()?.view?.focusBlock(page, blockId, query);
+    this.noteJump();
+    const tab = await this.openNotebook(dir, divider, page);
+    await tab?.view?.focusBlock(page, blockId, query);
+  }
+
+  /* ---------------- retour arriere ---------------- */
+
+  /** Ou l'on est : l'onglet vise, son intercalaire et sa page. */
+  private hereSpot(): NavSpot | null {
+    const tab = this.focusedTab();
+    const n = tab?.view?.pageNumber ?? 0;
+    return tab && n >= 1 ? { notebook: tab.notebook, divider: tab.divider, page: n } : null;
+  }
+
+  /** Avant un saut (resultat, repere, lien, liste des pages) : Alt+← y revient. */
+  private noteJump(): void {
+    const here = this.hereSpot();
+    if (!here) return;
+    const first = this.nav.size === 0;
+    this.nav.push(here);
+    if (first) toast("Alt+← (ou le bouton retour de la souris) revient ici", "info", 2600, undefined, "nav-back");
+  }
+
+  /** Alt+← ou bouton retour de la souris. */
+  private async goBack(): Promise<void> {
+    const spot = this.nav.pop(this.screen === "notebook" ? this.hereSpot() : null);
+    if (!spot) {
+      toast("Rien à reprendre : Alt+← revient après un saut (recherche, repère, lien, liste des pages)", "info", 2400, undefined, "nav-back");
+      return;
+    }
+    try {
+      const tab = await this.openNotebook(spot.notebook, spot.divider, spot.page);
+      if (tab && tab.divider !== spot.divider) toast(`${spot.divider} n'existe plus dans ce cahier`, "warn", 3000);
+    } catch (e) {
+      toast(`Cet endroit n'existe plus : ${(e as Error).message}`, "warn", 4000);
+    }
   }
 
   /**
@@ -363,44 +440,130 @@ export class App {
     }
   }
 
+  /** Diagnostic du stylet, depuis le menu « ⋯ » (reglages) ; Retour ramene a la page. */
   private showProbe(): void {
+    this.noteAuxFrom();
     this.screen = "probe";
     clear(this.main);
-    this.main.append(buildProbe(() => void this.showMenu()));
+    this.paintTabs();
+    this.main.append(buildProbe(() => this.leaveAux()));
   }
 
   /* ---------------- onglets ---------------- */
 
+  /** Onglet du panneau gauche (ou seul panneau). */
   private activeTab(): Tab | undefined {
     return this.tabs.find((t) => t.id === this.activeId);
   }
 
-  async openNotebook(dir: string, divider?: string, page?: number): Promise<void> {
-    const existing = this.tabs.find((t) => t.notebook === dir);
+  /**
+   * Onglet vise par le clavier, la colonne d'outils, les intercalaires et la
+   * calculatrice : en split, le panneau ou l'on a appuye en dernier.
+   */
+  private focusedTab(): Tab | undefined {
+    if (this.splitId && this.focusedId === this.splitId) {
+      return this.tabs.find((t) => t.id === this.splitId) ?? this.activeTab();
+    }
+    return this.activeTab();
+  }
+
+  /** L'onglet est a l'ecran (panneau gauche ou droit). */
+  private shown(tab: Tab): boolean {
+    return tab.id === this.activeId || tab.id === this.splitId;
+  }
+
+  /**
+   * Montre un onglet : deja a l'ecran, il prend la main ; sinon il remplace
+   * l'onglet du panneau vise.
+   */
+  private place(tab: Tab): void {
+    if (!this.shown(tab)) {
+      if (this.splitId && this.focusedId === this.splitId) this.splitId = tab.id;
+      else this.activeId = tab.id;
+    }
+    this.focusedId = tab.id;
+    tab.used = Date.now();
+    this.rememberTab(tab);
+  }
+
+  /**
+   * Le panneau vise change (appui, focus) : sans reconstruire l'ecran, sinon
+   * le trait commence a l'instant serait coupe. La bande d'intercalaires et
+   * la colonne d'outils passent a ce panneau.
+   */
+  private setFocused(id: string): void {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab) return;
+    tab.used = Date.now();
+    if (this.focusedId === id || !this.splitId) { this.focusedId = id; return; }
+    this.focusedId = id;
+    // « Reprendre » rouvre le panneau ou l'on travaillait en dernier.
+    this.rememberTab(tab);
+    if (this.screen !== "notebook") return;
+    for (const t of this.tabs) t.host.classList.toggle("focused", this.shown(t) && t.id === id);
+    const bar = this.main.querySelector(".dividers");
+    void this.repo.listDividers(tab.notebook).then((ds) => {
+      if (this.focusedId === id && bar?.isConnected) bar.replaceWith(this.buildDividerBar(tab, ds));
+    });
+    this.paintToolbar();
+    this.paintTabs();
+  }
+
+  private makeTab(dir: string, meta: NotebookMeta, divider: string): Tab {
+    const tab: Tab = {
+      id: uuid(), notebook: dir, title: meta.title, color: meta.color,
+      divider, view: null, host: el("div", { class: "pane" }), used: Date.now(),
+    };
+    this.wirePane(tab);
+    return tab;
+  }
+
+  /** Retient la page vue de l'onglet, sur cette machine. */
+  private rememberTab(tab: Tab): void {
+    const n = tab.view?.pageNumber ?? 0;
+    if (n >= 1) this.positions.record(tab.notebook, tab.divider, n);
+  }
+
+  /**
+   * Ouvre un cahier. Sans intercalaire (carte du menu), son onglet le plus
+   * recent tel quel, ou la ou on l'avait laisse sur cette machine. Avec un
+   * intercalaire (Reprendre, resultat, lien), l'onglet qui le tient deja,
+   * sinon un onglet du cahier y passe. Rend l'onglet ouvert.
+   */
+  async openNotebook(dir: string, divider?: string, page?: number): Promise<Tab | undefined> {
     const meta = await this.repo.readMeta(dir);
     const dividers = await this.repo.listDividers(dir);
     if (dividers.length === 0) dividers.push(await this.repo.createDivider(dir, "Cours"));
-    const target = divider && dividers.includes(divider) ? divider : (meta.lastPosition?.divider ?? dividers[0]);
+    const wanted = divider && dividers.includes(divider) ? divider : undefined;
+    // Intercalaire demande disparu (renomme, a la corbeille) : sa page ne
+    // vaut pas pour un autre, on rouvre le cahier la ou on l'avait laisse.
+    if (divider && !wanted) page = undefined;
+    const mine = this.tabs.filter((t) => t.notebook === dir);
 
-    if (existing) {
-      this.activeId = existing.id;
-      if (existing.divider !== target) {
-        await this.switchDivider(existing, target, page);
-      } else if (page) {
-        await existing.view?.goTo(page);
-      }
-    } else {
-      const tab: Tab = {
-        id: uuid(), notebook: dir, title: meta.title, color: meta.color,
-        divider: target, view: null,
-        host: el("div", { class: "pane" }),
-      };
-      this.tabs.push(tab);
-      this.activeId = tab.id;
-      await this.mountView(tab, page);
+    let tab = wanted ? mine.find((t) => t.divider === wanted) : mostRecent(mine);
+    let at = page;
+    if (!tab && mine.length) {
+      // Le cahier est ouvert sur un autre intercalaire : l'onglet qu'on
+      // regarde y passe (ou le plus recent de ce cahier).
+      const focused = this.focusedTab();
+      tab = focused?.notebook === dir ? focused : mostRecent(mine)!;
+      await this.switchDivider(tab, wanted!, page);
+      at = undefined;
     }
+    if (!tab) {
+      const target = wanted ?? this.positions.dividerFor(dir, dividers, meta.lastPosition) ?? dividers[0];
+      tab = this.makeTab(dir, meta, target);
+      this.tabs.push(tab);
+      await this.mountView(tab, page ?? this.positions.pageFor(dir, target, meta.lastPosition));
+      at = undefined;
+    }
+    if (at) await tab.view?.goTo(at);
+    this.place(tab);
     this.screen = "notebook";
     await this.renderNotebookScreen();
+    // « Reprendre » doit exister des l'ouverture, pas au premier changement de page.
+    this.rememberTab(tab);
+    return tab;
   }
 
   private async mountView(tab: Tab, page?: number): Promise<void> {
@@ -421,14 +584,15 @@ export class App {
       resumeRecognition: (key, kind, strokes) => this.resume(key, kind, strokes),
       cancelRecognition: (key) => this.cancelRecognition(key),
       onDirty: () => this.paintStatus(),
-      // Seule la vue de l'onglet actif pilote l'indicateur de la colonne.
+      // Seule la vue du panneau vise pilote l'indicateur de la colonne.
       onPageChange: (n, total) => {
-        if (this.activeTab()?.view === view && this.pageLabelEl) {
+        if (this.focusedTab()?.view === view && this.pageLabelEl) {
           this.pageLabelEl.textContent = pageLabel(n, total);
         }
       },
       openLink: (target) => void this.followLink(target),
       onTrashed: (entry) => this.offerRestore(entry),
+      rememberPage: (nb, d, n) => this.positions.record(nb, d, n),
     }, tab.notebook, tab.divider);
     // Une vue quittee en echec sur ce meme intercalaire : la nouvelle reprend
     // sa file, pour qu'une seule vue ecrive ces pages.
@@ -443,11 +607,15 @@ export class App {
     await view.load(page);
   }
 
+  /** L'onglet passe a un autre intercalaire, a la page qu'on y avait laissee. */
   private async switchDivider(tab: Tab, divider: string, page?: number): Promise<void> {
     await tab.view?.flush();
+    // La page quittee est retenue : on y revient en recliquant l'intercalaire.
+    this.rememberTab(tab);
     tab.divider = divider;
-    await this.mountView(tab, page);
-    await this.repo.setLastPosition(tab.notebook, divider, tab.view?.pageNumber ?? 1);
+    const legacy = page == null ? (await this.repo.readMeta(tab.notebook)).lastPosition : undefined;
+    await this.mountView(tab, page ?? this.positions.pageFor(tab.notebook, divider, legacy));
+    this.rememberTab(tab);
   }
 
   private async closeTab(id: string): Promise<void> {
@@ -467,11 +635,22 @@ export class App {
     await view?.dispose();
     // Fermer quand meme : la page continue d'etre retentee et reste signalee.
     if (view?.hasUnsaved) this.orphans.add(view);
-    this.tabs.splice(i, 1);
-    if (this.splitId === id) this.splitId = null;
-    if (this.activeId === id) this.activeId = this.tabs[Math.max(0, i - 1)]?.id ?? null;
+    this.dropTab(id);
     if (!this.tabs.length) { await this.showMenu(); return; }
     await this.renderNotebookScreen();
+  }
+
+  /** Retire l'onglet de la liste ; le panneau droit prend la place du gauche. */
+  private dropTab(id: string): void {
+    const i = this.tabs.findIndex((t) => t.id === id);
+    if (i === -1) return;
+    this.tabs.splice(i, 1);
+    if (this.splitId === id) this.splitId = null;
+    if (this.activeId === id) {
+      if (this.splitId) { this.activeId = this.splitId; this.splitId = null; }
+      else this.activeId = this.tabs[Math.max(0, i - 1)]?.id ?? null;
+    }
+    if (this.focusedId === id || !this.splitId) this.focusedId = this.activeId;
   }
 
   private paintTabs(): void {
@@ -482,9 +661,10 @@ export class App {
       onclick: () => void this.showMenu(),
     }, "Menu"));
 
+    const focused = this.screen === "notebook" ? this.focusedTab() : undefined;
     for (const tab of this.tabs) {
       const node = el("div", {
-        class: `tab${tab.id === this.activeId ? " active" : ""}`,
+        class: `tab${tab === focused ? " active" : this.screen === "notebook" && this.shown(tab) ? " shown" : ""}`,
         draggable: "true",
       },
         el("span", { class: "dot", style: { background: tab.color } }),
@@ -495,8 +675,11 @@ export class App {
           onclick: (e: Event) => { e.stopPropagation(); void this.closeTab(tab.id); },
         }, "✕"),
       );
+      // Un onglet deja a l'ecran prend la main ; un autre remplace celui du
+      // panneau vise (le split ne se referme plus en cliquant l'onglet de droite).
       node.addEventListener("click", () => {
-        this.activeId = tab.id;
+        if (this.screen === "notebook" && this.shown(tab)) { this.setFocused(tab.id); return; }
+        this.place(tab);
         void this.renderNotebookScreen();
       });
       // Glisser un onglet sur la moitie droite ouvre le split (section 5).
@@ -508,7 +691,8 @@ export class App {
     }
 
     this.tabbar.append(el("div", { class: "spacer" }));
-    if (this.tabs.length) {
+    // Le split n'a de sens que sur l'ecran cahier.
+    if (this.tabs.length && this.screen === "notebook") {
       this.tabbar.append(
         el("button", {
           class: this.splitId ? "on" : "",
@@ -539,17 +723,24 @@ export class App {
     const tab = this.activeTab();
     if (!tab) { await this.showMenu(); return; }
     if (this.splitId === tab.id) this.splitId = null;
+    if (!this.splitId || (this.focusedId !== tab.id && this.focusedId !== this.splitId)) this.focusedId = tab.id;
     this.screen = "notebook";
     this.paintTabs();
 
     clear(this.main);
-    const dividers = await this.repo.listDividers(tab.notebook);
+    // Vue retiree (matiere renommee) : remontee a la page retenue.
+    if (!tab.view) await this.mountView(tab, this.positions.pageFor(tab.notebook, tab.divider));
+    const other = this.splitId ? this.tabs.find((t) => t.id === this.splitId) : undefined;
+    if (this.splitId && !other) this.splitId = null;
+    if (other && !other.view) await this.mountView(other, this.positions.pageFor(other.notebook, other.divider));
+    const focused = this.focusedTab() ?? tab;
+    const dividers = await this.repo.listDividers(focused.notebook);
     // Outils a gauche, calculatrice a droite : la hauteur de l'ecran reste
     // a la feuille.
     const tools = this.buildToolbar();
     const calcSide = el("aside", { class: "side-calc closed" });
     const work = el("div", { class: "work" });
-    this.main.append(this.buildDividerBar(tab, dividers), work);
+    this.main.append(this.buildDividerBar(focused, dividers), work);
     this.calcSlot = { side: calcSide, work };
     // Fermee par defaut (D6) : mathjs n'est charge qu'au premier Ctrl+L.
     if (this.settings.calcOpen || this.calculator) {
@@ -562,29 +753,23 @@ export class App {
 
     const panes = el("div", { class: "panes" });
     panes.append(this.buildPane(tab, false));
-    if (this.splitId) {
-      const other = this.tabs.find((t) => t.id === this.splitId);
-      if (other) {
-        if (!other.view) await this.mountView(other);
-        panes.append(this.buildPane(other, true));
-      } else {
-        this.splitId = null;
-      }
-    }
+    if (other) panes.append(this.buildPane(other, true));
     work.append(tools, panes, calcSide);
     this.paintStatus();
 
-    if (tab.view) tab.host.append(tab.view.root);
-    if (this.splitId) {
-      const other = this.tabs.find((t) => t.id === this.splitId);
-      if (other?.view) other.host.append(other.view.root);
+    // La vue reprend son defilement : un passage par le menu ou un autre
+    // onglet ne ramene plus en haut de l'intercalaire.
+    for (const t of other ? [tab, other] : [tab]) {
+      if (!t.view) continue;
+      t.host.append(t.view.root);
+      t.view.attached();
     }
   }
 
   private buildPane(tab: Tab, isRight: boolean): HTMLElement {
     const pane = tab.host;
     pane.replaceChildren();
-    pane.className = "pane";
+    pane.className = `pane${this.splitId && tab.id === this.focusedId ? " focused" : ""}`;
     // Hors split, l'onglet et la bande d'intercalaires disent deja ou l'on
     // est : l'en-tete de panneau ne ferait que prendre de la hauteur.
     if (this.splitId) pane.append(el("div", { class: "pane-head" },
@@ -592,37 +777,53 @@ export class App {
       el("strong", {}, tab.title),
       el("span", { class: "muted" }, tab.divider),
       el("div", { class: "spacer" }),
+      // Les deux commandes du split, une seule fois, sur le panneau droit.
       isRight
-        ? el("button", { class: "ghost", title: titleOf("Fermer le panneau droit", "closeSplit"), onclick: () => void this.closeSplit() }, "Fermer")
+        ? el("button", { class: "ghost", title: titleOf("Permuter les panneaux", "swap"), onclick: () => void this.swapPanes() }, "Permuter")
         : null,
-      el("button", { class: "ghost", title: titleOf("Permuter les panneaux", "swap"), onclick: () => void this.swapPanes() }, "Permuter"),
+      isRight
+        ? el("button", { class: "ghost", title: titleOf("Fermer le panneau droit", "closeSplit"), onclick: () => void this.closeSplit() }, "Fermer le panneau")
+        : null,
     ));
+    return pane;
+  }
 
-    // Zone de depot : lacher un onglet ici ouvre le split.
+  /**
+   * Ecouteurs du panneau d'un onglet, poses une seule fois (ils
+   * s'accumulaient a chaque rendu) : le panneau touche prend la main, et
+   * lacher un onglet sur la moitie droite ouvre le split (section 5).
+   */
+  private wirePane(tab: Tab): void {
+    const pane = tab.host;
+    pane.addEventListener("pointerdown", () => this.setFocused(tab.id), true);
+    pane.addEventListener("focusin", () => this.setFocused(tab.id));
+    const rightHalf = (e: DragEvent) => {
+      const r = pane.getBoundingClientRect();
+      return tab.id === this.splitId || e.clientX > r.left + r.width / 2;
+    };
     pane.addEventListener("dragover", (e) => {
       e.preventDefault();
-      const r = pane.getBoundingClientRect();
-      const onRightHalf = e.clientX > r.left + r.width / 2;
-      pane.classList.toggle("drop-target", onRightHalf || isRight);
+      pane.classList.toggle("drop-target", rightHalf(e));
     });
     pane.addEventListener("dragleave", () => pane.classList.remove("drop-target"));
     pane.addEventListener("drop", (e) => {
       e.preventDefault();
       pane.classList.remove("drop-target");
       const id = e.dataTransfer?.getData("text/plain");
-      if (!id) return;
-      const r = pane.getBoundingClientRect();
-      const onRightHalf = isRight || e.clientX > r.left + r.width / 2;
-      if (onRightHalf && id !== this.activeId) {
+      if (!id || !this.tabs.some((t) => t.id === id)) return;
+      if (rightHalf(e) && id !== this.activeId) {
+        const opening = !this.splitId;
         this.splitId = id;
+        this.focusedId = id;
+        if (opening) this.foldCalculator();
         void this.renderNotebookScreen();
-      } else if (!onRightHalf) {
+      } else if (!rightHalf(e)) {
         this.activeId = id;
         if (this.splitId === id) this.splitId = null;
+        this.focusedId = id;
         void this.renderNotebookScreen();
       }
     });
-    return pane;
   }
 
   private buildDividerBar(tab: Tab, dividers: string[]): HTMLElement {
@@ -630,27 +831,11 @@ export class App {
     for (const d of dividers) {
       const node = el("button", {
         class: `divider-tab${d === tab.divider ? " active" : ""}`,
+        title: "Appui long ou clic droit : ouvrir à droite, renommer, déplacer, supprimer",
         onclick: () => void this.switchDividerAndRender(tab, d),
       }, d);
-      node.addEventListener("contextmenu", async (e) => {
-        e.preventDefault();
-        const choice = await pick(d, [
-          { value: "rename", label: "Renommer" },
-          { value: "delete", label: "Supprimer l'intercalaire" },
-        ]);
-        if (choice === "rename") {
-          const next = await askText("Renommer l'intercalaire", "Nouveau nom", d);
-          if (next) await this.renameDivider(tab, d, next);
-        } else if (choice === "delete") {
-          const ok = await confirmDialog(
-            "Supprimer l'intercalaire",
-            `${d} et toutes ses pages partent à la corbeille (dossier ESEO/.corbeille). `
-              + "Le bouton « Annuler » du message qui suit le remet en place.",
-            "Supprimer",
-          );
-          if (ok) await this.deleteDivider(tab, d);
-        }
-      });
+      // Appui long (stylet, doigt) ou clic droit : le menu de l'intercalaire.
+      onLongPress(node, () => void this.dividerMenu(tab, d, dividers));
       bar.append(node);
     }
     bar.append(el("button", {
@@ -665,6 +850,81 @@ export class App {
       },
     }, "+"));
     return bar;
+  }
+
+  /** Menu d'un intercalaire : a droite, renommer, deplacer, supprimer. */
+  private async dividerMenu(tab: Tab, d: string, dividers: string[]): Promise<void> {
+    const i = dividers.indexOf(d);
+    const holder = this.tabs.find((t) => t.notebook === tab.notebook && t.divider === d);
+    const left = this.activeTab();
+    const options: { value: string; label: string }[] = [];
+    // Cours a gauche, Exos a droite (section 5) : pas pour l'intercalaire
+    // deja a gauche, ni pour celui deja a droite.
+    if (holder?.id !== left?.id && (!holder || holder.id !== this.splitId)) {
+      options.push({ value: "right", label: "Ouvrir à droite" });
+    }
+    options.push({ value: "rename", label: "Renommer" });
+    if (i > 0) options.push({ value: "left", label: "Déplacer à gauche" });
+    if (i >= 0 && i < dividers.length - 1) options.push({ value: "next", label: "Déplacer à droite" });
+    options.push({ value: "delete", label: "Supprimer l'intercalaire" });
+    const choice = await pick(d, options);
+    if (choice === "right") {
+      await this.openRight(tab.notebook, d);
+    } else if (choice === "rename") {
+      const next = await askText("Renommer l'intercalaire", "Nouveau nom", d);
+      if (next) await this.renameDivider(tab, d, next);
+    } else if (choice === "left" || choice === "next") {
+      await this.moveDivider(tab, d, choice === "left" ? -1 : 1);
+    } else if (choice === "delete") {
+      const ok = await confirmDialog(
+        "Supprimer l'intercalaire",
+        `${d} et toutes ses pages partent à la corbeille (dossier ESEO/.corbeille). `
+          + "Le bouton « Annuler » du message qui suit le remet en place.",
+        "Supprimer",
+      );
+      if (ok) await this.deleteDivider(tab, d);
+    }
+  }
+
+  /** Change l'intercalaire de place ; l'ordre est ecrit dans cahier.json. */
+  private async moveDivider(tab: Tab, d: string, delta: number): Promise<void> {
+    const order = moveItem(await this.repo.listDividers(tab.notebook), d, delta);
+    try {
+      await this.repo.reorderDividers(tab.notebook, order);
+    } catch (e) {
+      toast(`Déplacement impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    await this.renderNotebookScreen();
+  }
+
+  /**
+   * Ouvre un intercalaire dans le panneau droit : l'onglet qui le tient
+   * deja, sinon un nouvel onglet. La calculatrice ancree se replie, la
+   * feuille de droite a besoin de la place.
+   */
+  private async openRight(notebook: string, d: string): Promise<void> {
+    const left = this.activeTab();
+    if (!left) return;
+    let tab = this.tabs.find((t) => t.notebook === notebook && t.divider === d);
+    if (tab?.id === left.id) return;
+    if (!tab) {
+      const meta = await this.repo.readMeta(notebook);
+      tab = this.makeTab(notebook, meta, d);
+      this.tabs.push(tab);
+      await this.mountView(tab, this.positions.pageFor(notebook, d, meta.lastPosition));
+    }
+    if (!this.splitId) this.foldCalculator();
+    this.splitId = tab.id;
+    this.focusedId = tab.id;
+    tab.used = Date.now();
+    await this.renderNotebookScreen();
+    this.rememberTab(tab);
+  }
+
+  /** Split ouvert sur le portable : la calculatrice ancree laisse sa colonne. */
+  private foldCalculator(): void {
+    if (this.calculator?.isVisible && this.calculator.isDocked) this.calculator.hide();
   }
 
   /**
@@ -687,12 +947,15 @@ export class App {
       else if (wanted !== d) toast("Un intercalaire porte déjà ce nom", "warn");
       return;
     }
-    if (tab.divider === d) {
+    // Tous les onglets sur cet intercalaire (gauche et droite).
+    for (const t of this.tabs.filter((x) => x.notebook === tab.notebook && x.divider === d)) {
       // Une ecriture tardive de l'ancienne vue va dans le nouveau dossier.
-      if (tab.view) tab.view.divider = applied;
-      tab.divider = applied;
-      await this.mountView(tab, tab.view?.pageNumber);
+      if (t.view) t.view.divider = applied;
+      t.divider = applied;
+      await this.mountView(t, t.view?.pageNumber);
     }
+    this.positions.renameDivider(tab.notebook, d, applied);
+    this.nav.renameDivider(tab.notebook, d, applied);
     await this.renderNotebookScreen();
   }
 
@@ -713,25 +976,48 @@ export class App {
       toast(`Suppression impossible : ${(e as Error).message}`, "err", 6000);
       return;
     }
-    if (tab.divider === d) {
-      const rest = await this.repo.listDividers(tab.notebook);
-      tab.divider = rest[0] ?? await this.repo.createDivider(tab.notebook, "Cours");
-      await this.mountView(tab);
+    const nb = tab.notebook;
+    this.positions.dropDivider(nb, d);
+    this.nav.drop(nb, d);
+    const rest = await this.repo.listDividers(nb);
+    for (const t of this.tabs.filter((x) => x.notebook === nb && x.divider === d)) {
+      // Un intercalaire qu'aucun autre onglet ne montre ; sinon l'onglet part.
+      const free = rest.find((x) => !this.tabs.some((o) => o.notebook === nb && o.divider === x));
+      if (free || this.tabs.filter((o) => o.notebook === nb).length === 1) {
+        t.divider = free ?? await this.repo.createDivider(nb, "Cours");
+        await this.mountView(t, this.positions.pageFor(nb, t.divider));
+      } else {
+        await t.view?.dispose();
+        this.dropTab(t.id);
+      }
     }
-    await this.renderNotebookScreen();
+    if (this.tabs.length) await this.renderNotebookScreen();
+    else await this.showMenu();
     this.offerRestore(entry);
   }
 
-  /** Message « Annuler » de 8 s apres une suppression (page ou intercalaire). */
+  /** Message « Annuler » de 8 s apres une suppression (page, intercalaire, matiere). */
   private offerRestore(entry: TrashEntry): void {
-    const what = entry.page != null
-      ? `Page ${entry.page} de ${entry.divider} mise à la corbeille`
-      : `Intercalaire ${entry.divider} mis à la corbeille`;
+    const what = entry.kind === "notebook" ? `Matière ${entry.dir} mise à la corbeille`
+      : entry.page != null
+        ? `Page ${entry.page} de ${entry.divider} mise à la corbeille`
+        : `Intercalaire ${entry.divider} mis à la corbeille`;
     toast(what, "info", 8000, { label: "Annuler", run: () => void this.restore(entry) });
   }
 
   private async restore(entry: TrashEntry): Promise<void> {
-    const tab = this.tabs.find((t) => t.notebook === entry.dir);
+    if (entry.kind === "notebook") {
+      try {
+        const name = await this.repo.restoreNotebook(entry);
+        toast(`Matière ${name} restaurée`);
+      } catch (e) {
+        toast(`Restauration impossible : ${(e as Error).message}. La matière reste dans ESEO/.corbeille.`, "err", 8000);
+      }
+      if (this.screen === "menu") await this.showMenu();
+      return;
+    }
+    const tab = this.tabs.find((t) => t.notebook === entry.dir && t.divider === entry.divider)
+      ?? this.tabs.find((t) => t.notebook === entry.dir);
     if (entry.page != null) {
       // La vue de cet intercalaire tient des numeros de page : c'est elle
       // qui restaure, pour les decaler en meme temps que le disque.
@@ -759,16 +1045,154 @@ export class App {
       return;
     }
     toast(`Intercalaire ${name} restauré`);
-    if (tab && this.screen === "notebook") {
-      await this.switchDivider(tab, name);
-      await this.renderNotebookScreen();
-    }
+    if (tab && this.screen === "notebook") await this.switchDividerAndRender(tab, name);
   }
 
+  /**
+   * Clic sur un intercalaire. Deja ouvert dans un autre onglet : cet onglet
+   * prend la place (jamais deux vues sur le meme intercalaire).
+   */
   private async switchDividerAndRender(tab: Tab, d: string): Promise<void> {
     if (tab.divider === d) return;
-    await this.switchDivider(tab, d);
+    const holder = this.tabs.find((t) => t !== tab && t.notebook === tab.notebook && t.divider === d);
+    if (holder) {
+      this.rememberTab(tab);
+      this.place(holder);
+    } else {
+      await this.switchDivider(tab, d);
+      this.place(tab);
+    }
     await this.renderNotebookScreen();
+  }
+
+  /* ---------------- matieres (menu) ---------------- */
+
+  /** Nouvelle matiere ; si elle existe deja, elle s'ouvre telle quelle. */
+  private async createNotebook(title: string, color: string): Promise<void> {
+    let dir: string;
+    try {
+      const existing = await this.repo.findDir(title);
+      if (existing && await this.repo.isNotebook(existing)) toast(`${existing} existe déjà : la voici`, "info");
+      dir = await this.repo.createNotebook(title, color);
+      if (!(await this.repo.listDividers(dir)).length) await this.repo.createDivider(dir, "Cours");
+    } catch (e) {
+      toast(`Création impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    await this.openNotebook(dir);
+  }
+
+  /**
+   * Toutes les vues d'une matiere ont ecrit ? Avant de deplacer ou de
+   * supprimer son dossier. Faux (et un message) si une page reste refusee.
+   */
+  private async settleNotebook(dir: string, cancelled: string): Promise<boolean> {
+    const held = this.views().filter((v) => v.notebook === dir);
+    for (const v of held) await v.flush();
+    if (!held.some((v) => v.hasUnsaved)) return true;
+    toast(`Une page n'est pas encore enregistrée : ${cancelled} pour ne rien perdre. Réessaie dans un instant.`, "err", 6000);
+    return false;
+  }
+
+  /** Renomme une matiere (titre et dossier) ; ses onglets suivent. */
+  private async renameNotebook(dir: string, title: string): Promise<void> {
+    if (!(await this.settleNotebook(dir, "renommage annulé"))) return;
+    const open = this.tabs.filter((t) => t.notebook === dir);
+    let next: string;
+    try {
+      next = await this.repo.renameNotebook(dir, title);
+    } catch (e) {
+      toast(`Renommage impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    if (next !== dir) {
+      // Les vues tenaient l'ancien chemin : elles sont refaites au prochain
+      // affichage (rien n'attendait, voir settleNotebook).
+      for (const t of open) {
+        await t.view?.dispose();
+        t.view = null;
+        t.notebook = next;
+      }
+      this.positions.renameNotebook(dir, next);
+      this.nav.renameNotebook(dir, next);
+    }
+    for (const t of open) t.title = title.trim();
+    toast(`Matière renommée : ${title.trim()}`);
+    if (this.screen === "menu") await this.showMenu();
+  }
+
+  private async setNotebookColor(dir: string, color: string): Promise<void> {
+    try {
+      await this.repo.setNotebookColor(dir, color);
+    } catch (e) {
+      toast(`Couleur non enregistrée : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    for (const t of this.tabs) if (t.notebook === dir) t.color = color;
+    if (this.screen === "menu") await this.showMenu();
+  }
+
+  /** Toute la matiere a la corbeille, ses onglets fermes ; « Annuler » la remet. */
+  private async deleteNotebook(dir: string): Promise<void> {
+    const title = (await this.repo.readMeta(dir)).title;
+    const ok = await confirmDialog(
+      "Supprimer la matière",
+      `${title} et toutes ses pages partent à la corbeille (dossier ESEO/.corbeille). `
+        + "Le bouton « Annuler » du message qui suit la remet en place.",
+      "Supprimer",
+    );
+    if (!ok || !(await this.settleNotebook(dir, "suppression annulée"))) return;
+    for (const v of this.views().filter((x) => x.notebook === dir)) v.discard();
+    for (const t of this.tabs.filter((x) => x.notebook === dir)) {
+      await t.view?.dispose();
+      this.dropTab(t.id);
+    }
+    let entry: TrashEntry;
+    try {
+      entry = await this.repo.deleteNotebook(dir);
+    } catch (e) {
+      toast(`Suppression impossible : ${(e as Error).message}`, "err", 6000);
+      await this.showMenu();
+      return;
+    }
+    this.nav.drop(dir);
+    await this.showMenu();
+    this.offerRestore(entry);
+  }
+
+  /** « En faire une matiere » : le dossier recoit son cahier.json. */
+  private async adoptNotebook(dir: string, title: string, color: string): Promise<void> {
+    try {
+      await this.repo.adoptNotebook(dir, color, title);
+    } catch (e) {
+      toast(`Impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    toast(`${title} est maintenant une matière`);
+    await this.showMenu();
+  }
+
+  /**
+   * Nettoyage propose par le menu : ces dossiers sans page redeviennent des
+   * « Autres dossiers ». Leur cahier.json part a la corbeille, « Annuler »
+   * les remet. Une matiere ouverte dans un onglet n'est pas touchee.
+   */
+  private async unmarkNotebooks(dirs: string[]): Promise<void> {
+    const entries: TrashEntry[] = [];
+    for (const d of dirs) {
+      if (this.tabs.some((t) => t.notebook === d)) continue;
+      try { entries.push(await this.repo.unmarkNotebook(d)); } catch { /* fichier deja parti */ }
+    }
+    await this.showMenu();
+    if (!entries.length) return;
+    toast(`${entries.length > 1 ? `${entries.length} dossiers rangés` : "Dossier rangé"} dans « Autres dossiers »`,
+      "info", 8000, {
+        label: "Annuler",
+        run: () => void (async () => {
+          for (const e of entries) { try { await this.repo.restoreMeta(e); } catch { /* deja remis */ } }
+          if (this.screen === "menu") await this.showMenu();
+        })(),
+      });
   }
 
   /**
@@ -780,7 +1204,7 @@ export class App {
    */
   private buildToolbar(): HTMLElement {
     const bar = el("div", { class: "toolbar" });
-    const view = () => this.activeTab()?.view;
+    const view = () => this.focusedTab()?.view;
     // Pas de focus sur ces boutons a la souris : la selection et le curseur
     // du texte restent, on continue de taper aussitot.
     const keep = <T extends HTMLElement>(b: T): T => {
@@ -857,12 +1281,12 @@ export class App {
     );
 
     // Pages : ou l'on est, et un appui pour bouger. Un appui sur
-    // l'indicateur = Ctrl+G.
+    // l'indicateur ouvre la liste des pages (comme Ctrl+G).
     const v = view();
     this.pageLabelEl = el("button", {
       class: "page-label ghost",
-      title: titleOf("Aller à la page", "goto"),
-      onclick: () => void this.goToPrompt(),
+      title: titleOf("Liste des pages : numéro, date, première ligne", "goto"),
+      onclick: () => void this.showPageList(),
     }, pageLabel(v?.pageNumber ?? 1, v?.pageCount ?? 0));
     bar.append(
       el("div", { class: "page-nav" },
@@ -898,7 +1322,7 @@ export class App {
           this.paintToolbar();
         },
       }, el("span", {}, "Maths"), el("span", { class: "chevron" }, mathOpen ? "▾" : "▸")),
-      mathOpen ? buildMathBar(() => this.activeTab()?.view?.activeDoc) : null,
+      mathOpen ? buildMathBar(() => this.focusedTab()?.view?.activeDoc) : null,
     );
 
     // Outils a gauche : la hauteur de l'ecran reste a la feuille.
@@ -920,7 +1344,7 @@ export class App {
       backdrop.remove();
       document.removeEventListener("keydown", onKey, true);
     };
-    const view = () => this.activeTab()?.view;
+    const view = () => this.focusedTab()?.view;
 
     // Une action ferme le menu avant de s'executer : un dialogue qui suit
     // ne s'ouvre pas sous lui.
@@ -949,7 +1373,8 @@ export class App {
           () => void this.toggleCalculator()),
         action("Insérer une page ici", titleOf("Insérer une page après la page courante", "insertPage"),
           () => void view()?.newPage(true)),
-        action("Aller à la page…", titleOf("Aller à la page", "goto"), () => void this.goToPrompt()),
+        action("Liste des pages…", titleOf("Toutes les pages : numéro, date, première ligne", "goto"),
+          () => void this.showPageList()),
         action("Exporter la page (PDF)", titleOf("La page courante, puis « Enregistrer au format PDF »", "exportPage"),
           () => void view()?.exportPdf("current")),
         action("Exporter l'intercalaire (PDF)", titleOf("Toutes les pages de l'intercalaire", "exportAll"),
@@ -977,6 +1402,8 @@ export class App {
         ]),
         el("div", { class: "sep" }),
         action("Raccourcis clavier", "Fiche des raccourcis (F1)", () => showShortcuts()),
+        action("Sonde stylet (diagnostic)", "Ce que renvoie l'écran : type de pointeur, pression, points",
+          () => this.showProbe()),
         // En bas, loin des autres actions : un appui de travers au stylet
         // ne doit pas tomber dessus.
         el("div", { class: "sep" }),
@@ -1005,7 +1432,7 @@ export class App {
    * Sans OCR, une photo serait un trou noir dans la recherche (section 6).
    */
   private async importImage(): Promise<void> {
-    const view = this.activeTab()?.view;
+    const view = this.focusedTab()?.view;
     if (!view) return;
     const { pickImage, cropDialog } = await import("./image-import");
     const img = await pickImage();
@@ -1024,20 +1451,37 @@ export class App {
   }
 
   private async setViewMode(mode: ViewMode): Promise<void> {
-    await this.activeTab()?.view?.setViewMode(mode);
+    await this.focusedTab()?.view?.setViewMode(mode);
     this.paintToolbar();
   }
 
+  /**
+   * Ctrl+\ ou « Split ». Un autre onglet ouvert va a droite ; sinon le meme
+   * cahier, sur Exos, TD ou TP s'il existe, ou l'intercalaire suivant.
+   */
   private async toggleSplit(): Promise<void> {
     if (this.splitId) { await this.closeSplit(); return; }
-    const other = this.tabs.find((t) => t.id !== this.activeId);
-    if (!other) { toast("Ouvre un second cahier pour utiliser le split", "warn"); return; }
-    this.splitId = other.id;
-    await this.renderNotebookScreen();
+    const left = this.activeTab();
+    if (!left || this.screen !== "notebook") return;
+    const other = mostRecent(this.tabs.filter((t) => t.id !== left.id));
+    if (other) {
+      this.foldCalculator();
+      this.splitId = other.id;
+      this.focusedId = other.id;
+      await this.renderNotebookScreen();
+      return;
+    }
+    const d = pickSplitDivider(await this.repo.listDividers(left.notebook), left.divider);
+    if (!d) {
+      toast("Un seul intercalaire : crée-en un second (+) ou ouvre une autre matière pour le split", "warn", 4000);
+      return;
+    }
+    await this.openRight(left.notebook, d);
   }
 
   private async closeSplit(): Promise<void> {
     this.splitId = null;
+    this.focusedId = this.activeId;
     await this.renderNotebookScreen();
   }
 
@@ -1206,8 +1650,9 @@ export class App {
     const parts = path.split("/");
     if (parts.length < 3) { toast("Lien invalide", "warn"); return; }
     const [nb, div, num] = parts;
-    await this.openNotebook(nb, div, Number(num));
-    if (blockId) await this.activeTab()?.view?.focusBlock(Number(num), blockId);
+    this.noteJump();
+    const tab = await this.openNotebook(nb, div, Number(num));
+    if (blockId) await tab?.view?.focusBlock(Number(num), blockId);
   }
 
   /* ---------------- raccourcis ---------------- */
@@ -1220,7 +1665,14 @@ export class App {
     const typing = inDoc || inField;
     // Une fenetre de dialogue (ou le menu « ⋯ ») garde le clavier.
     const dialog = !!document.querySelector(".backdrop");
-    const view = this.activeTab()?.view;
+    const view = this.focusedTab()?.view;
+
+    // Alt+← : retour a l'endroit d'avant un saut, depuis n'importe quel ecran.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === "ArrowLeft") {
+      e.preventDefault();
+      if (!dialog) void this.goBack();
+      return;
+    }
 
     // Alt : formules, outils et couleurs. Les lettres seules tapent du texte,
     // comme dans Word ; les raccourcis passent donc tous par Alt.
@@ -1254,7 +1706,10 @@ export class App {
     // ne doit pas en plus renvoyer au menu.
     if (dialog) return;
 
-    if (e.key === "Escape" && (this.screen === "search" || this.screen === "flags")) {
+    // Menu : Entree reprend, des lettres filtrent les matieres, fleches.
+    if (this.screen === "menu" && this.menuKeys?.(e)) { e.preventDefault(); return; }
+
+    if (e.key === "Escape" && (this.screen === "search" || this.screen === "flags" || this.screen === "probe")) {
       e.preventDefault();
       this.leaveAux();
       return;
@@ -1304,14 +1759,14 @@ export class App {
       case "finger": this.toggleFinger(); return true;
       case "newPage": if (notebook) void view?.newPage(); return true;
       case "insertPage": if (notebook) void view?.newPage(true); return true;
-      case "goto": if (notebook) void this.goToPrompt(view); return true;
+      case "goto": if (notebook) void this.showPageList(view, true); return true;
       case "nextPage": if (notebook) void view?.next(); return true;
       case "prevPage": if (notebook) void view?.prev(); return true;
       case "nextDivider": if (notebook) void this.switchDividerBy(1); return true;
       case "prevDivider": if (notebook) void this.switchDividerBy(-1); return true;
       case "exportPage": if (notebook) void view?.exportPdf("current"); return true;
       case "exportAll": if (notebook) void view?.exportPdf("all"); return true;
-      case "closeTab": if (this.activeId) void this.closeTab(this.activeId); return true;
+      case "closeTab": { const t = this.focusedTab(); if (t) void this.closeTab(t.id); return true; }
       case "nextTab": this.cycleTab(1); return true;
       case "prevTab": this.cycleTab(-1); return true;
       case "split": void this.toggleSplit(); return true;
@@ -1321,29 +1776,51 @@ export class App {
     }
   }
 
+  /**
+   * Ctrl+Tab : le panneau vise passe a l'onglet suivant. L'onglet de
+   * l'autre panneau est saute (le prendre refermait le split).
+   */
   private cycleTab(delta: number): void {
-    if (!this.tabs.length) return;
-    const i = this.tabs.findIndex((t) => t.id === this.activeId);
-    const next = this.tabs[(i + delta + this.tabs.length) % this.tabs.length];
-    if (next) { this.activeId = next.id; void this.renderNotebookScreen(); }
+    const current = this.focusedTab();
+    const otherId = this.splitId ? (current?.id === this.splitId ? this.activeId : this.splitId) : null;
+    const ring = this.tabs.filter((t) => t.id !== otherId);
+    if (!ring.length) return;
+    const i = current ? ring.indexOf(current) : -1;
+    const next = ring[(i + delta + ring.length) % ring.length];
+    if (!next || (next === current && this.screen === "notebook")) return;
+    this.place(next);
+    void this.renderNotebookScreen();
   }
 
-  /** Ctrl+G, ou un appui sur « p. 4 / 12 ». */
-  private async goToPrompt(target?: PageView | null): Promise<void> {
-    const view = target ?? this.activeTab()?.view;
+  /**
+   * Liste des pages (un appui sur « p. 4 / 12 », ou Ctrl+G) : numero, date
+   * et premiere ligne de chaque page, et un champ pour taper un numero.
+   * 30 pages ne coutent plus 30 clics.
+   */
+  private async showPageList(target?: PageView | null, typeNumber = false): Promise<void> {
+    const view = target ?? this.focusedTab()?.view;
     if (!view || this.screen !== "notebook" || document.querySelector(".backdrop")) return;
-    const nums = await view.pageNumbers();
-    const last = nums[nums.length - 1] ?? 1;
-    const input = await askText("Aller à la page", `Numéro de page, de 1 à ${last}`, "");
-    if (input == null || !input.trim()) return;
-    const r = parsePageInput(input, nums);
-    if ("error" in r) { toast(r.error, "warn"); return; }
-    await view.goTo(r.page);
+    // Ce qu'on vient d'ecrire doit apparaitre dans la liste.
+    await view.flush();
+    const pages = (await this.repo.scanDivider(view.notebook, view.divider)) ?? [];
+    const nums = pages.map((p) => p.n);
+    const n = await pageListDialog({
+      title: view.divider,
+      current: view.pageNumber,
+      typeNumber,
+      pages: pages.map((p) => ({
+        n: p.n, day: dayLabel(p.index?.created), line: p.index?.firstLine ?? "", unreadable: !p.index,
+      })),
+      parse: (input) => parsePageInput(input, nums),
+    });
+    if (n == null || n === view.pageNumber) return;
+    this.noteJump();
+    await view.goTo(n);
   }
 
   /** Ctrl+Maj+Pg↓ / Pg↑ : intercalaire suivant ou precedent du cahier. */
   private async switchDividerBy(delta: number): Promise<void> {
-    const tab = this.activeTab();
+    const tab = this.focusedTab();
     if (!tab) return;
     const dividers = await this.repo.listDividers(tab.notebook);
     const next = dividers[dividers.indexOf(tab.divider) + delta];
@@ -1375,7 +1852,7 @@ export class App {
       // conversion sans rien voir arriver.
       this.renderMode = "clean";
       for (const t of this.tabs) t.view?.setRenderMode(this.renderMode);
-      this.activeTab()?.view?.reconvert();
+      this.focusedTab()?.view?.reconvert();
       // Fonds de page restes en attente hors Auto (ouverts, ou laisses a la
       // derniere fermeture) : ils ne partaient qu'a la reouverture de leur page.
       for (const v of this.views()) v.resumeAll();
@@ -1433,7 +1910,7 @@ export class App {
 
   /** Raccourcis Alt. Renvoie true si la touche a ete prise. */
   private onAltKey(e: KeyboardEvent, inDoc: boolean): boolean {
-    const view = this.activeTab()?.view;
+    const view = this.focusedTab()?.view;
     // Alt+= : nouvelle formule, comme l'equation de Word.
     if (e.key === "=" && !e.shiftKey) {
       if (!inDoc) view?.focusText();
@@ -1701,6 +2178,11 @@ function readJson<T>(key: string): T | null {
   } catch {
     return null;
   }
+}
+
+/** Stockage local de la machine, ou null s'il est indisponible. */
+function localStore(): Storage | null {
+  try { return window.localStorage; } catch { return null; }
 }
 
 function writeJson(key: string, value: unknown): void {

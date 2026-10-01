@@ -1,15 +1,18 @@
-import { el, askFields, toast } from "./dom";
+import { el, askText, onLongPress, pick, toast } from "./dom";
 import { NOTEBOOK_COLORS } from "../core/palette";
-import type { Repo, NotebookSummary } from "../core/storage/repo";
+import { VRAC, type Repo, type NotebookSummary, type OtherDir } from "../core/storage/repo";
 import {
   listFlags, sortFlags, DEFAULT_FLAG_NOTE,
   type FlagHit, type SearchHit, type SearchOptions,
 } from "../core/storage/search";
 import { parseQuery, queryReady, type ExcerptPart } from "../core/text/find";
+import { filterByTitle, gridStep } from "../core/nav";
+import type { Spot } from "../core/position";
 import type { Block } from "../core/types";
 
 export interface MenuHost {
   repo: Repo;
+  /** Ouvre le cahier ; sans intercalaire, la ou on l'avait laisse. */
   openNotebook: (dir: string, divider?: string, page?: number) => void;
   /** Ouvre la page et va au bloc ; `query` surligne le passage trouve. */
   openAt: (dir: string, divider: string, page: number, blockId: string, query?: string) => void;
@@ -18,20 +21,64 @@ export interface MenuHost {
   openFlags: (notebook?: string) => void;
   /** Marque un repere compris (true) ou le rend (false). false si rien n'a change. */
   setFlagResolved: (f: FlagHit, resolved: boolean) => Promise<boolean>;
-  openProbe: () => void;
   rootLabel: string;
+  /** Derniere position de cette machine parmi ces matieres (D8). */
+  lastSpot?: (dirs: string[]) => Spot | null;
+  /** Gestion des matieres : l'appli s'occupe des onglets ouverts. */
+  createNotebook?: (title: string, color: string) => Promise<void>;
+  renameNotebook?: (dir: string, title: string) => Promise<void>;
+  setNotebookColor?: (dir: string, color: string) => Promise<void>;
+  deleteNotebook?: (dir: string) => Promise<void>;
+  adoptNotebook?: (dir: string, title: string, color: string) => Promise<void>;
+  /** Rend ces dossiers aux « Autres dossiers » (leur cahier.json part a la corbeille). */
+  unmarkNotebooks?: (dirs: string[]) => Promise<void>;
+}
+
+/** Le menu et ce qu'il fait du clavier (l'appli lui passe les touches). */
+export interface MenuScreen {
+  root: HTMLElement;
+  /** true si la touche est prise. */
+  onKey: (e: KeyboardEvent) => boolean;
+}
+
+/** Noms des couleurs de matiere, au doigt (aucune infobulle). */
+const COLOR_NAMES: Record<string, string> = {
+  "#2563eb": "Bleu", "#dc2626": "Rouge", "#059669": "Vert", "#d97706": "Orange",
+  "#7c3aed": "Violet", "#0891b2": "Cyan", "#db2777": "Rose", "#65a30d": "Olive",
+};
+
+/** Dossiers dont on a dit « Garder » au nettoyage, sur cette machine. */
+const KEEP_KEY = "cahiers.menu.keep.v1";
+
+function readKeep(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEEP_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch { return []; }
+}
+
+function writeKeep(dirs: string[]): void {
+  try { localStorage.setItem(KEEP_KEY, JSON.stringify(dirs)); } catch { /* stockage indisponible */ }
+}
+
+/** Premiere couleur qu'aucune matiere n'a encore, pour en distinguer une nouvelle. */
+export function freeColor(used: string[]): string {
+  return NOTEBOOK_COLORS.find((c) => !used.includes(c)) ?? NOTEBOOK_COLORS[used.length % NOTEBOOK_COLORS.length];
 }
 
 /**
  * Ecran d'accueil (section 5). L'application s'ouvre directement ici,
- * pas d'ecran de demarrage.
+ * pas d'ecran de demarrage. Clavier : Entree reprend, des lettres filtrent
+ * les matieres (Entree ouvre la premiere), les fleches passent de l'une a
+ * l'autre.
  */
-export async function buildMenu(host: MenuHost): Promise<HTMLElement> {
-  const notebooks = await host.repo.listNotebooks();
+export async function buildMenu(host: MenuHost): Promise<MenuScreen> {
+  const { notebooks, others } = await host.repo.listRoot();
   // Les reperes viennent du meme parcours que les compteurs : un seul.
   const flags = notebooks.flatMap((n) => n.flags);
   const inner = el("div", { class: "screen-inner" });
-  const screen = el("div", { class: "screen" }, inner);
+  const screen = el("div", { class: "screen menu-screen" }, inner);
+  const usedColors = notebooks.map((n) => n.meta.color);
 
   inner.append(
     el("div", { class: "row" },
@@ -40,34 +87,35 @@ export async function buildMenu(host: MenuHost): Promise<HTMLElement> {
         el("div", { class: "muted small" }, host.rootLabel),
       ),
       el("div", { class: "spacer" }),
-      el("button", { onclick: host.openSearch }, "Rechercher"),
-      el("button", { onclick: host.openProbe, title: "Diagnostic du stylet" }, "Sonde stylet"),
+      el("button", { onclick: host.openSearch, title: "Recherche dans tous les cahiers (Ctrl+K)" }, "Rechercher"),
     ),
   );
 
-  // Bloc "Reprendre" en haut : derniere position, un clic.
-  const resume = await lastPosition(notebooks);
+  // Bloc "Reprendre" en haut : derniere position, un clic (ou Entree).
+  const resume = resumeSpot(host, notebooks);
+  let resumeBtn: HTMLButtonElement | null = null;
   if (resume) {
-    inner.append(
-      el("h2", {}, "Reprendre"),
-      el("button", {
-        class: "resume",
-        onclick: () => host.openNotebook(resume.dir, resume.divider, resume.page),
-      },
-        el("div", { class: "bar", style: { background: resume.color, width: "6px", height: "42px", borderRadius: "3px" } }),
-        el("div", {},
-          el("div", { class: "big" }, resume.title),
-          el("div", { class: "muted small" }, `${resume.divider}, page ${resume.page}`),
-        ),
+    resumeBtn = el("button", {
+      class: "resume",
+      title: "Reprendre (Entrée)",
+      onclick: () => host.openNotebook(resume.dir, resume.divider, resume.page),
+    },
+      el("div", { class: "bar", style: { background: resume.color, width: "6px", height: "42px", borderRadius: "3px" } }),
+      el("div", {},
+        el("div", { class: "big" }, resume.title),
+        el("div", { class: "muted small" }, `${resume.divider}, page ${resume.page}`),
       ),
+      el("div", { class: "spacer" }),
+      el("span", { class: "muted small key-hint" }, "Entrée"),
     );
+    inner.append(el("h2", {}, "Reprendre"), resumeBtn);
   }
 
   // Compteur de marqueurs "pas compris" en attente.
   if (flags.length) {
     inner.append(
       el("h2", {}, "Pas compris"),
-      el("button", { class: "resume", onclick: () => host.openFlags() },
+      el("button", { class: "resume flags", onclick: () => host.openFlags() },
         el("span", { class: "badge" }, `${flags.length}`),
         el("div", {},
           el("div", { class: "big" }, flags.length > 1 ? "repères en attente" : "repère en attente"),
@@ -78,33 +126,133 @@ export async function buildMenu(host: MenuHost): Promise<HTMLElement> {
     );
   }
 
-  inner.append(el("h2", {}, "Matières"));
+  const filterNote = el("span", { class: "filter-note small", hidden: true });
+  inner.append(el("div", { class: "row matieres-head" }, el("h2", {}, "Matières"), filterNote));
+
+  // Dossiers ou une ancienne version a pose un cahier.json sans qu'il y ait
+  // la moindre page : on propose de les rendre, jamais d'office.
+  const keep = readKeep();
+  const pageless = (await host.repo.pagelessNotebooks(notebooks)).filter((d) => !keep.includes(d));
+  if (pageless.length && host.unmarkNotebooks) {
+    const titles = pageless.map((d) => notebooks.find((n) => n.dir === d)?.meta.title ?? d);
+    const banner = el("div", { class: "cleanup" },
+      el("div", {},
+        el("strong", {}, pageless.length > 1
+          ? `${pageless.length} dossiers sans aucune page sont affichés comme matières`
+          : "Un dossier sans aucune page est affiché comme matière"),
+        el("div", { class: "small muted" },
+          `${titles.join(", ")}. Une ancienne version y a posé un cahier.json. `
+            + "Les ranger dans « Autres dossiers » met ce fichier à la corbeille, rien d'autre."),
+      ),
+      el("div", { class: "spacer" }),
+      el("button", {
+        onclick: () => { writeKeep([...keep, ...pageless]); banner.remove(); },
+      }, "Garder"),
+      el("button", { class: "primary", onclick: () => void host.unmarkNotebooks!(pageless) }, "Ranger"),
+    );
+    inner.append(banner);
+  }
+
   const grid = el("div", { class: "grid" });
   inner.append(grid);
+  const cards: { nb: NotebookSummary; wrap: HTMLElement; button: HTMLButtonElement }[] = [];
+  for (const nb of notebooks) {
+    const c = card(host, nb, usedColors);
+    cards.push({ nb, ...c });
+    grid.append(c.wrap);
+  }
 
-  for (const nb of notebooks) grid.append(card(host, nb));
-
-  grid.append(el("button", {
+  const addCard = el("button", {
     class: "card add",
     onclick: async () => {
-      const r = await askFields("Nouvelle matière", [
-        { name: "title", label: "Nom", placeholder: "Maths, Élec, Info…" },
-      ], "Créer");
-      if (!r?.title) return;
-      const color = NOTEBOOK_COLORS[Math.floor(Math.random() * NOTEBOOK_COLORS.length)];
-      const dir = await host.repo.createNotebook(r.title, color);
-      await host.repo.createDivider(dir, "Cours");
+      const r = await notebookDialog({ title: "Nouvelle matière", name: "", askName: true, color: freeColor(usedColors), ok: "Créer" });
+      if (!r?.name) return;
+      if (host.createNotebook) { await host.createNotebook(r.name, r.color); return; }
+      const dir = await host.repo.createNotebook(r.name, r.color);
       host.openNotebook(dir);
     },
-  }, "+ Nouvelle matière"));
+  }, "+ Nouvelle matière");
+  grid.append(addCard);
 
-  return screen;
+  if (others.length) inner.append(othersSection(host, others, usedColors));
+
+  /* -- clavier -- */
+
+  let filter = "";
+  const visibleCards = () => [...grid.querySelectorAll<HTMLButtonElement>(".card")]
+    .filter((b) => !b.closest("[hidden]") && !b.hidden);
+  const setFilter = (next: string) => {
+    filter = next;
+    const shown = filterByTitle(cards, filter, (c) => [c.nb.meta.title, c.nb.dir]);
+    // Ordre du filtre : la premiere est celle qu'ouvre Entree.
+    for (const c of cards) {
+      c.wrap.hidden = !shown.includes(c);
+      c.wrap.classList.remove("first");
+    }
+    // Sans filtre, l'ordre d'origine (derniere modification, Vrac a la fin).
+    const order = filter ? [...shown, ...cards.filter((c) => !shown.includes(c))] : cards;
+    for (const c of order) grid.insertBefore(c.wrap, addCard);
+    addCard.hidden = !!filter;
+    if (filter && shown[0]) shown[0].wrap.classList.add("first");
+    filterNote.hidden = !filter;
+    filterNote.replaceChildren(
+      el("span", {}, "Filtre : "), el("strong", {}, filter),
+      shown.length ? ` · Entrée ouvre ${shown[0].nb.meta.title}` : " · aucune matière", " · Échap efface",
+    );
+    const active = document.activeElement as HTMLElement | null;
+    if (active && screen.contains(active) && active.closest("[hidden]")) active.blur();
+  };
+
+  const onKey = (e: KeyboardEvent): boolean => {
+    if (e.ctrlKey || e.altKey || e.metaKey) return false;
+    const active = document.activeElement as HTMLElement | null;
+    const focused = active && screen.contains(active) ? active : null;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const list = visibleCards();
+      if (!list.length) return false;
+      const i = list.indexOf(focused as HTMLButtonElement);
+      const top = list[0].getBoundingClientRect().top;
+      const cols = list.filter((b) => Math.abs(b.getBoundingClientRect().top - top) < 4).length;
+      const next = list[gridStep(i, e.key, cols, list.length)];
+      next.focus();
+      next.scrollIntoView({ block: "nearest" });
+      return true;
+    }
+    if (e.key === "Enter") {
+      // Une carte ou un bouton a le clavier : Entree l'appuie, nativement.
+      if (focused && (focused.tagName === "BUTTON" || focused.tagName === "SUMMARY")) return false;
+      if (filter) { visibleCards()[0]?.click(); return true; }
+      if (resumeBtn) { resumeBtn.click(); return true; }
+      return false;
+    }
+    if (e.key === "Escape" && filter) { setFilter(""); return true; }
+    if (e.key === "Backspace" && filter) { setFilter(filter.slice(0, -1)); return true; }
+    // Une lettre filtre ; l'espace aussi, mais seulement au milieu d'un nom.
+    if (e.key.length === 1 && (e.key !== " " || filter) && !(focused?.tagName === "SUMMARY" && e.key === " ")) {
+      setFilter(filter + e.key);
+      return true;
+    }
+    return false;
+  };
+
+  return { root: screen, onKey };
 }
 
-function card(host: MenuHost, nb: NotebookSummary): HTMLElement {
+/** Ou reprendre : la derniere position de cette machine, sinon l'ancienne de cahier.json. */
+function resumeSpot(host: MenuHost, notebooks: NotebookSummary[]) {
+  const spot = host.lastSpot?.(notebooks.map((n) => n.dir));
+  const nb = spot ? notebooks.find((n) => n.dir === spot.notebook) : notebooks.find((n) => n.meta.lastPosition);
+  if (!nb) return null;
+  const divider = spot?.divider ?? nb.meta.lastPosition!.divider;
+  const page = spot?.page ?? nb.meta.lastPosition!.page;
+  return { dir: nb.dir, title: nb.meta.title, color: nb.meta.color, divider, page };
+}
+
+function card(host: MenuHost, nb: NotebookSummary, usedColors: string[]): { wrap: HTMLElement; button: HTMLButtonElement } {
   const node = el("button", {
     class: "card",
-    onclick: () => host.openNotebook(nb.dir, nb.meta.lastPosition?.divider, nb.meta.lastPosition?.page),
+    // Sans intercalaire : l'appli rouvre la ou on l'avait laisse (D8).
+    onclick: () => host.openNotebook(nb.dir),
   },
     el("div", { class: "bar", style: { background: nb.meta.color } }),
     el("div", { class: "title" }, nb.meta.title),
@@ -124,23 +272,131 @@ function card(host: MenuHost, nb: NotebookSummary): HTMLElement {
     badge.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") open(e); });
     node.append(badge);
   }
-  return node;
+  const wrap = el("div", { class: "card-wrap" }, node);
+  if (host.renameNotebook) {
+    const openMenu = () => void notebookMenu(host, nb, usedColors);
+    // Appui long ou clic droit sur la carte, ou le bouton ⋯ : au doigt comme a la souris.
+    onLongPress(node, openMenu);
+    wrap.append(el("button", {
+      class: "ghost card-more",
+      title: `Renommer, couleur, supprimer : ${nb.meta.title}`,
+      "aria-label": `Actions sur ${nb.meta.title}`,
+      onclick: openMenu,
+    }, "⋯"));
+  }
+  return { wrap, button: node };
 }
 
-/** La matiere la plus recemment modifiee qui a une position memorisee. */
-async function lastPosition(notebooks: NotebookSummary[]) {
-  for (const nb of notebooks) {
-    if (nb.meta.lastPosition) {
-      return {
-        dir: nb.dir,
-        title: nb.meta.title,
-        color: nb.meta.color,
-        divider: nb.meta.lastPosition.divider,
-        page: nb.meta.lastPosition.page,
-      };
-    }
+/** Menu d'une matiere : renommer, couleur, supprimer (vers la corbeille). */
+async function notebookMenu(host: MenuHost, nb: NotebookSummary, usedColors: string[]): Promise<void> {
+  const vrac = nb.dir === VRAC;
+  const choice = await pick(nb.meta.title, [
+    ...(vrac ? [] : [{ value: "rename", label: "Renommer" }]),
+    { value: "color", label: "Couleur" },
+    ...(vrac ? [] : [{ value: "delete", label: "Supprimer la matière" }]),
+  ]);
+  if (choice === "rename") {
+    const next = await askText("Renommer la matière", "Nouveau nom (le dossier est renommé aussi)", nb.meta.title);
+    if (next?.trim() && next.trim() !== nb.meta.title) await host.renameNotebook?.(nb.dir, next.trim());
+  } else if (choice === "color") {
+    const r = await notebookDialog({
+      title: `Couleur de ${nb.meta.title}`, askName: false, color: nb.meta.color, ok: "Valider",
+      used: usedColors.filter((c) => c !== nb.meta.color),
+    });
+    if (r && r.color !== nb.meta.color) await host.setNotebookColor?.(nb.dir, r.color);
+  } else if (choice === "delete") {
+    await host.deleteNotebook?.(nb.dir);
   }
-  return null;
+}
+
+/**
+ * Dossiers de la racine qui ne sont pas des matieres (D5) : documents,
+ * projets, depots git. Replies par defaut ; un appui en fait une matiere.
+ */
+function othersSection(host: MenuHost, others: OtherDir[], usedColors: string[]): HTMLElement {
+  const rows = others.map((o) => el("div", { class: "other-row" },
+    el("span", { class: "other-name" }, o.dir),
+    el("div", { class: "spacer" }),
+    o.git
+      ? el("span", { class: "small muted" }, "dépôt git, ignoré")
+      : el("button", {
+          onclick: async () => {
+            const r = await notebookDialog({
+              title: `Faire de ${o.dir} une matière`, name: o.dir, askName: true,
+              color: freeColor(usedColors), ok: "En faire une matière",
+            });
+            if (r) await host.adoptNotebook?.(o.dir, r.name || o.dir, r.color);
+          },
+        }, "En faire une matière"),
+  ));
+  const details = el("details", { class: "others" },
+    el("summary", {}, `Autres dossiers (${others.length})`),
+    el("p", { class: "small muted" },
+      "Dossiers sans cahier.json ni page : Cahiers n'y écrit rien. "
+        + "Les dépôts git ne sont jamais des matières."),
+    ...rows,
+  );
+  return details;
+}
+
+/**
+ * Nom et couleur d'une matiere : a la creation, et pour changer sa couleur.
+ * Huit couleurs, au doigt (44 px) ; celles deja prises par une autre
+ * matiere sont signalees, pas interdites.
+ */
+function notebookDialog(opts: {
+  title: string; name?: string; askName: boolean; color: string; ok: string; used?: string[];
+}): Promise<{ name: string; color: string } | null> {
+  return new Promise((resolve) => {
+    let color: string = opts.color;
+    const input = el("input", { type: "text", placeholder: "Maths, Élec, Info…" });
+    input.value = opts.name ?? "";
+    const swatches = el("div", { class: "color-row", role: "radiogroup" });
+    const paint = () => {
+      swatches.replaceChildren(...NOTEBOOK_COLORS.map((c) => el("button", {
+        class: `swatch${c === color ? " on" : ""}`,
+        role: "radio",
+        "aria-checked": String(c === color),
+        title: `${COLOR_NAMES[c] ?? c}${opts.used?.includes(c) ? " (déjà prise)" : ""}`,
+        "aria-label": COLOR_NAMES[c] ?? c,
+        onclick: () => { color = c; paint(); },
+      }, el("i", { style: { background: c } }))));
+    };
+    paint();
+    const close = (v: { name: string; color: string } | null) => {
+      backdrop.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(v);
+    };
+    const submit = () => {
+      const name = input.value.trim();
+      if (opts.askName && !name) { input.focus(); return; }
+      close({ name, color });
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); close(null); }
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+    };
+    const backdrop = el("div", { class: "backdrop" },
+      el("div", { class: "modal" },
+        el("header", {}, opts.title),
+        el("div", { class: "content" },
+          opts.askName ? el("label", { class: "small muted" }, "Nom") : null,
+          opts.askName ? input : null,
+          el("label", { class: "small muted" }, "Couleur"),
+          swatches,
+        ),
+        el("footer", {},
+          el("button", { onclick: () => close(null) }, "Annuler"),
+          el("button", { class: "primary", onclick: submit }, opts.ok),
+        ),
+      ),
+    );
+    backdrop.addEventListener("pointerdown", (e) => { if (e.target === backdrop) close(null); });
+    document.addEventListener("keydown", onKey);
+    document.body.append(backdrop);
+    setTimeout(() => (opts.askName ? input : swatches.querySelector<HTMLElement>(".on"))?.focus(), 30);
+  });
 }
 
 export function relative(iso: string): string {

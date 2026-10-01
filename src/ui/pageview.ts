@@ -7,6 +7,8 @@ import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
+import { isFutureVersion } from "../core/types";
+import { dayLabel } from "../core/nav";
 import { uuid, nowIso } from "../core/id";
 import type { Repo, TrashEntry } from "../core/storage/repo";
 import {
@@ -61,6 +63,11 @@ export interface PageViewHost {
   openLink: (target: string) => void;
   /** Une page vient de partir a la corbeille : l'appli propose « Annuler ». */
   onTrashed: (entry: TrashEntry) => void;
+  /**
+   * La page vue a change : l'appli la retient sur cette machine (D8),
+   * jamais dans cahier.json.
+   */
+  rememberPage?: (notebook: string, divider: string, n: number) => void;
 }
 
 interface LoadedPage {
@@ -90,6 +97,11 @@ interface LoadedPage {
    */
   lastEdit?: "text" | "ink";
   lastInk?: Bounds;
+  /**
+   * Page ecrite par une version plus recente de l'appli : affichee, jamais
+   * reenregistree (elle perdrait ce que cette version ne connait pas).
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -135,6 +147,17 @@ export class PageView {
   /** Un rendu plus recent abandonne le precedent (deux PageDown rapides). */
   private renderGen = 0;
   private resizeObserver: ResizeObserver;
+  /**
+   * Defilement de la vue, garde quand elle quitte l'ecran : le menu, un
+   * autre onglet ou le split la detachent, et un element detache perd son
+   * scrollTop. Ctrl+M aller-retour ramenait en haut de l'intercalaire.
+   */
+  private savedScroll = 0;
+  /** A refaire des que la vue est de nouveau a l'ecran et mise en page. */
+  private restore: { top: number } | { page: number } | null = null;
+  private attachedOnce = false;
+  /** Avertissement « lecture seule » deja donne. */
+  private warnedReadOnly = false;
 
   constructor(
     private host: PageViewHost,
@@ -142,10 +165,19 @@ export class PageView {
     public divider: string,
   ) {
     this.root = el("div", { class: "pages" });
-    this.resizeObserver = new ResizeObserver(() => this.relayout());
+    // Detachee, la vue mesure 0 : on ne remet pas les feuilles a 280 px, elles
+    // retrouvent leur largeur au rattachement (et le defilement avec elles).
+    this.resizeObserver = new ResizeObserver(() => {
+      if (!this.root.isConnected) return;
+      this.relayout();
+      this.applyRestore();
+    });
     this.resizeObserver.observe(this.root);
     // Pose une seule fois : un ecouteur par rendu s'accumulait.
     this.root.addEventListener("scroll", throttle(() => this.onScroll(), 250));
+    this.root.addEventListener("scroll", () => {
+      if (this.root.isConnected && !this.restore) this.savedScroll = this.root.scrollTop;
+    }, { passive: true });
   }
 
   get pageNumber(): number { return this.current; }
@@ -153,16 +185,56 @@ export class PageView {
   get mode(): ViewMode { return this.viewMode; }
   get rendering(): RenderMode { return this.renderMode; }
 
+  /**
+   * `startPage` : la page ou l'on etait dans CET intercalaire (l'appli la
+   * tient, voir core/position.ts) ; la premiere sinon.
+   */
   async load(startPage?: number): Promise<void> {
     const meta = await this.host.repo.readMeta(this.notebook);
     this.viewMode = meta.viewMode?.[this.divider] ?? "pages";
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (nums.length === 0) {
+      // Dossier range en sous-dossiers (E3A/S1/Chapitre 1) : aucune page n'y
+      // est creee d'office, elle polluait le vrai rangement (D4, palier 1).
+      if ((await this.host.repo.listSubfolders(this.notebook, this.divider)).length) {
+        this.current = 0;
+        await this.render();
+        return;
+      }
       await this.host.repo.createPage(this.notebook, this.divider);
       nums.push(1);
     }
-    this.current = clamp(startPage ?? meta.lastPosition?.page ?? 1, 1, nums[nums.length - 1]);
+    this.current = clamp(startPage ?? 1, 1, nums[nums.length - 1]);
     await this.render();
+  }
+
+  /**
+   * La vue vient d'etre posee a l'ecran (ouverture, retour du menu, autre
+   * onglet, split). Elle reprend son defilement ; la premiere fois, en
+   * defilement, elle va a la page ou l'on etait.
+   */
+  attached(): void {
+    if (!this.attachedOnce) {
+      this.attachedOnce = true;
+      if (!this.restore && this.viewMode === "scroll" && this.current > 1) this.restore = { page: this.current };
+    } else if (!this.restore) {
+      this.restore = { top: this.savedScroll };
+    }
+    // Filet : sans changement de taille, le ResizeObserver ne repasse pas.
+    requestAnimationFrame(() => requestAnimationFrame(() => this.applyRestore()));
+  }
+
+  private applyRestore(): void {
+    const r = this.restore;
+    if (!r || !this.root.isConnected || !this.root.clientWidth) return;
+    this.restore = null;
+    if ("page" in r) {
+      const p = this.list.find((x) => x.number === r.page);
+      if (p) this.root.scrollTop += p.wrap.getBoundingClientRect().top - this.root.getBoundingClientRect().top;
+    } else {
+      this.root.scrollTop = r.top;
+    }
+    this.savedScroll = this.root.scrollTop;
   }
 
   /**
@@ -231,6 +303,15 @@ export class PageView {
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (gen !== this.renderGen) return;
     this.total = nums.length;
+    if (!nums.length) {
+      // Aucune page (dossier range en sous-dossiers) : on le dit, sans rien creer.
+      this.current = 0;
+      const subs = await this.host.repo.listSubfolders(this.notebook, this.divider);
+      if (gen !== this.renderGen) return;
+      this.host.onPageChange?.(0, 0);
+      this.root.append(this.folderSheet(subs));
+      return;
+    }
     this.host.onPageChange?.(this.current, this.total);
     const visible = this.viewMode === "pages"
       ? nums.filter((n) => n === this.current)
@@ -303,6 +384,32 @@ export class PageView {
     );
   }
 
+  /**
+   * A la place des pages d'un intercalaire qui n'a que des sous-dossiers :
+   * ce qu'il contient, et de quoi y ecrire quand meme.
+   */
+  private folderSheet(subs: string[]): HTMLElement {
+    return el("div", { class: "page-wrap folder-wrap" },
+      el("div", { class: "sheet folder-sheet" },
+        el("h2", {}, subs.length ? "Dossier rangé en sous-dossiers" : "Aucune page"),
+        subs.length
+          ? el("p", {}, `${this.divider} contient ${subs.length > 1 ? `${subs.length} sous-dossiers` : "un sous-dossier"}. `
+              + "Cahiers ne lit pas encore les sous-dossiers, et n'y crée aucune page d'office : ton rangement reste intact.")
+          : el("p", {}, "Cet intercalaire est vide."),
+        subs.length ? el("ul", { class: "folder-list" }, ...subs.map((d) => el("li", {}, d))) : null,
+        el("div", { class: "unreadable-actions" },
+          el("button", { class: "primary", onclick: () => void this.newPage() }, "Nouvelle page ici"),
+          this.host.repo.canReveal
+            ? el("button", {
+                onclick: () => void this.host.repo.revealDir(this.notebook, this.divider)
+                  .catch((e) => toast(`Dossier introuvable : ${errorText(e)}`, "err", 6000)),
+              }, "Ouvrir le dossier")
+            : null,
+        ),
+      ),
+    );
+  }
+
   private buildPage(n: number, page: Page): LoadedPage {
     const migrated = absorbTextBoxes(page.blocks as never[], uuid);
     // Encre gommee sous l'A4 lors d'une seance precedente : la page se
@@ -332,14 +439,22 @@ export class PageView {
         this.queueSave(loaded);
       },
     });
-    const sheet = el("div", { class: "sheet" }, canvas, doc.root, overlay);
-    // Les numeros de page restent affiches dans les deux modes (section 5).
+    const readOnly = isFutureVersion(page);
+    const sheet = el("div", { class: `sheet${readOnly ? " readonly" : ""}` }, canvas, doc.root, overlay);
+    // Les numeros de page restent affiches dans les deux modes (section 5),
+    // avec le jour de la page : « la demo du 3 octobre » se retrouve.
+    const day = dayLabel(page.created);
     const wrap = el("div", { class: "page-wrap", dataset: { page: String(n) } },
+      readOnly
+        ? el("div", { class: "readonly-note" },
+            "Page créée par une version plus récente de Cahiers : lecture seule. "
+              + "Mets l'application à jour sur ce PC pour la modifier.")
+        : null,
       sheet,
-      el("div", { class: "page-num" }, `${this.divider} p. ${n}`),
+      el("div", { class: "page-num" }, `${this.divider} p. ${n}${day ? ` · ${day}` : ""}`),
     );
 
-    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null };
+    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null, readOnly };
 
     const surface = new InkSurface(canvas, {
       getTool: this.host.getTool,
@@ -363,8 +478,8 @@ export class PageView {
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
-    if (migrated) this.queueSave(loaded);
-    this.resumePending(loaded);
+    if (migrated && !readOnly) this.queueSave(loaded);
+    if (!readOnly) this.resumePending(loaded);
     return loaded;
   }
 
@@ -490,7 +605,8 @@ export class PageView {
 
   /** Donne le clavier au texte de la page en cours. */
   focusText(): void {
-    this.activePage()?.doc.focus();
+    const p = this.activePage();
+    if (p && !p.readOnly) p.doc.focus();
   }
 
   /** Texte de la page en cours, pour poser une formule depuis le ruban. */
@@ -638,7 +754,7 @@ export class PageView {
     }
     if (best !== this.current) {
       this.current = best;
-      void this.host.repo.setLastPosition(this.notebook, this.divider, best);
+      this.host.rememberPage?.(this.notebook, this.divider, best);
       this.host.onDirty();
       this.host.onPageChange?.(best, this.total);
     }
@@ -1202,6 +1318,7 @@ export class PageView {
 
   addBlock(block: Block, loaded = this.activePage()): void {
     if (!loaded) return;
+    if (loaded.readOnly) { this.warnReadOnly(); return; }
     this.pushUndo(loaded);
     loaded.page.blocks.push(block);
     this.paintOverlay(loaded);
@@ -1359,7 +1476,9 @@ export class PageView {
     const loaded = this.list.find((p) => p.number === pageNumber && !p.dead)
       ?? [...this.pendingSave.values()].find((p) => p.number === pageNumber);
     const block = loaded?.page.blocks.find((b) => b.id === blockId);
-    if (!loaded || block?.type !== "flag") return false;
+    // Page en lecture seule : rien a modifier ici (l'appli le dira en
+    // tentant le disque, qui refuse aussi).
+    if (!loaded || block?.type !== "flag" || loaded.readOnly) return false;
     if (resolved) block.resolved = true; else delete block.resolved;
     if (!loaded.dead) {
       this.paintOverlay(loaded);
@@ -1428,11 +1547,17 @@ export class PageView {
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (!nums.includes(n)) return;
     this.current = n;
-    await this.host.repo.setLastPosition(this.notebook, this.divider, n);
+    this.host.rememberPage?.(this.notebook, this.divider, n);
     if (this.viewMode === "pages") {
       await this.render();
+      // Une autre page : on la lit depuis le haut, meme hors de l'ecran.
+      this.root.scrollTop = 0;
+      this.savedScroll = 0;
+      if (!this.root.isConnected) this.restore = { top: 0 };
     } else {
-      if (scroll) this.list.find((p) => p.number === n)?.wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+      // Vue detachee (menu, autre onglet) : elle ira a la page au rattachement.
+      if (!this.root.isConnected) this.restore = { page: n };
+      else if (scroll) this.list.find((p) => p.number === n)?.wrap.scrollIntoView({ behavior: "smooth", block: "start" });
       this.host.onPageChange?.(n, this.total);
     }
     this.host.onDirty();
@@ -1760,10 +1885,18 @@ export class PageView {
    */
   private queueSave(loaded: LoadedPage): void {
     if (loaded.dead) return;
+    if (loaded.readOnly) { this.warnReadOnly(); return; }
     this.pendingSave.set(loaded.page.id, loaded);
     this.host.onDirty();
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => void this.flush(), 1200);
+  }
+
+  /** Une seule fois par vue : la page n'enregistre rien, le bandeau le dit deja. */
+  private warnReadOnly(): void {
+    if (this.warnedReadOnly) return;
+    this.warnedReadOnly = true;
+    toast("Page en lecture seule (version plus récente de Cahiers) : rien n'y est enregistré", "warn", 6000);
   }
 
   /**

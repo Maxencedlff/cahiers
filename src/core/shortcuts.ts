@@ -71,7 +71,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("pageup", true, "prevDivider", "Intercalaire précédent", "Pages et intercalaires"),
   ctrl("n", false, "newPage", "Nouvelle page à la fin", "Pages et intercalaires"),
   ctrl("n", true, "insertPage", "Insérer une page après la page courante", "Pages et intercalaires"),
-  ctrl("g", false, "goto", "Aller à la page…", "Pages et intercalaires"),
+  ctrl("g", false, "goto", "Liste des pages ; taper un numéro y va", "Pages et intercalaires"),
+  { keys: "Alt+←", label: "Revenir d'où l'on vient après un saut (recherche, repère, lien, liste) ; aussi le bouton retour de la souris", group: "Pages et intercalaires" },
+  { keys: "Appui long", label: "Sur un intercalaire : ouvrir à droite, renommer, déplacer, supprimer", group: "Pages et intercalaires" },
   ctrl("p", false, "exportPage", "Exporter la page en PDF", "Pages et intercalaires"),
   ctrl("p", true, "exportAll", "Exporter tout l'intercalaire en PDF", "Pages et intercalaires"),
 
@@ -90,6 +92,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   })),
 
   ctrl("m", false, "menu", "Menu, puis retour au même endroit", "Fenêtres"),
+  { keys: "Entrée", label: "Au menu : reprendre ; taper filtre les matières, flèches pour choisir", group: "Fenêtres" },
   ctrl("tab", false, "nextTab", "Onglet suivant", "Fenêtres"),
   ctrl("tab", true, "prevTab", "Onglet précédent", "Fenêtres"),
   ctrl("w", false, "closeTab", "Fermer l'onglet", "Fenêtres"),
@@ -143,6 +146,8 @@ export function titleOf(label: string, command: Command): string {
 
 /** Libelle de l'indicateur de page : « p. 4 / 12 ». */
 export function pageLabel(n: number, total: number): string {
+  // Intercalaire sans page (dossier range en sous-dossiers).
+  if (n < 1) return "p. –";
   return total > 0 ? `p. ${n} / ${total}` : `p. ${n}`;
 }
 

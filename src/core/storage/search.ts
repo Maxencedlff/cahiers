@@ -61,8 +61,27 @@ export interface PageFlag {
  */
 export interface PageIndex {
   modified: string;
+  /** Date de creation de la page (liste des pages). */
+  created: string;
+  /** Premiere ligne lisible de la page : texte tape, sinon ecriture reconnue. */
+  firstLine: string;
   flags: PageFlag[];
   blocks: IndexedBlock[];
+}
+
+/** Longueur de la premiere ligne montree dans la liste des pages. */
+const FIRST_LINE_MAX = 90;
+
+/**
+ * Premiere ligne non vide d'un texte, coupee sur un mot. Sert a la liste
+ * des pages : on reconnait une page a ce qu'elle dit en haut.
+ */
+export function firstLineOf(text: string, max = FIRST_LINE_MAX): string {
+  const line = text.split("\n").map((l) => l.replace(/\s+/g, " ").trim()).find((l) => l) ?? "";
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max);
+  const at = cut.lastIndexOf(" ");
+  return `${(at > max * 0.6 ? cut.slice(0, at) : cut).trimEnd()}…`;
 }
 
 export function indexPage(page: Page): PageIndex {
@@ -89,7 +108,13 @@ export function indexPage(page: Page): PageIndex {
     const text = searchableText(b);
     if (text.trim()) blocks.push({ id: b.id, type: b.type, text });
   }
-  return { modified: page.modified ?? "", flags, blocks };
+  // Le texte tape d'abord, puis l'ecriture reconnue, puis le reste.
+  const lead = blocks.find((b) => b.id === body?.id) ?? blocks.find((b) => b.type === "ink")
+    ?? blocks.find((b) => b.type !== "flag");
+  return {
+    modified: page.modified ?? "", created: page.created ?? "",
+    firstLine: lead ? firstLineOf(lead.text) : "", flags, blocks,
+  };
 }
 
 /**

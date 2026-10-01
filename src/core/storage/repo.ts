@@ -1,7 +1,7 @@
 import type { FileStat, FsAdapter } from "./fs";
 import { joinPath } from "./fs";
 import {
-  SCHEMA_VERSION, emptyPage, pageFileName, parsePageNumber,
+  SCHEMA_VERSION, emptyPage, isFutureVersion, pageFileName, parsePageNumber,
   type NotebookMeta, type Page,
 } from "../types";
 import { uuid, nowIso } from "../id";
@@ -27,7 +27,34 @@ export interface TrashEntry {
   page?: number;
   /** Place de l'intercalaire dans cahier.json. */
   index?: number;
+  /**
+   * Toute la matiere (`notebook`), ou seulement son cahier.json (`meta` :
+   * dossier rendu aux « Autres dossiers »). Absent : page ou intercalaire.
+   */
+  kind?: "notebook" | "meta";
 }
+
+/** Dossier de la racine qui n'est pas une matiere (D5). */
+export interface OtherDir {
+  dir: string;
+  /** Depot git : jamais une matiere, ses dossiers ne sont pas des intercalaires. */
+  git: boolean;
+}
+
+/** La racine : les matieres, puis le reste (« Autres dossiers »). */
+export interface RootListing {
+  notebooks: NotebookSummary[];
+  others: OtherDir[];
+}
+
+/**
+ * Une recherche de pages dans un dossier qui n'en a pas est refaite au plus
+ * toutes les minutes : le menu s'affiche a chaque Ctrl+M, et un gros dossier
+ * (projets, documents) coute des dizaines de lectures.
+ */
+const PROBE_TTL_MS = 60_000;
+/** Dossiers visites au plus pour decider qu'un dossier n'a pas de pages. */
+const PROBE_BUDGET = 30;
 
 export interface NotebookSummary {
   /** Nom du dossier sur le disque. C'est l'identite. */
@@ -59,6 +86,14 @@ export class Repo {
    * ici l'oublie.
    */
   private cache = new Map<string, { stamp: string; index: PageIndex }>();
+  /**
+   * Ecritures de cahier.json, une a la fois par cahier : deux mises a jour
+   * entremelees (renommage pendant un reordonnancement) perdaient l'une des
+   * deux.
+   */
+  private metaChain = new Map<string, Promise<unknown>>();
+  /** Dossiers de la racine vus sans page, et quand (voir PROBE_TTL_MS). */
+  private noPages = new Map<string, number>();
 
   constructor(private fs: FsAdapter) {}
 
@@ -71,10 +106,53 @@ export class Repo {
 
   /* ---------------- cahiers ---------------- */
 
+  /**
+   * Les matieres : les dossiers de la racine qui ont un cahier.json ou des
+   * pages (D5), plus Vrac, toujours present. Le reste (documents, projets,
+   * depots git) n'est pas un cahier : l'appli n'y ecrit rien.
+   */
   async listNotebookDirs(): Promise<string[]> {
+    return (await this.classifyRoot()).notebooks;
+  }
+
+  /** Matieres et autres dossiers de la racine, sans rien ecrire. */
+  async classifyRoot(): Promise<{ notebooks: string[]; others: OtherDir[] }> {
     const dirs = (await this.fs.listDirs("")).filter((d) => !d.startsWith("."));
-    if (!dirs.includes(VRAC)) dirs.push(VRAC);
-    return dirs;
+    const notebooks: string[] = [];
+    const others: OtherDir[] = [];
+    for (const d of dirs) {
+      if (d === VRAC) { notebooks.push(d); continue; }
+      // Un depot git (projets de code) n'est jamais une matiere, meme si une
+      // ancienne version y a pose un cahier.json.
+      if (await this.isGitRepo(d)) { others.push({ dir: d, git: true }); continue; }
+      if (await this.fs.exists(joinPath(d, META_FILE)) || await this.hasPagesCached(d)) notebooks.push(d);
+      else others.push({ dir: d, git: false });
+    }
+    if (!notebooks.includes(VRAC)) notebooks.push(VRAC);
+    return { notebooks, others };
+  }
+
+  private async hasPagesCached(dir: string): Promise<boolean> {
+    const seen = this.noPages.get(dir);
+    if (seen != null && Date.now() - seen < PROBE_TTL_MS) return false;
+    const found = await this.hasPages(dir);
+    if (found) this.noPages.delete(dir); else this.noPages.set(dir, Date.now());
+    return found;
+  }
+
+  /**
+   * Au moins une page dans le dossier, ses intercalaires ou un niveau en
+   * dessous. S'arrete a la premiere trouvee, et apres PROBE_BUDGET dossiers.
+   */
+  async hasPages(rel: string, depth = 3, budget = { left: PROBE_BUDGET }): Promise<boolean> {
+    if (budget.left-- <= 0) return false;
+    if ((await this.fs.listFiles(rel)).some((f) => parsePageNumber(f) !== null)) return true;
+    if (depth <= 1) return false;
+    for (const d of await this.fs.listDirs(rel)) {
+      if (d.startsWith(".") || d === ASSETS_DIR) continue;
+      if (await this.hasPages(joinPath(rel, d), depth - 1, budget)) return true;
+    }
+    return false;
   }
 
   async readMeta(dir: string): Promise<NotebookMeta> {
@@ -91,14 +169,19 @@ export class Repo {
     return this.normalizeMeta(dir, null);
   }
 
+  /**
+   * Champs connus remis en forme ; les autres sont gardes tels quels (une
+   * version plus recente sur l'autre PC a pu en ajouter).
+   */
   private normalizeMeta(dir: string, m: NotebookMeta | null): NotebookMeta {
+    const known = m && typeof m === "object" && !Array.isArray(m) ? m : null;
     return {
+      ...(known ?? {}),
       version: SCHEMA_VERSION,
-      title: m?.title?.trim() || dir,
-      color: m?.color || "#2563eb",
-      dividers: Array.isArray(m?.dividers) ? m!.dividers : [],
-      lastPosition: m?.lastPosition,
-      viewMode: m?.viewMode ?? {},
+      title: (typeof known?.title === "string" && known.title.trim()) || dir,
+      color: (typeof known?.color === "string" && known.color) || "#2563eb",
+      dividers: Array.isArray(known?.dividers) ? known!.dividers.filter((d) => typeof d === "string") : [],
+      viewMode: known?.viewMode && typeof known.viewMode === "object" ? known.viewMode : {},
     };
   }
 
@@ -107,55 +190,205 @@ export class Repo {
     await this.fs.writeText(joinPath(dir, META_FILE), JSON.stringify(meta, null, 2));
   }
 
+  /**
+   * Lit, modifie et reecrit cahier.json, une mise a jour a la fois par
+   * cahier. Seules les actions de l'utilisateur passent ici : lire le menu
+   * ou ouvrir un cahier n'ecrit jamais rien.
+   */
+  private updateMeta(dir: string, change: (m: NotebookMeta) => void): Promise<NotebookMeta> {
+    const prev = this.metaChain.get(dir) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(async () => {
+      const meta = await this.readMeta(dir);
+      change(meta);
+      await this.writeMeta(dir, meta);
+      return meta;
+    });
+    this.metaChain.set(dir, run.catch(() => undefined));
+    return run;
+  }
+
+  /** Dossier de la racine qui porte deja ce nom (Windows ignore la casse). */
+  async findDir(title: string): Promise<string | null> {
+    const key = safeName(title).toLowerCase();
+    return (await this.fs.listDirs("")).find((d) => d.toLowerCase() === key) ?? null;
+  }
+
+  /** Depot git (projets de code) : jamais une matiere. */
+  private isGitRepo(dir: string): Promise<boolean> {
+    return this.fs.exists(joinPath(dir, ".git"));
+  }
+
+  /** Le dossier est une matiere : il a son cahier.json. */
+  async isNotebook(dir: string): Promise<boolean> {
+    return this.fs.exists(joinPath(dir, META_FILE));
+  }
+
+  /**
+   * Nouvelle matiere. Si le dossier existe deja (meme nom, a la casse
+   * pres), il est rendu tel quel : recreer « Maths » remettait a zero sa
+   * couleur, l'ordre de ses intercalaires et ses modes. Un dossier sans
+   * cahier.json (« Autres dossiers ») recoit le sien.
+   */
   async createNotebook(title: string, color: string): Promise<string> {
+    const existing = await this.findDir(title);
+    if (existing) {
+      if (await this.isGitRepo(existing)) throw new Error(`${existing} est un dépôt git, jamais une matière`);
+      if (!(await this.isNotebook(existing))) await this.adoptNotebook(existing, color, title);
+      return existing;
+    }
     const dir = safeName(title);
     await this.fs.mkdir(dir);
     await this.writeMeta(dir, {
-      version: SCHEMA_VERSION, title, color, dividers: [], viewMode: {},
+      version: SCHEMA_VERSION, title: title.trim() || dir, color, dividers: [], viewMode: {},
     });
     return dir;
   }
 
-  async renameNotebook(dir: string, title: string): Promise<string> {
-    const next = safeName(title);
-    const meta = await this.readMeta(dir);
-    meta.title = title;
-    if (next !== dir && !(await this.fs.exists(next))) {
-      this.forget(dir);
-      await this.fs.rename(dir, next);
-      await this.writeMeta(next, meta);
-      return next;
-    }
-    await this.writeMeta(dir, meta);
+  /** « En faire une matiere » : un dossier existant recoit son cahier.json. */
+  async adoptNotebook(dir: string, color: string, title?: string): Promise<string> {
+    // Il resterait invisible (classifyRoot) tout en recevant des pages.
+    if (await this.isGitRepo(dir)) throw new Error(`${dir} est un dépôt git, jamais une matière`);
+    this.noPages.delete(dir);
+    await this.updateMeta(dir, (m) => {
+      m.color = color;
+      if (title?.trim()) m.title = title.trim();
+    });
     return dir;
+  }
+
+  /**
+   * Renomme la matiere : le titre, et le dossier reel quand le nom change.
+   * Un nom deja pris par un autre dossier est refuse (erreur), jamais
+   * fusionne. Un changement de casse seul passe par un nom intermediaire.
+   * Rend le dossier applique.
+   */
+  async renameNotebook(dir: string, title: string): Promise<string> {
+    const wanted = title.trim();
+    if (!wanted) return dir;
+    const next = safeName(wanted);
+    let target = dir;
+    if (next !== dir && dir !== VRAC) {
+      const key = next.toLowerCase();
+      const taken = (await this.fs.listDirs("")).some((d) => d !== dir && d.toLowerCase() === key);
+      if (taken || next.startsWith(".")) throw new Error(`le nom « ${next} » est déjà pris`);
+      this.forget(dir);
+      if (key === dir.toLowerCase()) {
+        const step = `${dir}.renommage`;
+        await this.fs.rename(dir, step);
+        await this.fs.rename(step, next);
+      } else {
+        await this.fs.rename(dir, next);
+      }
+      this.metaChain.delete(dir);
+      target = next;
+    }
+    await this.updateMeta(target, (m) => { m.title = wanted; });
+    return target;
+  }
+
+  async setNotebookColor(dir: string, color: string): Promise<void> {
+    await this.updateMeta(dir, (m) => { m.color = color; });
+  }
+
+  /** Met toute la matiere a la corbeille. Vrac reste toujours la. */
+  async deleteNotebook(dir: string): Promise<TrashEntry> {
+    if (dir === VRAC) throw new Error("Vrac reste toujours là");
+    const bin = await this.newBin();
+    this.forget(dir);
+    this.metaChain.delete(dir);
+    await this.fs.rename(dir, joinPath(bin, dir));
+    return { bin, dir, divider: "", kind: "notebook" };
+  }
+
+  /**
+   * Sort une matiere de la corbeille. Si un dossier du meme nom a ete cree
+   * entre temps, il n'est pas ecrase : la matiere prend « (restauré) ».
+   * Rend le dossier applique.
+   */
+  async restoreNotebook(entry: TrashEntry): Promise<string> {
+    const src = joinPath(entry.bin, entry.dir);
+    if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
+    const taken = (await this.fs.listDirs("")).map((d) => d.toLowerCase());
+    let name = entry.dir;
+    for (let i = 1; taken.includes(name.toLowerCase()); i++) {
+      name = `${entry.dir} (restauré${i > 1 ? ` ${i}` : ""})`;
+    }
+    this.forget(name);
+    await this.fs.rename(src, name);
+    await this.dropBinIfEmpty(entry.bin);
+    return name;
+  }
+
+  /**
+   * Matieres qui ont un cahier.json mais aucune page, nulle part : des
+   * dossiers ou une ancienne version a pose un cahier.json a la simple
+   * lecture du menu. Vrac n'en fait jamais partie.
+   */
+  async pagelessNotebooks(list: NotebookSummary[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const nb of list) {
+      if (nb.dir === VRAC || nb.pageCount > 0) continue;
+      if (!(await this.isNotebook(nb.dir)) || await this.hasPages(nb.dir)) continue;
+      out.push(nb.dir);
+    }
+    return out;
+  }
+
+  /**
+   * Rend un dossier aux « Autres dossiers » : son cahier.json part a la
+   * corbeille (jamais efface), le reste du dossier n'est pas touche.
+   */
+  async unmarkNotebook(dir: string): Promise<TrashEntry> {
+    if (dir === VRAC) throw new Error("Vrac reste toujours là");
+    const bin = await this.newBin();
+    await this.fs.mkdir(joinPath(bin, dir));
+    this.metaChain.delete(dir);
+    await this.fs.rename(joinPath(dir, META_FILE), joinPath(bin, dir, META_FILE));
+    return { bin, dir, divider: "", kind: "meta" };
+  }
+
+  /** Remet le cahier.json retire par unmarkNotebook, s'il n'a pas ete recree. */
+  async restoreMeta(entry: TrashEntry): Promise<void> {
+    const src = joinPath(entry.bin, entry.dir, META_FILE);
+    if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
+    if (!(await this.fs.exists(joinPath(entry.dir, META_FILE)))) {
+      await this.fs.rename(src, joinPath(entry.dir, META_FILE));
+    }
+    this.noPages.delete(entry.dir);
+    await this.dropBinIfEmpty(entry.bin);
   }
 
   /* ---------------- intercalaires ---------------- */
 
   /**
    * Ordre = celui de cahier.json, filtre par ce qui existe reellement,
-   * puis les dossiers apparus dans l'explorateur Windows, a la fin.
+   * puis les dossiers apparus dans l'explorateur Windows, a la fin. Rien
+   * n'est ecrit : l'ordre fusionne n'est garde qu'a la prochaine action de
+   * l'utilisateur (creation, deplacement d'un intercalaire).
    */
   async listDividers(dir: string): Promise<string[]> {
-    const onDisk = (await this.fs.listDirs(dir)).filter(
-      (d) => d !== ASSETS_DIR && !d.startsWith("."),
-    );
+    const onDisk = await this.subfolders(dir);
     const meta = await this.readMeta(dir);
     const ordered = meta.dividers.filter((d) => onDisk.includes(d));
     for (const d of onDisk) if (!ordered.includes(d)) ordered.push(d);
-    if (ordered.join("|") !== meta.dividers.join("|")) {
-      meta.dividers = ordered;
-      await this.writeMeta(dir, meta);
-    }
     return ordered;
+  }
+
+  /** Sous-dossiers d'un intercalaire (rangement a plusieurs niveaux, D4). */
+  async listSubfolders(dir: string, divider: string): Promise<string[]> {
+    return this.subfolders(joinPath(dir, divider));
+  }
+
+  private async subfolders(rel: string): Promise<string[]> {
+    return (await this.fs.listDirs(rel)).filter((d) => d !== ASSETS_DIR && !d.startsWith("."));
   }
 
   async createDivider(dir: string, name: string): Promise<string> {
     const d = safeName(name);
+    // L'ordre affiche (cahier.json puis le disque) devient celui du fichier.
+    const order = await this.listDividers(dir);
     await this.fs.mkdir(joinPath(dir, d));
-    const meta = await this.readMeta(dir);
-    if (!meta.dividers.includes(d)) meta.dividers.push(d);
-    await this.writeMeta(dir, meta);
+    await this.updateMeta(dir, (m) => { m.dividers = order.includes(d) ? order : [...order, d]; });
     return d;
   }
 
@@ -181,33 +414,29 @@ export class Repo {
     } else {
       await this.fs.rename(joinPath(dir, from), joinPath(dir, next));
     }
-    const meta = await this.readMeta(dir);
-    meta.dividers = meta.dividers.map((d) => (d === from ? next : d));
-    if (meta.lastPosition?.divider === from) meta.lastPosition.divider = next;
-    if (meta.viewMode && from in meta.viewMode) {
-      meta.viewMode[next] = meta.viewMode[from];
-      delete meta.viewMode[from];
-    }
-    await this.writeMeta(dir, meta);
+    await this.updateMeta(dir, (meta) => {
+      meta.dividers = meta.dividers.map((d) => (d === from ? next : d));
+      if (meta.lastPosition?.divider === from) meta.lastPosition.divider = next;
+      if (meta.viewMode && from in meta.viewMode) {
+        meta.viewMode[next] = meta.viewMode[from];
+        delete meta.viewMode[from];
+      }
+    });
     return next;
   }
 
   async reorderDividers(dir: string, order: string[]): Promise<void> {
-    const meta = await this.readMeta(dir);
-    meta.dividers = order;
-    await this.writeMeta(dir, meta);
+    await this.updateMeta(dir, (meta) => { meta.dividers = [...order]; });
   }
 
   /** Met l'intercalaire et toutes ses pages a la corbeille. */
   async deleteDivider(dir: string, name: string): Promise<TrashEntry> {
-    const meta = await this.readMeta(dir);
-    const index = meta.dividers.indexOf(name);
+    const index = (await this.listDividers(dir)).indexOf(name);
     const bin = await this.newBin();
     await this.fs.mkdir(joinPath(bin, dir));
     this.forget(joinPath(dir, name));
     await this.fs.rename(joinPath(dir, name), joinPath(bin, dir, name));
-    meta.dividers = meta.dividers.filter((d) => d !== name);
-    await this.writeMeta(dir, meta);
+    await this.updateMeta(dir, (meta) => { meta.dividers = meta.dividers.filter((d) => d !== name); });
     return { bin, dir, divider: name, index: index >= 0 ? index : undefined };
   }
 
@@ -227,12 +456,11 @@ export class Repo {
     await this.fs.mkdir(entry.dir);
     this.forget(joinPath(entry.dir, name));
     await this.fs.rename(src, joinPath(entry.dir, name));
-    const meta = await this.readMeta(entry.dir);
-    if (!meta.dividers.includes(name)) {
-      const at = Math.min(entry.index ?? meta.dividers.length, meta.dividers.length);
-      meta.dividers.splice(at, 0, name);
-    }
-    await this.writeMeta(entry.dir, meta);
+    const order = (await this.listDividers(entry.dir)).filter((d) => d !== name);
+    await this.updateMeta(entry.dir, (meta) => {
+      meta.dividers = order;
+      meta.dividers.splice(Math.min(entry.index ?? order.length, order.length), 0, name);
+    });
     await this.dropBinIfEmpty(entry.bin);
     return name;
   }
@@ -256,6 +484,9 @@ export class Repo {
   }
 
   async writePage(dir: string, divider: string, n: number, page: Page): Promise<void> {
+    // Garde-fou : une page d'une version plus recente n'est jamais reecrite
+    // par celle-ci (elle perdrait ce qu'elle ne connait pas).
+    if (isFutureVersion(page)) throw new Error("page créée par une version plus récente de Cahiers, laissée intacte");
     page.modified = nowIso();
     const path = joinPath(dir, divider, pageFileName(n));
     this.forget(path);
@@ -366,23 +597,23 @@ export class Repo {
     await this.fs.reveal?.(joinPath(dir, divider, pageFileName(n)));
   }
 
+  /** Montre le dossier d'un intercalaire dans l'explorateur Windows. */
+  async revealDir(dir: string, divider: string): Promise<void> {
+    await this.fs.reveal?.(joinPath(dir, divider));
+  }
+
   /** Chemin d'une page, tel qu'on le montre a l'utilisateur. */
   pagePath(dir: string, divider: string, n: number): string {
     return joinPath(dir, divider, pageFileName(n));
   }
 
-  /* ---------------- position et compteurs ---------------- */
+  /* ---------------- mode et compteurs ---------------- */
 
-  async setLastPosition(dir: string, divider: string, page: number): Promise<void> {
-    const meta = await this.readMeta(dir);
-    meta.lastPosition = { divider, page };
-    await this.writeMeta(dir, meta);
-  }
+  // La derniere position n'est plus ici : elle vit sur chaque machine
+  // (core/position.ts, D8), jamais dans le dossier synchronise.
 
   async setViewMode(dir: string, divider: string, mode: "pages" | "scroll"): Promise<void> {
-    const meta = await this.readMeta(dir);
-    meta.viewMode = { ...(meta.viewMode ?? {}), [divider]: mode };
-    await this.writeMeta(dir, meta);
+    await this.updateMeta(dir, (meta) => { meta.viewMode = { ...(meta.viewMode ?? {}), [divider]: mode }; });
   }
 
   /**
@@ -451,13 +682,22 @@ export class Repo {
     return { dir, meta, pageCount, flagCount: flags.length, flags, modified };
   }
 
-  /** Toutes les matieres, triees par derniere modification (section 5). */
+  /**
+   * Toutes les matieres, triees par derniere modification (section 5). Vrac
+   * est « hors matieres » : toujours en dernier, il ne change pas de place.
+   */
   async listNotebooks(): Promise<NotebookSummary[]> {
-    const dirs = await this.listNotebookDirs();
+    return (await this.listRoot()).notebooks;
+  }
+
+  /** Les matieres (triees) et les autres dossiers de la racine. */
+  async listRoot(): Promise<RootListing> {
+    const { notebooks: dirs, others } = await this.classifyRoot();
     const out: NotebookSummary[] = [];
     for (const d of dirs) out.push(await this.summary(d));
-    out.sort((a, b) => (b.modified || "").localeCompare(a.modified || ""));
-    return out;
+    out.sort((a, b) => Number(a.dir === VRAC) - Number(b.dir === VRAC)
+      || (b.modified || "").localeCompare(a.modified || ""));
+    return { notebooks: out, others };
   }
 
   /* ---------------- pieces jointes ---------------- */
@@ -531,6 +771,7 @@ export function serializePage(page: Page): string {
  * seule version ; la fonction existe pour que la v2 ait un endroit ou aller.
  */
 export function migratePage(p: Page): Page {
+  // Version plus recente : rendue telle quelle, elle s'ouvre en lecture seule.
   if (!Array.isArray(p.blocks)) p.blocks = [];
   for (const b of p.blocks) {
     if (b.type === "math" && !Array.isArray(b.strokes)) b.strokes = [];

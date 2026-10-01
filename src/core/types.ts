@@ -218,6 +218,11 @@ export interface NotebookMeta {
   /** Ordre des intercalaires. Le disque fait autorite sur l'existence,
    *  ce tableau n'ordonne que ce qui existe reellement. */
   dividers: string[];
+  /**
+   * Ancienne derniere position. Plus jamais ecrite (D8 : elle vit dans le
+   * stockage local de chaque PC, voir core/position.ts) ; seulement relue
+   * tant que la machine n'a pas la sienne.
+   */
   lastPosition?: { divider: string; page: number };
   /** Mode de lecture memorise par intercalaire (section 5). */
   viewMode?: Record<string, "pages" | "scroll">;
@@ -242,6 +247,15 @@ export function parsePageNumber(fileName: string): number | null {
 
 export function refToString(r: PageRef): string {
   return `${r.notebook}/${r.divider}/${String(r.number).padStart(4, "0")}`;
+}
+
+/**
+ * Page ecrite par une version plus recente de l'application (sur l'autre
+ * PC, mis a jour avant celui-ci). Elle s'ouvre en lecture seule : la
+ * reenregistrer ici perdrait ce que cette version ne connait pas.
+ */
+export function isFutureVersion(p: { version?: unknown }): boolean {
+  return typeof p.version === "number" && p.version > SCHEMA_VERSION;
 }
 
 export function emptyPage(id: string, now: string): Page {

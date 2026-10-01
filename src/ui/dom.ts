@@ -27,6 +27,42 @@ export function clear(node: Element): void {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+/**
+ * Appui long (stylet, doigt ou souris) ou clic droit : le menu d'un
+ * element sans passer par le clic droit, introuvable au stylet. Le clic du
+ * relachement est avale, sinon l'appui long ouvrait aussi l'element.
+ */
+export function onLongPress(node: HTMLElement, run: () => void, ms = 500): void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let start: { x: number; y: number } | null = null;
+  let fired = false;
+  const cancel = () => { if (timer) clearTimeout(timer); timer = null; start = null; };
+  node.addEventListener("pointerdown", (e) => {
+    fired = false;
+    if (e.button !== 0) return;
+    start = { x: e.clientX, y: e.clientY };
+    timer = setTimeout(() => { timer = null; fired = true; run(); }, ms);
+  });
+  node.addEventListener("pointermove", (e) => {
+    if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) cancel();
+  });
+  for (const t of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(t, cancel);
+  node.addEventListener("click", (e) => {
+    if (!fired) return;
+    fired = false;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }, true);
+  // Le doigt maintenu declenche aussi contextmenu sous Windows : un seul menu.
+  node.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (fired) return;
+    cancel();
+    fired = true;
+    run();
+  });
+}
+
 /* ---------------- messages ephemeres ---------------- */
 
 let toastHost: HTMLElement | null = null;
