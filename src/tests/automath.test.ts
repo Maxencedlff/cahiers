@@ -293,3 +293,54 @@ describe("relecture d'une ligne deja en partie en forme", () => {
     expect(plan([["text", "Soit Vz la "], ["eq", "I_1"], ["cur", " fin"]])).toBeNull();
   });
 });
+
+describe("noms usuels a deux lettres : indices, pas produits", () => {
+  it("frequence de coupure dans une phrase", () => {
+    const f = findFormulas("Frequence de coupure fc = 1/(2.pi.R.C)");
+    expect(f.map((x) => x.latex)).toEqual(["f_c = \\frac{1}{2 \\cdot \\pi \\cdot R \\cdot C}"]);
+  });
+  it("frequences, periodes, pulsations", () => {
+    expect(one("fc = 1/(2 pi R C)").tex).toBe("f_c = \\frac{1}{2\\,\\pi\\,R\\,C}");
+    expect(one("f0 = 50 Hz").tex).toBe("f_0 = 50\\,\\mathrm{Hz}");
+    expect(one("fe = 2 fc").tex).toBe("f_e = 2\\,f_c");
+    expect(one("Fe = 1/Te").tex).toBe("F_e = \\frac{1}{T_e}");
+    expect(one("Te = 1/Fe").tex).toBe("T_e = \\frac{1}{F_e}");
+    expect(one("Ts = 2 Te").tex).toBe("T_s = 2\\,T_e");
+    expect(one("w0 = 2.pi.f0").tex).toBe("\\omega_0 = 2 \\cdot \\pi \\cdot f_0");
+    expect(one("ω0 = 1/sqrt(L.C)").tex).toBe("\\omega_0 = \\frac{1}{\\sqrt{L \\cdot C}}");
+    expect(one("ωc = 1/τ").tex).toBe("\\omega_c = \\frac{1}{\\tau}");
+    expect(one("τ = R.C").tex).toBe("\\tau = R \\cdot C");
+  });
+  it("alimentations, Thevenin, transistor", () => {
+    expect(one("Vcc - Vee = 30 V").tex).toBe("V_{cc} - V_{ee} = 30\\,\\mathrm{V}");
+    expect(one("Vdd > Vss").tex).toBe("V_{dd} > V_{ss}");
+    expect(one("Eth = Rth.Icc").tex).toBe("E_{th} = R_{th} \\cdot I_{cc}");
+    expect(one("Uab = Vab").tex).toBe("U_{ab} = V_{ab}");
+    expect(one("Ic = beta.Ib").tex).toBe("I_c = \\beta \\cdot I_b");
+    expect(one("Ie = Ic + Ib").tex).toBe("I_e = I_c + I_b");
+    expect(one("Vce = Vcc - Rc.Ic").tex).toBe("V_{ce} = V_{cc} - R_c \\cdot I_c");
+    expect(one("Vbe = Re.Ie - Rb.Ib").tex).toBe("V_{be} = R_e \\cdot I_e - R_b \\cdot I_b");
+  });
+  it("impedances et gains", () => {
+    expect(one("Zin = Ze").tex).toBe("Z_{in} = Z_e");
+    expect(one("Zs = Rc").tex).toBe("Z_s = R_c");
+    expect(one("Av = -Rc/Re").tex).toBe("A_v = \\frac{-R_c}{R_e}");
+    expect(one("Ad = Vs/Ve").tex).toBe("A_d = \\frac{V_s}{V_e}");
+    expect(one("Gv = 20 log(Av)").tex).toBe("G_v = 20\\,\\log\\left(A_v\\right)");
+  });
+  it("seuls dans la phrase", () => {
+    const f = findFormulas("on regle fc puis f0 et Fe, Uab et Eth, Zin et w0 la");
+    expect(f.map((x) => x.latex)).toEqual(["f_c", "f_0", "F_e", "U_{ab}", "E_{th}", "Z_{in}", "\\omega_0"]);
+  });
+  it("les produits de minuscules restent des produits", () => {
+    expect(one("y = ax + b").tex).toBe("y = a\\,x + b");
+    expect(one("Delta = b² - 4ac").tex).toBe("\\Delta = b^2 - 4\\,a\\,c");
+    expect(one("x = sin(wt + phi)").tex).toBe("x = \\sin\\left(\\omega t + \\varphi\\right)");
+  });
+  it("les mots restent du texte", () => {
+    for (const w of ["Voici", "Loi", "Ohm", "Hz", "Te", "Fer", "Fee", "Eté", "Av", "Ad", "fil", "fer", "Tes"]) {
+      expect(findFormulas(`${w} la`, "space"), w).toEqual([]);
+    }
+    expect(findFormulas("Te souviens-tu de la loi d'Ohm ? Voici 50 Hz.")).toEqual([]);
+  });
+});

@@ -20,6 +20,10 @@ export interface Key {
   span?: number;
 }
 
+/**
+ * Prefixes d'ingenieur (p n µ m k M G T) et Ω : en 2nd sur les chiffres,
+ * pour garder le pave a 46 px sans rangee de plus. 2nd puis 5 = « k ».
+ */
 export const KEYPAD: Key[] = [
   { label: "2nd", action: "second", family: "2nd" },
   { label: "RAD", action: "mode", family: "fn" },
@@ -45,21 +49,21 @@ export const KEYPAD: Key[] = [
   { label: "ans", insert: "ans", family: "const" },
   { label: "x⁻¹", insert: "^(-1)", family: "fn", second: { label: "!", insert: "!" } },
 
-  { label: "7", insert: "7", family: "num" },
-  { label: "8", insert: "8", family: "num" },
-  { label: "9", insert: "9", family: "num" },
+  { label: "7", insert: "7", family: "num", second: { label: "p", insert: "p" } },
+  { label: "8", insert: "8", family: "num", second: { label: "n", insert: "n" } },
+  { label: "9", insert: "9", family: "num", second: { label: "µ", insert: "µ" } },
   { label: "÷", insert: "/", family: "op" },
   { label: "(−)", insert: "-", family: "op" },
 
-  { label: "4", insert: "4", family: "num" },
-  { label: "5", insert: "5", family: "num" },
-  { label: "6", insert: "6", family: "num" },
+  { label: "4", insert: "4", family: "num", second: { label: "m", insert: "m" } },
+  { label: "5", insert: "5", family: "num", second: { label: "k", insert: "k" } },
+  { label: "6", insert: "6", family: "num", second: { label: "M", insert: "M" } },
   { label: "×", insert: "*", family: "op" },
   { label: ",", insert: ",", family: "op" },
 
-  { label: "1", insert: "1", family: "num" },
-  { label: "2", insert: "2", family: "num" },
-  { label: "3", insert: "3", family: "num" },
+  { label: "1", insert: "1", family: "num", second: { label: "G", insert: "G" } },
+  { label: "2", insert: "2", family: "num", second: { label: "T", insert: "T" } },
+  { label: "3", insert: "3", family: "num", second: { label: "Ω", insert: "Ω" } },
   { label: "−", insert: "-", family: "op" },
   { label: "x", insert: "x", family: "const" },
 
@@ -85,7 +89,9 @@ export const FAMILY_CLASS: Record<KeyFamily, string> = {
 export type KeyCommand =
   | { kind: "insert"; text: string }
   | { kind: "action"; action: "equals" | "back" | "delete" | "left" | "right" | "home" | "end" | "up" | "down" | "escape" }
-  | { kind: "swallow" };
+  | { kind: "swallow" }
+  /** Caractere imprimable que la calculatrice ne sait pas lire : avale, signale. */
+  | { kind: "reject"; text: string };
 
 /** Caracteres acceptes a la frappe (lettres pour les fonctions et les unites). */
 const TYPABLE = /^[0-9A-Za-z+\-*/^().,!=[\];%²³π _µΩ]$/;
@@ -117,7 +123,10 @@ export function mapKey(e: KeyLike): KeyCommand | null {
   }
   if (altGr) {
     // Seuls les caracteres d'AltGr (crochets, accolades) ; jamais une lettre.
-    return e.key.length === 1 && /[[\]{}^|]/.test(e.key) ? { kind: "insert", text: e.key } : null;
+    // Un autre caractere d'AltGr (€, @...) est avale : il ne doit jamais
+    // partir dans la page pendant que la calculatrice a le clavier.
+    if (!isPrintable(e.key) || /^[A-Za-z]$/.test(e.key)) return null;
+    return /[[\]{}^|]/.test(e.key) ? { kind: "insert", text: e.key } : { kind: "reject", text: e.key };
   }
   switch (e.key) {
     case "Enter": return { kind: "action", action: "equals" };
@@ -132,5 +141,37 @@ export function mapKey(e: KeyLike): KeyCommand | null {
     case "Escape": return { kind: "action", action: "escape" };
   }
   if (TYPABLE.test(e.key)) return { kind: "insert", text: e.key };
+  // Tout autre caractere imprimable reste a la calculatrice : traduit
+  // (×, ÷, μ grec...) ou refuse, jamais rendu a la page.
+  if (isPrintable(e.key)) {
+    const t = acceptText(e.key);
+    return t.text ? { kind: "insert", text: t.text } : { kind: "reject", text: e.key };
+  }
   return null;
+}
+
+/** Un seul caractere visible (key d'un KeyboardEvent), pas un nom de touche. */
+export function isPrintable(key: string): boolean {
+  return [...key].length === 1 && !/[\u0000-\u001f\u007f]/.test(key);
+}
+
+/** Equivalents ecrits autrement que sur le pave. */
+const ALIASES: Record<string, string> = {
+  "×": "*", "·": "*", "⋅": "*", "÷": "/", "−": "-", "–": "-",
+  "μ": "µ", "\u2126": "Ω", "√": "sqrt(", "\u00a0": " ", "\t": " ",
+};
+
+/**
+ * Texte arrive sans touche utilisable (insertText, IME, AltGr, clavier
+ * tactile, collage) : ce que la calculatrice peut en lire. `rejected` =
+ * les caracteres ecartes, pour le signaler.
+ */
+export function acceptText(text: string): { text: string; rejected: string } {
+  let out = "", rejected = "";
+  for (const c of text) {
+    const a = ALIASES[c] ?? c;
+    if (a.length > 1 || TYPABLE.test(a)) out += a;
+    else rejected += c;
+  }
+  return { text: out, rejected };
 }

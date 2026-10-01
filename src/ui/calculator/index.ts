@@ -11,7 +11,7 @@ import {
 import {
   insertText, deleteBack, deleteForward, moveCaret, HistoryRecall, type EditState,
 } from "../../core/calc/screen";
-import { KEYPAD, FAMILY_CLASS, mapKey, type Key } from "./keys";
+import { KEYPAD, FAMILY_CLASS, mapKey, acceptText, type Key } from "./keys";
 
 /**
  * Calculatrice flottante (section 7). Fenetre deplacable, positionnable
@@ -88,13 +88,47 @@ export class Calculator {
     this.root?.classList.toggle("armed", v);
   }
 
+  /**
+   * Recepteur invisible du clavier de l'onglet Calcul. Armee, la
+   * calculatrice y met le focus ET la selection : un caractere qui arrive
+   * sans keydown utilisable (Ω par insertText, IME, AltGr, clavier tactile
+   * Windows) a toujours une cible qui est a elle. Sans lui, la selection
+   * restait dans la page apres blur() : Chromium y inserait le caractere et
+   * donnait le focus a la page (desarmement), toute la suite de la frappe
+   * fuyait dans les notes. Rien n'y reste jamais ecrit.
+   */
+  private sink: HTMLElement;
+  /** Curseur de la page au moment d'armer, rendu par Echap. */
+  private savedRange: Range | null = null;
+
   constructor(private host: CalculatorHost) {
     this.body = el("div", { class: "calc-body" });
+    this.sink = el("div", {
+      class: "calc-sink", contenteditable: "true", tabindex: "-1", inputmode: "none",
+      spellcheck: "false", autocapitalize: "off", autocorrect: "off", "aria-label": "Saisie de la calculatrice",
+    });
     this.root = el("div", { class: "calc", style: { display: "none", left: "60px", top: "90px" } },
       this.head(),
       this.tabs(),
       this.body,
+      this.sink,
     );
+    // Composition (IME, touche morte) : le texte compose est repris a la fin.
+    let composing = false;
+    this.sink.addEventListener("compositionstart", () => { composing = true; });
+    this.sink.addEventListener("compositionend", (e) => {
+      composing = false;
+      this.sink.textContent = "";
+      if (this.capturesText(this.sink) && e.data) this.typeText(e.data);
+    });
+    this.sink.addEventListener("input", () => {
+      if (!composing) this.sink.textContent = "";
+    });
+    // Un appui sur le pave rend le clavier au recepteur (pas au bouton).
+    this.root.addEventListener("click", (e) => {
+      const t = e.target as HTMLElement;
+      if (this.tab === "calcul" && this.armed && t.tagName !== "INPUT" && t.tagName !== "TEXTAREA") this.focusSink();
+    });
     document.body.append(this.root);
     document.addEventListener("pointerdown", (e) => {
       this.armed = this.root.contains(e.target as Node);
@@ -104,14 +138,30 @@ export class Calculator {
     });
     // Ctrl+V dans l'ecran Calcul : une expression copiee (avec Ω, µ...).
     document.addEventListener("paste", (e) => {
-      if (!this.visible || !this.armed || this.tab !== "calcul") return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (!this.capturesText(e.target)) return;
       const text = e.clipboardData?.getData("text/plain").replace(/\s+/g, " ").trim();
       if (!text) return;
       e.preventDefault();
-      this.type(text);
+      this.typeText(text);
     });
+    // Texte qui arrive sans keydown utilisable (voir `sink`) : repris avant
+    // toute insertion. textInput (Chromium, WebView2) precede l'insertion et
+    // s'annule ; beforeinput en secours. Une composition en cours (IME) n'est
+    // pas annulable : elle se finit dans le recepteur (compositionend).
+    const intercept = (e: Event, data: string | null | undefined) => {
+      if (!this.capturesText(e.target)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (data) this.typeText(data);
+    };
+    window.addEventListener("textInput", (e) => intercept(e, (e as any).data as string | undefined), { capture: true });
+    window.addEventListener("beforeinput", (e) => {
+      const ie = e as InputEvent;
+      if (!/^insert(Text|ReplacementText|Paragraph|LineBreak)$/.test(ie.inputType)) return;
+      // Entree arrive deja par keydown : un saut de ligne est seulement retenu.
+      const text = /Text$/.test(ie.inputType) ? ie.data ?? ie.dataTransfer?.getData("text/plain") : null;
+      intercept(e, text);
+    }, { capture: true });
     this.render();
   }
 
@@ -150,11 +200,17 @@ export class Calculator {
     this.visible = true;
     this.root.style.display = "flex";
     if (arm) {
+      // Le curseur de la page est garde pour Echap, puis le focus et la
+      // selection passent au recepteur : rien ne peut plus partir dans le texte.
+      const sel = document.getSelection();
+      const range = sel?.rangeCount ? sel.getRangeAt(0) : null;
+      this.savedRange = range && !this.root.contains(range.startContainer) ? range.cloneRange() : null;
       this.armed = true;
-      // Le focus quitte la page : la frappe ne part pas aussi dans le texte.
-      (document.activeElement as HTMLElement | null)?.blur?.();
     }
     this.host.onVisibility?.(true);
+    // Apres onVisibility : ancree, sa colonne vient seulement d'etre ouverte
+    // (un element masque ne prend pas le focus).
+    if (arm) this.focusSink();
     if (this.root.classList.contains("docked")) return;
     // Toujours ramenee dans l'ecran : elle a pu etre laissee hors champ.
     const r = this.root.getBoundingClientRect();
@@ -162,7 +218,35 @@ export class Calculator {
     if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 20)}px`;
   }
 
+  /** Focus et selection dans le recepteur, sans defiler. */
+  private focusSink(): void {
+    if (document.activeElement !== this.sink) this.sink.focus({ preventScroll: true });
+    const sel = document.getSelection();
+    if (sel && !(sel.rangeCount && this.sink.contains(sel.anchorNode))) sel.selectAllChildren(this.sink);
+  }
+
+  /**
+   * Echap sur une saisie vide : le clavier retourne au curseur de la page.
+   * False s'il n'y en avait pas : Echap suit alors son cours dans l'appli.
+   */
+  private giveBack(): boolean {
+    this.armed = false;
+    const range = this.savedRange;
+    this.savedRange = null;
+    const host = range?.startContainer.isConnected
+      ? (range.startContainer instanceof HTMLElement ? range.startContainer : range.startContainer.parentElement)
+        ?.closest<HTMLElement>("[contenteditable=true]")
+      : null;
+    if (!range || !host || host.closest(".calc")) { this.sink.blur(); return false; }
+    host.focus({ preventScroll: true });
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    return true;
+  }
+
   hide(): void {
+    if (this.root.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     this.visible = false;
     this.armed = false;
     this.root.style.display = "none";
@@ -302,21 +386,23 @@ export class Calculator {
           class: "hist",
           title: "Reprendre cette expression",
           onclick: () => this.setInput(insertText(this.edit, h.expr)),
-        }, `${h.expr} = ${h.text}`));
+        }, `${h.expr} = ${h.eng ?? h.text}`));
       }
       // Curseur visible : on sait ou va le prochain chiffre.
       const { input, caret } = this.edit;
       screen.append(el("div", { class: "expr" },
         input.slice(0, caret), el("span", { class: "caret" }), input.slice(caret) || "​"));
       const last = this.engine.history.at(-1);
+      // Lecture ingenieur en grand (7,234 kHz), valeur complete en dessous.
       screen.append(this.lastError
         ? el("div", { class: "err" }, this.lastError)
-        : el("div", { class: "res" }, last ? last.text : ""));
+        : el("div", { class: "res", title: last?.text ?? "" }, last ? last.eng ?? last.text : "",
+          last?.eng !== undefined && !sameReading(last.eng, last.text) ? el("span", { class: "eng-full" }, `= ${last.text}`) : null));
 
       // Reafficher en permanence l'expression telle qu'elle a ete comprise :
       // "sin x^2" est ambigu, l'utilisateur doit voir ce que le moteur a lu.
       read.replaceChildren(el("span", { class: "lbl" }, "Lu par le moteur"));
-      const latex = this.engine.toLatex(input);
+      const latex = this.engine.toLatex(input, true);
       read.append(latex
         ? renderTex(latex)
         : el("span", { class: "muted" }, input ? "expression incomplète" : "-"));
@@ -403,17 +489,55 @@ export class Calculator {
     this.setInput(insertText(this.edit, text, this.engine.history.length > 0));
   }
 
+  /**
+   * Texte colle ou insere hors keydown : lu caractere par caractere, ce qui
+   * ne se lit pas est ecarte et signale, jamais rendu a la page.
+   */
+  private typeText(text: string): void {
+    const t = acceptText(text.replace(/\s+/g, " "));
+    if (t.text) this.type(t.text);
+    if (t.rejected) this.reject(t.rejected);
+  }
+
+  /** Retour discret : l'ecran clignote, le caractere refuse est nomme. */
+  private reject(chars: string): void {
+    const screen = this.body.querySelector<HTMLElement>(".calc-screen");
+    if (!screen) return;
+    screen.classList.remove("reject");
+    void screen.offsetWidth; // relance l'animation
+    screen.classList.add("reject");
+    screen.title = `Caractère ignoré : ${chars}`;
+    clearTimeout(this.rejectTimer);
+    this.rejectTimer = setTimeout(() => { screen.classList.remove("reject"); screen.title = ""; }, 600);
+  }
+  private rejectTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * La calculatrice armee prend toute la frappe de l'onglet Calcul, sauf
+   * dans un champ de saisie : le sien (autres onglets) ou celui d'un dialogue.
+   * Une page de notes n'est jamais une cible tant qu'elle est armee.
+   */
+  private capturesText(target: EventTarget | null): boolean {
+    if (!this.visible || !this.armed || this.tab !== "calcul") return false;
+    if (target === this.sink) return true;
+    const t = target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return false;
+    if (t && t.isContentEditable && document.activeElement === t) return false;
+    return true;
+  }
+
   /** Saisie au clavier quand la calculatrice a le focus. */
   handleKey(e: KeyboardEvent): boolean {
-    if (!this.visible || !this.armed || this.tab !== "calcul") return false;
-    const target = e.target as HTMLElement | null;
-    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return false;
+    if (!this.capturesText(e.target)) return false;
+    // Composition en cours (IME) : elle se finit dans le recepteur.
+    if (e.isComposing || e.key === "Process") return false;
 
     const cmd = mapKey(e);
     const afterDead = this.deadPending;
     this.deadPending = false;
     if (!cmd) return false;
     if (cmd.kind === "swallow") return true;
+    if (cmd.kind === "reject") { this.reject(cmd.text); return true; }
     if (cmd.kind === "insert") {
       // Touche morte suivie d'Espace ou de ^ : le ^ est deja pose.
       if (afterDead && cmd.text === "^") return true;
@@ -440,8 +564,7 @@ export class Calculator {
       case "escape":
         // Echap vide la saisie ; sur une saisie vide, rend le clavier.
         if (ed.input || this.lastError) { this.recall.reset(); this.setInput({ input: "", caret: 0 }); return true; }
-        this.armed = false;
-        return false;
+        return this.giveBack();
     }
     return false;
   }
@@ -997,6 +1120,12 @@ function renderSteps(step: DerivStep, depth = 0): HTMLElement {
     node.append(el("div", { class: "kids" }, ...kids.map((c) => renderSteps(c, depth + 1))));
   }
   return node;
+}
+
+/** « 0,282 Ω » et « 0.282 ohm » : meme valeur, ecrite autrement. */
+function sameReading(eng: string, text: string): boolean {
+  const n = (s: string) => s.replace(/,/g, ".").replace(/µ/g, "u").replace(/Ω/g, "ohm").replace(/\s+/g, " ");
+  return n(eng) === n(text);
 }
 
 function round4(v: number): number { return Math.round(v * 1e4) / 1e4; }

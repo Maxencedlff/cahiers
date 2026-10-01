@@ -58,6 +58,9 @@ const GREEK_CHARS: Record<string, string> = {
   "Σ": "\\Sigma", "Φ": "\\Phi", "Ω": "\\Omega",
 };
 
+/** Lettre grecque + indice : ω0, ωc, τ1. */
+const GREEK_SUB = new RegExp(`^[${Object.keys(GREEK_CHARS).join("")}](?:[0-9]{1,2}|[a-z]{1,2})$`);
+
 const FUNCS: Record<string, string> = {
   sin: "\\sin", cos: "\\cos", tan: "\\tan", ln: "\\ln", log: "\\log",
   exp: "\\exp", sqrt: "\\sqrt",
@@ -163,9 +166,33 @@ const LOWER_VAR = /^[viu](?:batt|bat|ce|be|cb|cc|ee|dd|ss|in|out|ref|max|min|ch|
 /** Pulsation tapee en "w" : wt, jw, jwt (omega t). */
 const OMEGA_WORD = /^(?:jw|wt|jwt)$/;
 
+/**
+ * Noms usuels a indice dont l'initiale est une minuscule ou une lettre
+ * grecque : fc, f0, fe (frequences), w0, wc, ω0, ωc, τ1 (pulsations,
+ * constantes de temps). Sans cela "fc" serait le produit f·c, comme "ax".
+ */
+const LOWER_SUB = /^(?:f[cehlps0-9]|w[c0-9])$/;
+
+
+/**
+ * Grandeurs dont le nom est aussi un mot outil du francais ("Te" = te) :
+ * variables dans une formule ("Te = 1/Fe"), jamais seules dans une phrase.
+ */
+const FORMULA_ONLY = new Set(["Te"]);
+
+/**
+ * Grandeurs seules hors des initiales V I U R C L P Z (voir loneVariable) :
+ * frequences, periodes d'echantillonnage, Thevenin, gains, pulsations.
+ * Liste fermee : "Av" (avenue), "Ad" restent du texte hors formule.
+ */
+const LONE_NAMES = new Set([
+  "fc", "fe", "fs", "fh", "fl", "fp", "f0", "f1", "f2", "Fe", "Fs", "F0", "Ts", "T0",
+  "Eth", "Gv", "Gd", "w0", "ω0", "ωc", "τ1", "τ2",
+]);
+
 /** Le mot peut-il etre une variable ? */
 function validIdent(s: string): boolean {
-  if (isGreek(s) || s in FUNCS) return true;
+  if (isGreek(s) || s in FUNCS || GREEK_SUB.test(s) || FORMULA_ONLY.has(s)) return true;
   if (/[^A-Za-z0-9]/.test(s)) return false; // accents, lettres grecques collees
   if (STOP.has(s.toLowerCase())) return false;
   if (s.length > 6) return false;
@@ -184,6 +211,12 @@ function identTex(s: string): string {
   if (s in GREEK_NAMES) return GREEK_NAMES[s];
   if (s.length === 1 && s in GREEK_CHARS) return GREEK_CHARS[s];
   if (OMEGA_WORD.test(s)) return s === "wt" ? "\\omega t" : s === "jw" ? "j\\omega" : "j\\omega t";
+  // fc, fe : indice ; w0, ω0 : omega indice.
+  if (LOWER_SUB.test(s)) return `${s[0] === "w" ? "\\omega" : s[0]}_${s.slice(1)}`;
+  if (GREEK_SUB.test(s)) {
+    const sub = s.slice(1);
+    return `${GREEK_CHARS[s[0]]}_${sub.length === 1 ? sub : `{${sub}}`}`;
+  }
   // Deux minuscules hors tensions (ax, ac) : un produit, pas un indice.
   // vs, id, ic gardent l'indice (v_s, i_d).
   if (/^[a-z]{2}$/.test(s) && !/^[viu]/.test(s)) return `${s[0]}\\,${s[1]}`;
@@ -455,7 +488,7 @@ class Parser {
  * Indices reconnus derriere l'initiale d'une grandeur (Vz, Ru, Vbe, Req,
  * Vcc, Vbatt). Liste fermee : "Voici", "Loi", "Ohm", "Vu" restent du texte.
  */
-const LONE_SUB = /^(?:[sezdubcgfmnoptkrx]|be|ce|cb|bc|eb|ds|gs|sd|th|eq|cc|ee|dd|ss|out|ref|max|min|moy|eff|pp|ch|batt|bat|ac|dc|rms|sat)$/;
+const LONE_SUB = /^(?:[sezdubcgfmnoptkrx]|be|ce|cb|bc|eb|ds|gs|sd|th|eq|cc|ee|dd|ss|ab|out|ref|max|min|moy|eff|pp|ch|batt|bat|ac|dc|rms|sat)$/;
 /** Mots qui ont la forme d'une grandeur mais qui n'en sont pas. */
 const LONE_STOP = new Set(["Vu", "Lu", "Pr", "If", "It", "In", "Up", "Un", "Lac"]);
 
@@ -468,11 +501,13 @@ const LONE_STOP = new Set(["Vu", "Lu", "Pr", "If", "It", "In", "Up", "Un", "Lac"
  * les grandeurs d'une seule lettre ("R", "a").
  */
 function loneVariable(s: string): boolean {
+  if (LONE_NAMES.has(s)) return true;
+  if (FORMULA_ONLY.has(s)) return false;
   if (!validIdent(s) || STOP.has(s.toLowerCase()) || isGreek(s) || s in FUNCS) return false;
   if (isUnit(s) || LONE_STOP.has(s)) return false;
-  // Majuscule + indice : Vz, Ru, Vbe, Vbatt, Vin (pas Pin, Voici, Loi).
+  // Majuscule + indice : Vz, Ru, Vbe, Vbatt, Vin, Zin (pas Pin, Voici, Loi).
   const m = /^([VIURCLPZ])([a-z]{1,4})$/.exec(s);
-  if (m) return LONE_SUB.test(m[2]) || (m[2] === "in" && /^[VI]$/.test(m[1]));
+  if (m) return LONE_SUB.test(m[2]) || (m[2] === "in" && /^[VIZ]$/.test(m[1]));
   // Lettre + chiffres : I1, R2, C10, R0 ; pas Q1 (question), S01 (seance), P1.
   if (/^[VIURCLZ]\d{1,2}$/.test(s)) return !/^[A-Za-z]0\d/.test(s);
   // Minuscule + majuscule : iD, uD, vS (pas kV, mA, uF : des unites).

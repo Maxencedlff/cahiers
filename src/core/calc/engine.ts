@@ -13,6 +13,8 @@ export interface EvalOk {
   raw: unknown;
   /** Resultat formate pour l'affichage. */
   text: string;
+  /** Lecture ingenieur du resultat (unites, prefixes), si elle aide. */
+  eng?: string;
   /** Expression telle qu'elle a ete COMPRISE, en LaTeX (section 7). */
   latex: string;
   /** Resultat en LaTeX (unites, matrices, complexes). */
@@ -27,8 +29,11 @@ export interface EvalErr {
 
 export type EvalResult = EvalOk | EvalErr;
 
-/** `expr` est la saisie telle que tapee (jamais la forme normalisee). */
-export interface HistoryEntry { expr: string; text: string; latex: string; resultLatex: string }
+/**
+ * `expr` est la saisie telle que tapee (jamais la forme normalisee).
+ * `eng` : lecture ingenieur (« 7,234 kHz », « 22 µ »), si elle aide.
+ */
+export interface HistoryEntry { expr: string; text: string; latex: string; resultLatex: string; eng?: string }
 
 const math: MathJsInstance = create(all, { number: "number" });
 
@@ -149,9 +154,20 @@ export class CalcEngine {
     };
   }
 
-  /** Analyse seule : sert a reafficher en permanence ce que le moteur a lu. */
-  toLatex(expr: string): string | null {
-    const src = normalizeInput(expr).trim();
+  /**
+   * Saisie de l'onglet Calcul : normalisee, prefixes d'ingenieur colles a un
+   * nombre traduits (2,2k = 2200), sauf si la lettre est une variable definie.
+   */
+  calcInput(expr: string): { src: string; prefixed: boolean } {
+    return siPrefixes(normalizeInput(expr), (name) => name in this.vars);
+  }
+
+  /**
+   * Analyse seule : sert a reafficher en permanence ce que le moteur a lu.
+   * `prefixes` : lecture de l'onglet Calcul (2,2k lu 2,2e3).
+   */
+  toLatex(expr: string, prefixes = false): string | null {
+    const src = (prefixes ? this.calcInput(expr).src : normalizeInput(expr)).trim();
     if (!src) return null;
     try {
       const tex = math.parse(src).toTex({ parenthesis: "auto" });
@@ -166,7 +182,7 @@ export class CalcEngine {
   }
 
   evaluate(expr: string): EvalResult {
-    const src = normalizeInput(expr);
+    const { src, prefixed } = this.calcInput(expr);
     if (!src.trim()) return { ok: false, message: "Expression vide", latex: null };
     let latex: string | null = null;
     try {
@@ -192,18 +208,20 @@ export class CalcEngine {
         return this.record(expr, `${name} définie`, latex, `\\text{${name} définie}`, undefined);
       }
       if (raw === undefined) return { ok: false, message: "Pas de résultat", latex };
-      return this.record(expr, format(raw), latex, resultTex(raw), raw);
+      return this.record(expr, format(raw), latex, resultTex(raw), raw, engFormat(raw, prefixed));
     } catch (e) {
       return { ok: false, message: humanError(e), latex };
     }
   }
 
-  private record(expr: string, text: string, latex: string, resultLatex: string, raw: unknown): EvalOk {
+  private record(expr: string, text: string, latex: string, resultLatex: string, raw: unknown, eng?: string): EvalOk {
     // ans garde la valeur brute ; une definition ne la change pas.
     if (raw !== undefined) this.ans = raw;
-    this.history.push({ expr: expr.trim(), text, latex, resultLatex });
+    const entry: HistoryEntry = { expr: expr.trim(), text, latex, resultLatex };
+    if (eng) entry.eng = eng;
+    this.history.push(entry);
     if (this.history.length > 200) this.history.shift();
-    return { ok: true, raw, text, latex, resultLatex };
+    return eng ? { ok: true, raw, text, latex, resultLatex, eng } : { ok: true, raw, text, latex, resultLatex };
   }
 
   /** Les 3 dernieres lignes, plus recente en dernier (section 7). */
@@ -246,6 +264,36 @@ export function normalizeInput(expr: string): string {
     .replace(/[µμ]/g, "u")
     .replace(/Ω/g, "ohm");
   return renameLogs(decimalCommas(s));
+}
+
+/* ------------------------------------------------------------------ */
+/* Prefixes d'ingenieur                                                */
+/* ------------------------------------------------------------------ */
+
+/** Prefixes SI colles a un nombre : 2,2k, 10n, 4,7µ, 100m, 1M. */
+const SI_PREFIX: Record<string, number> = { p: -12, n: -9, u: -6, m: -3, k: 3, M: 6, G: 9, T: 12 };
+const SI_SYMBOL: Record<number, string> = { [-12]: "p", [-9]: "n", [-6]: "µ", [-3]: "m", 0: "", 3: "k", 6: "M", 9: "G", 12: "T" };
+
+/**
+ * « 2.2k » -> « 2.2e3 », sur une saisie deja normalisee (µ devenu u,
+ * virgule decimale devenue point). Le prefixe doit etre COLLE au nombre et
+ * suivi d'autre chose qu'une lettre, un chiffre ou une parenthese ouvrante :
+ * « 2,2kΩ » et « 10nF » restent des unites mathjs, « 5 m » (espace) reste le
+ * metre, « 2pi » reste 2π, « 1e-3 » reste une notation scientifique (e n'est
+ * pas un prefixe). m colle a un nombre = milli, M = mega, T = tera.
+ * `reserved` : nom d'une variable definie, qui garde le produit (k = 5 : 2k = 10).
+ */
+export function siPrefixes(s: string, reserved: (name: string) => boolean = () => false): { src: string; prefixed: boolean } {
+  let prefixed = false;
+  const src = s.replace(
+    /(^|[^A-Za-z0-9_.])(\d+(?:\.\d*)?|\.\d+)([pnumkMGT])(?![A-Za-z0-9_.(])/g,
+    (all, before: string, num: string, p: string) => {
+      if (reserved(p)) return all;
+      prefixed = true;
+      return `${before}${num.replace(/\.$/, "")}e${SI_PREFIX[p]}`;
+    },
+  );
+  return { src, prefixed };
 }
 
 /** Debut d'un appel de fonction : la parenthese suit un identifiant. */
@@ -322,6 +370,44 @@ export function format(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+/** Mantisse a 4 chiffres significatifs, virgule decimale, zeros inutiles retires. */
+function mantissa(x: number): string {
+  return String(Number(x.toPrecision(4))).replace(".", ",");
+}
+
+/**
+ * Lecture ingenieur d'un resultat (section 7, electronique) :
+ * - unite : 4 chiffres significatifs, virgule, µ et Ω (« 7,234 kHz ») ;
+ * - nombre, seulement si la saisie utilisait un prefixe (2,2k...) : exposant
+ *   multiple de 3 et son prefixe (« 22 µ », « 7,234 k »). Sans prefixe, un
+ *   calcul de maths (2^10) n'est jamais reecrit en « 1,024 k ».
+ * Undefined quand cela n'apporte rien.
+ */
+export function engFormat(v: unknown, prefixed = false): string | undefined {
+  const x = cleanValue(v);
+  if (typeof x === "object" && x !== null && (x as any).isUnit) {
+    try {
+      const t = math.format(x as any, { precision: 4 });
+      const m = /^(-?[\d.]+(?:e[+-]?\d+)?)\s*(.*)$/.exec(t);
+      if (!m) return undefined;
+      const units = m[2]
+        .replace(/\b([pnumkMGT]?)ohm\b/g, "$1Ω")
+        .replace(/\bu(?=[A-Za-zΩ])/g, "µ");
+      return `${m[1].replace(".", ",")} ${units}`.trim();
+    } catch {
+      return undefined;
+    }
+  }
+  if (!prefixed || typeof x !== "number" || !Number.isFinite(x) || x === 0) return undefined;
+  let exp = Math.floor(Math.log10(Math.abs(x)) / 3) * 3;
+  exp = Math.max(-12, Math.min(12, exp));
+  let m = x / 10 ** exp;
+  // 999,96 arrondi a 4 chiffres = 1000 : on passe au prefixe suivant.
+  if (Math.abs(Number(m.toPrecision(4))) >= 1000 && exp < 12) { exp += 3; m = x / 10 ** exp; }
+  const sym = SI_SYMBOL[exp];
+  return sym ? `${mantissa(m)} ${sym}` : mantissa(m);
 }
 
 /** Resultat en LaTeX (matrices, unites, complexes), via son texte affiche. */
