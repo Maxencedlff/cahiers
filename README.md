@@ -130,6 +130,26 @@ Les cles se saisissent dans l'application, en bas a droite, bouton
 « Clés MyScript ». Sans cles, tout fonctionne sauf la conversion : les blocs
 math restent en attente indefiniment, l'encre reste lisible.
 
+## Recherche et reperes « pas compris »
+
+`Ctrl+K` cherche dans tous les cahiers, ou seulement dans le cahier ouvert
+(bouton a cote du champ). Le texte est compare tel qu'on le lit : sans
+casse ni accents, gras et couleurs ignores, formules relues (« vbe » trouve
+V_be, « pi » trouve π). Plusieurs mots : tous doivent y etre, dans n'importe
+quel ordre ; `"phrase exacte"` entre guillemets ; `@maths` pour une matiere,
+`#theoreme` pour une couleur (seul : tous les theoremes). Fleches pour
+choisir, Entree ouvre la page au passage trouve, surligne ; Echap revient a
+la page ou l'on ecrivait. Les resultats les plus recents viennent d'abord.
+
+`Ctrl+F` pose le repere a la hauteur du curseur (ou du dernier trait) et
+garde la ligne : la vue « Pas compris » (depuis le menu, ou le badge d'une
+matiere) dit ce qui n'etait pas compris, ouvre l'endroit exact, et
+« Compris » (ou `Suppr`) le retire sans ouvrir la page.
+
+Rien n'est indexe sur le disque : l'appli garde en memoire, le temps de la
+seance, ce qu'elle a deja lu de chaque page, et relit une page des que la
+date ou la taille de son fichier change (OneDrive, explorateur).
+
 ## Raccourcis
 
 La liste complete est dans l'application : **F1** (ou `Ctrl+/`, ou le bouton

@@ -1,10 +1,11 @@
-import type { FsAdapter } from "./fs";
+import type { FileStat, FsAdapter } from "./fs";
 import { joinPath } from "./fs";
 import {
   SCHEMA_VERSION, emptyPage, pageFileName, parsePageNumber,
   type NotebookMeta, type Page,
 } from "../types";
 import { uuid, nowIso } from "../id";
+import { indexPage, type FlagHit, type PageIndex } from "./search";
 
 export const VRAC = "Vrac";
 export const META_FILE = "cahier.json";
@@ -34,7 +35,15 @@ export interface NotebookSummary {
   meta: NotebookMeta;
   pageCount: number;
   flagCount: number;
+  /** Reperes non resolus, lus dans le meme parcours (le menu n'en refait pas un). */
+  flags: FlagHit[];
   modified: string;
+}
+
+/** Une page d'intercalaire et son resume ; null si elle est illisible. */
+export interface ScannedPage {
+  n: number;
+  index: PageIndex | null;
 }
 
 /**
@@ -42,7 +51,23 @@ export interface NotebookSummary {
  * listing reel, aucun index n'est conserve entre deux lancements.
  */
 export class Repo {
+  /**
+   * Resumes des pages deja lues pendant la session, par chemin. Ce n'est
+   * pas un index : il ne fait jamais foi. Chaque usage revérifie la date et
+   * la taille du fichier (une page changee par OneDrive est relue), il n'est
+   * jamais ecrit sur le disque, et toute ecriture ou renumerotation faite
+   * ici l'oublie.
+   */
+  private cache = new Map<string, { stamp: string; index: PageIndex }>();
+
   constructor(private fs: FsAdapter) {}
+
+  /** Oublie les resumes d'un fichier ou de tout un dossier. */
+  private forget(prefix: string): void {
+    for (const key of [...this.cache.keys()]) {
+      if (key === prefix || key.startsWith(prefix + "/")) this.cache.delete(key);
+    }
+  }
 
   /* ---------------- cahiers ---------------- */
 
@@ -96,6 +121,7 @@ export class Repo {
     const meta = await this.readMeta(dir);
     meta.title = title;
     if (next !== dir && !(await this.fs.exists(next))) {
+      this.forget(dir);
       await this.fs.rename(dir, next);
       await this.writeMeta(next, meta);
       return next;
@@ -147,6 +173,7 @@ export class Repo {
     if (key === ASSETS_DIR || next.startsWith(".") || taken.some((d) => d.toLowerCase() === key)) {
       return from;
     }
+    this.forget(joinPath(dir, from));
     if (key === from.toLowerCase()) {
       const step = `${from}.renommage`;
       await this.fs.rename(joinPath(dir, from), joinPath(dir, step));
@@ -177,6 +204,7 @@ export class Repo {
     const index = meta.dividers.indexOf(name);
     const bin = await this.newBin();
     await this.fs.mkdir(joinPath(bin, dir));
+    this.forget(joinPath(dir, name));
     await this.fs.rename(joinPath(dir, name), joinPath(bin, dir, name));
     meta.dividers = meta.dividers.filter((d) => d !== name);
     await this.writeMeta(dir, meta);
@@ -197,6 +225,7 @@ export class Repo {
       name = `${entry.divider} (restauré${i > 1 ? ` ${i}` : ""})`;
     }
     await this.fs.mkdir(entry.dir);
+    this.forget(joinPath(entry.dir, name));
     await this.fs.rename(src, joinPath(entry.dir, name));
     const meta = await this.readMeta(entry.dir);
     if (!meta.dividers.includes(name)) {
@@ -228,7 +257,14 @@ export class Repo {
 
   async writePage(dir: string, divider: string, n: number, page: Page): Promise<void> {
     page.modified = nowIso();
-    await this.fs.writeText(joinPath(dir, divider, pageFileName(n)), serializePage(page));
+    const path = joinPath(dir, divider, pageFileName(n));
+    this.forget(path);
+    try {
+      await this.fs.writeText(path, serializePage(page));
+    } finally {
+      // Une lecture partie pendant l'ecriture a pu remettre l'ancienne version.
+      this.forget(path);
+    }
   }
 
   /**
@@ -240,6 +276,7 @@ export class Repo {
     const nums = await this.listPageNumbers(dir, divider);
     const last = nums.length ? nums[nums.length - 1] : 0;
     const target = at == null ? last + 1 : Math.max(1, Math.min(at, last + 1));
+    this.forget(joinPath(dir, divider));
 
     for (let i = nums.length - 1; i >= 0; i--) {
       const n = nums[i];
@@ -257,6 +294,7 @@ export class Repo {
   /** Met la page a la corbeille et referme le trou de numerotation. */
   async deletePage(dir: string, divider: string, n: number): Promise<TrashEntry> {
     const bin = await this.newBin();
+    this.forget(joinPath(dir, divider));
     await this.fs.mkdir(joinPath(bin, dir, divider));
     await this.fs.rename(
       joinPath(dir, divider, pageFileName(n)),
@@ -283,6 +321,7 @@ export class Repo {
     const src = joinPath(entry.bin, entry.dir, entry.divider, pageFileName(entry.page));
     if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
     await this.fs.mkdir(joinPath(entry.dir, entry.divider));
+    this.forget(joinPath(entry.dir, entry.divider));
     const nums = await this.listPageNumbers(entry.dir, entry.divider);
     const last = nums.length ? nums[nums.length - 1] : 0;
     const target = Math.max(1, Math.min(entry.page, last + 1));
@@ -346,26 +385,70 @@ export class Repo {
     await this.writeMeta(dir, meta);
   }
 
+  /**
+   * Pages d'un intercalaire avec leur resume (texte cherchable, reperes,
+   * date). Un seul listing avec dates et tailles ; une page n'est relue que
+   * si son fichier a change depuis la derniere lecture. null si `isStale`
+   * dit d'arreter (une frappe plus recente dans la recherche).
+   */
+  async scanDivider(dir: string, divider: string, isStale?: () => boolean): Promise<ScannedPage[] | null> {
+    const rel = joinPath(dir, divider);
+    const files: { n: number; stamp: string | null }[] = [];
+    let stats: FileStat[] | null = null;
+    // Sans dates (commande absente ou en echec), tout est relu, comme avant :
+    // le menu ne doit jamais tomber pour un cache.
+    try { stats = (await this.fs.listFilesStat?.(rel)) ?? null; } catch { stats = null; }
+    if (stats) {
+      for (const f of stats) {
+        const n = parsePageNumber(f.name);
+        if (n !== null) files.push({ n, stamp: `${f.mtime}:${f.size}` });
+      }
+    } else {
+      for (const name of await this.fs.listFiles(rel)) {
+        const n = parsePageNumber(name);
+        if (n !== null) files.push({ n, stamp: null });
+      }
+    }
+    files.sort((a, b) => a.n - b.n);
+    const out: ScannedPage[] = [];
+    for (const { n, stamp } of files) {
+      const path = joinPath(rel, pageFileName(n));
+      const known = stamp ? this.cache.get(path) : undefined;
+      if (known && known.stamp === stamp) { out.push({ n, index: known.index }); continue; }
+      if (isStale?.()) return null;
+      try {
+        // Lu APRES le listing : au pire plus recent que la date gardee, et
+        // alors la prochaine fois la date differe et la page est relue.
+        const index = indexPage(await this.readPage(dir, divider, n));
+        if (stamp) this.cache.set(path, { stamp, index });
+        out.push({ n, index });
+      } catch {
+        // Page illisible : comptee, jamais resumee.
+        this.cache.delete(path);
+        out.push({ n, index: null });
+      }
+    }
+    return out;
+  }
+
   async summary(dir: string): Promise<NotebookSummary> {
     const meta = await this.readMeta(dir);
     const dividers = await this.listDividers(dir);
     let pageCount = 0;
-    let flagCount = 0;
     let modified = "";
+    const flags: FlagHit[] = [];
     for (const d of dividers) {
-      const nums = await this.listPageNumbers(dir, d);
-      pageCount += nums.length;
-      for (const n of nums) {
-        try {
-          const page = await this.readPage(dir, d, n);
-          if (page.modified > modified) modified = page.modified;
-          flagCount += page.blocks.filter(
-            (b) => b.type === "flag" && !b.resolved,
-          ).length;
-        } catch { /* page illisible : on l'ignore pour le compteur */ }
+      const pages = (await this.scanDivider(dir, d)) ?? [];
+      pageCount += pages.length;
+      for (const { n, index } of pages) {
+        if (!index) continue; // page illisible : on l'ignore pour les compteurs
+        if (index.modified > modified) modified = index.modified;
+        for (const f of index.flags) {
+          flags.push({ notebook: dir, notebookTitle: meta.title, divider: d, page: n, ...f });
+        }
       }
     }
-    return { dir, meta, pageCount, flagCount, modified };
+    return { dir, meta, pageCount, flagCount: flags.length, flags, modified };
   }
 
   /** Toutes les matieres, triees par derniere modification (section 5). */

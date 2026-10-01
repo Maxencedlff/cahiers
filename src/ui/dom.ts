@@ -37,14 +37,22 @@ export interface ToastAction {
   run: () => void;
 }
 
+/**
+ * Message en bas de l'ecran. `key` : un message de meme cle remplace le
+ * precedent au lieu de s'empiler (trois Ctrl+F = un seul message).
+ */
 export function toast(
-  message: string, kind: "info" | "warn" | "err" = "info", ms = 3200, action?: ToastAction,
+  message: string, kind: "info" | "warn" | "err" = "info", ms = 3200, action?: ToastAction, key?: string,
 ): void {
   if (!toastHost) {
     toastHost = el("div", { class: "toast-host" });
     document.body.append(toastHost);
   }
+  if (key) {
+    for (const old of [...toastHost.children] as HTMLElement[]) if (old.dataset.key === key) old.remove();
+  }
   const node = el("div", { class: `toast ${kind === "info" ? "" : kind}` }, message);
+  if (key) node.dataset.key = key;
   if (action) {
     node.classList.add("with-action");
     // Un seul appui : le message part aussitot, l'action ne se rejoue pas.

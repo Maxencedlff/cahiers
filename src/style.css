@@ -595,3 +595,22 @@ kbd {
 
 /* Symboles frequents : le conteneur se reordonne sans casser la grille. */
 .mathsyms { display: contents; }
+
+/* ---------------- recherche et reperes ---------------- */
+
+/* Passage retrouve par la recherche : surligne un instant, texte intact. */
+::highlight(cahiers-found) { background-color: #fde68a; color: inherit; }
+.text-doc .eq.flash { outline: 2px solid #f0b429; border-radius: 3px; background: #fef3c7; }
+.hit mark, .flag-row mark { background: #fde68a; color: inherit; border-radius: 2px; padding: 0 1px; }
+.hit.sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-soft); }
+.search-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 14px 0 8px; }
+.search-bar input { flex: 1; min-width: 260px; font-size: 17px; min-height: 44px; }
+.search-info { display: flex; align-items: center; gap: 10px; min-height: 32px; margin-bottom: 6px; }
+.flag-row { display: flex; gap: 6px; align-items: stretch; }
+.flag-row .hit { flex: 1; }
+.flag-row .done-btn { min-width: 96px; }
+.hit .what { font-size: 15px; }
+.hit .what.muted { color: var(--muted); font-style: italic; }
+.card .badge.link { cursor: pointer; position: relative; }
+.card .badge.link::after { content: ""; position: absolute; inset: -10px -6px; }
+.card .badge.link:hover { filter: brightness(.95); text-decoration: underline; }

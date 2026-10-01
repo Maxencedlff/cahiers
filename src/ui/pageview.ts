@@ -7,7 +7,7 @@ import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
-import { uuid } from "../core/id";
+import { uuid, nowIso } from "../core/id";
 import type { Repo, TrashEntry } from "../core/storage/repo";
 import type { RecoResult } from "../core/ink/recognizer";
 import {
@@ -17,6 +17,8 @@ import {
 import { colorOf } from "../core/palette";
 import { TextDoc } from "./textdoc";
 import { absorbTextBoxes } from "../core/text/doc";
+import { flagContext, fold, parseQuery } from "../core/text/find";
+import { DEFAULT_FLAG_NOTE } from "../core/storage/search";
 import { PageHistory, applyStrokeCommand, restoreBlocks } from "../core/history";
 
 export type ViewMode = "pages" | "scroll";
@@ -73,6 +75,12 @@ interface LoadedPage {
   dead?: boolean;
   /** Le geste de gomme en cours a deja son entree d'annulation. */
   eraseNoted?: boolean;
+  /**
+   * Ce qu'on a fait en dernier sur la page, et ou : le repere « pas
+   * compris » se pose a la hauteur du curseur ou du dernier trait.
+   */
+  lastEdit?: "text" | "ink";
+  lastInk?: Bounds;
 }
 
 /**
@@ -360,6 +368,7 @@ export class PageView {
     }
     if (body.content === content) return;
     body.content = content;
+    loaded.lastEdit = "text";
     this.fitSheet(loaded);
     this.queueSave(loaded);
   }
@@ -376,7 +385,7 @@ export class PageView {
       const tool = this.host.getTool();
       const toInk = e.pointerType === "pen" || e.pointerType === "touch"
         || (e.pointerType === "mouse" && e.button === 0 && tool !== "pen");
-      if (!toInk) return;
+      if (!toInk) { loaded.lastEdit = "text"; return; }
       e.preventDefault();
       loaded.surface?.forwardDown(e);
     });
@@ -607,6 +616,8 @@ export class PageView {
     this.history.push(loaded.page.id, { op: "add", blockId: ink.id, stroke });
     this.lastEditedId = loaded.page.id;
     ink.strokes.push(stroke);
+    loaded.lastEdit = "ink";
+    loaded.lastInk = strokeBounds(stroke);
     // Trait ecrit sous l'A4 : la feuille (et le canvas) s'allongent.
     if (growForStroke(loaded.page, stroke)) this.fitSheet(loaded);
     this.queueSave(loaded);
@@ -843,9 +854,10 @@ export class PageView {
         return place(box, block.rect);
       }
       case "flag": {
-        const pin = el("button", { class: "flag-pin", title: block.note }, "?");
+        const said = block.context || block.note;
+        const pin = el("button", { class: "flag-pin", title: said }, "?");
         pin.addEventListener("click", async () => {
-          const done = await confirmDialog("Repère « pas compris »", block.note, "Marquer comme compris");
+          const done = await confirmDialog("Repère « pas compris »", said, "Marquer comme compris");
           if (done) {
             block.resolved = true;
             this.paintOverlay(loaded);
@@ -1112,16 +1124,118 @@ export class PageView {
   /**
    * Repere "pas compris" : un seul bouton, aucun texte a ecrire.
    * En amphi on n'a pas le temps d'ecrire une note, on a le temps d'appuyer.
+   * Il se pose a l'endroit exact (section 6) : a la hauteur du curseur, ou
+   * du dernier trait si l'on ecrivait au stylet, et garde la ligne en
+   * contexte pour que la vue « Pas compris » dise ce qui n'etait pas compris.
    */
-  addFlag(note = "À revoir"): void {
+  addFlag(): void {
     const loaded = this.activePage();
     if (!loaded) return;
-    const y = 20 + loaded.page.blocks.filter((b) => b.type === "flag").length * 40;
+    const spot = this.flagSpot(loaded);
+    const bottom = (loaded.surface?.height ?? PAGE_H) - 34;
+    const y = clamp(Math.round(spot?.y ?? 20 + this.openFlags(loaded).length * 40), 4, bottom);
+    // Deux reperes sur la meme ligne : cote a cote, pas l'un sur l'autre.
+    let x = PAGE_W - 62;
+    while (x > 40 && this.openFlags(loaded).some((b) =>
+      Math.abs(b.rect!.x - x) < 30 && Math.abs(b.rect!.y - y) < 30)) x -= 36;
     const id = uuid();
-    this.addBlock({ id, type: "flag", note, rect: { x: PAGE_W - 62, y, w: 30, h: 30 } });
-    // Un repere pose par erreur s'enleve d'un appui, sans chercher la pastille.
-    toast(`Repère « pas compris » posé, p. ${loaded.number}`, "info", 5000,
-      { label: "Annuler", run: () => this.removeFlag(loaded.page.id, id) });
+    this.addBlock({
+      id, type: "flag", note: DEFAULT_FLAG_NOTE, rect: { x, y, w: 30, h: 30 },
+      created: nowIso(), ...(spot?.context ? { context: spot.context } : {}),
+    });
+    // Un seul message, mis a jour, meme apres trois appuis de suite. Un
+    // repere pose par erreur s'enleve d'un appui, sans chercher la pastille.
+    const burst = this.flagBurst?.page === loaded.page.id ? this.flagBurst : { page: loaded.page.id, ids: [] };
+    burst.ids.push(id);
+    if (burst.timer) clearTimeout(burst.timer);
+    burst.timer = setTimeout(() => { if (this.flagBurst === burst) this.flagBurst = null; }, 5000);
+    this.flagBurst = burst;
+    const n = burst.ids.length;
+    const what = spot?.context ? ` : « ${shorten(spot.context, 40)} »` : "";
+    toast(n > 1 ? `${n} repères « pas compris » posés, p. ${loaded.number}`
+      : `Repère « pas compris » posé, p. ${loaded.number}${what}`, "info", 5000,
+      { label: "Annuler", run: () => {
+        const last = burst.ids.pop();
+        if (last) this.removeFlag(loaded.page.id, last);
+        // Le message est parti : le prochain appui repart de un.
+        if (this.flagBurst === burst) this.flagBurst = null;
+      } }, "flag");
+  }
+
+  /** Reperes encore ouverts d'une page, places dans la marge. */
+  private openFlags(loaded: LoadedPage): Block[] {
+    return loaded.page.blocks.filter((b) => b.type === "flag" && !b.resolved && !!b.rect);
+  }
+
+  /** Derniers reperes poses d'affilee, pour un seul message « Annuler ». */
+  private flagBurst: { page: string; ids: string[]; timer?: ReturnType<typeof setTimeout> } | null = null;
+
+  /**
+   * Ou poser le repere (haut de la pastille, unites de page) et quelle ligne
+   * garder. Le curseur du texte si l'on tapait ; le dernier trait si l'on
+   * ecrivait au stylet depuis ; sinon rien (haut de page, comme avant).
+   */
+  private flagSpot(loaded: LoadedPage): { y: number; context: string } | null {
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    const sheet = loaded.sheet.getBoundingClientRect();
+    // Le texte garde le clavier pendant qu'on ecrit au stylet : c'est le
+    // dernier geste (frappe, clic dans le texte, ou trait) qui decide.
+    const caret = loaded.lastEdit !== "ink" ? loaded.doc.caretSpot() : null;
+    if (caret) {
+      const mid = ((caret.top + caret.bottom) / 2 - sheet.top) / k;
+      return { y: mid - 15, context: flagContext(caret.before, caret.after) };
+    }
+    const ink = loaded.lastInk ?? this.lastStrokeBounds(loaded.page);
+    if (!ink) return null;
+    const mid = ink.y + ink.h / 2;
+    return { y: mid - 15, context: this.inkLine(loaded, ink, k, sheet) };
+  }
+
+  /** Le dernier trait de la page, a defaut d'un trait ecrit pendant la seance. */
+  private lastStrokeBounds(page: Page): Bounds | null {
+    // Le meme bloc que mainInk, sans en creer un.
+    const ink = page.blocks.find((b): b is InkBlock => b.type === "ink");
+    const last = ink?.strokes[ink.strokes.length - 1];
+    return last ? strokeBounds(last) : null;
+  }
+
+  /**
+   * Ce qui est ecrit a la hauteur d'un trait : les mots reconnus de cette
+   * ligne, sinon le texte tape a cette hauteur. Vide si rien n'est lisible.
+   */
+  private inkLine(loaded: LoadedPage, ink: Bounds, k: number, sheet: DOMRect): string {
+    const mid = ink.y + ink.h / 2;
+    const ink0 = loaded.page.blocks.find((b): b is InkBlock => b.type === "ink");
+    const words = ink0?.words ?? [];
+    const line = words.filter((w) => w.box && w.box.y <= mid && w.box.y + w.box.h >= mid)
+      .sort((a, b) => a.box!.x - b.box!.x).map((w) => w.label).join(" ").trim();
+    if (line) return flagContext(line, "");
+    // La couche des blocs gene le reperage du texte sous le point.
+    loaded.overlay.style.display = "none";
+    const typed = loaded.doc.textLineAt(sheet.left + 70 * k, sheet.top + mid * k);
+    loaded.overlay.style.display = "";
+    return typed ? flagContext(typed, "") : "";
+  }
+
+  /**
+   * Marque un repere compris (ou de nouveau pas compris) depuis la vue
+   * « Pas compris ». Si la page est en memoire ici (affichee, ou en attente
+   * d'ecriture), c'est elle qui change et qui s'ecrit : une ecriture directe
+   * sur le disque serait ecrasee par la prochaine sauvegarde de cette vue.
+   * false si la vue n'a pas cette page.
+   */
+  async setFlagResolved(pageNumber: number, blockId: string, resolved: boolean): Promise<boolean> {
+    const loaded = this.list.find((p) => p.number === pageNumber && !p.dead)
+      ?? [...this.pendingSave.values()].find((p) => p.number === pageNumber);
+    const block = loaded?.page.blocks.find((b) => b.id === blockId);
+    if (!loaded || block?.type !== "flag") return false;
+    if (resolved) block.resolved = true; else delete block.resolved;
+    if (!loaded.dead) {
+      this.paintOverlay(loaded);
+      this.queueSave(loaded);
+    }
+    await this.flush();
+    return true;
   }
 
   /** Retire un repere, sur la page qui le porte (meme si on a change de page). */
@@ -1178,7 +1292,8 @@ export class PageView {
 
   /* ---------------- navigation ---------------- */
 
-  async goTo(n: number): Promise<void> {
+  /** `scroll` false : en defilement, l'appelant amene lui-meme la vue au bon endroit. */
+  async goTo(n: number, scroll = true): Promise<void> {
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (!nums.includes(n)) return;
     this.current = n;
@@ -1186,7 +1301,7 @@ export class PageView {
     if (this.viewMode === "pages") {
       await this.render();
     } else {
-      this.list.find((p) => p.number === n)?.wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (scroll) this.list.find((p) => p.number === n)?.wrap.scrollIntoView({ behavior: "smooth", block: "start" });
       this.host.onPageChange?.(n, this.total);
     }
     this.host.onDirty();
@@ -1396,28 +1511,50 @@ export class PageView {
     return this.host.repo.listPageNumbers(this.notebook, this.divider);
   }
 
-  /** Va a un bloc precis, apres une recherche ou un lien. */
-  async focusBlock(pageNumber: number, blockId: string): Promise<void> {
-    await this.goTo(pageNumber);
+  /**
+   * Va a un bloc precis, apres une recherche, un lien ou un repere.
+   * `query` (la recherche tapee) : dans le texte de la page, le passage
+   * trouve est amene a l'ecran et surligne, pas seulement le haut de page.
+   */
+  async focusBlock(pageNumber: number, blockId: string, query?: string): Promise<void> {
+    await this.goTo(pageNumber, false);
     const loaded = this.list.find((p) => p.number === pageNumber);
     if (!loaded) return;
+    // La page vient d'etre rendue ou rattachee : on mesure apres sa mise en
+    // page. Deux images, car la largeur de la feuille n'est posee qu'apres la
+    // premiere (ResizeObserver, voir relayout) ; mesure plus tot, le passage
+    // trouve n'etait pas encore a sa place et restait hors de l'ecran.
+    for (let i = 0; i < 2; i++) await new Promise((r) => requestAnimationFrame(() => r(null)));
     const block = loaded.page.blocks.find((b) => b.id === blockId);
+    const terms = query ? parseQuery(query).terms : [];
     if (block?.type === "image" && !block.rect && loaded.doc.revealImage(blockId)) return;
-    if (!block?.rect) { loaded.wrap.scrollIntoView({ block: "center" }); return; }
-    loaded.wrap.scrollIntoView({ block: "center" });
+    if (block?.type === "text" && !block.rect && terms.length && loaded.doc.revealText(terms)) return;
+    let rect = block?.rect;
+    // Mot manuscrit reconnu : son cadre sur la page.
+    if (!rect && block?.type === "ink" && terms.length) {
+      rect = block.words?.find((w) => w.box && terms.some((t) => fold(w.label).text.includes(t)))?.box;
+    }
+    if (!rect) { loaded.wrap.scrollIntoView({ block: "center" }); return; }
     const scale = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
     const marker = el("div", {
       class: "block-box",
       style: {
-        left: `${(block.rect.x - 6) * scale}px`,
-        top: `${(block.rect.y - 6) * scale}px`,
-        width: `${(block.rect.w + 12) * scale}px`,
-        height: `${(block.rect.h + 12) * scale}px`,
+        left: `${(rect.x - 6) * scale}px`,
+        top: `${(rect.y - 6) * scale}px`,
+        width: `${(rect.w + 12) * scale}px`,
+        height: `${(rect.h + 12) * scale}px`,
         border: "2px solid #2563eb",
         background: "rgba(37,99,235,.10)",
+        pointerEvents: "none",
+        zIndex: "3",
       },
     });
-    loaded.overlay.append(marker);
+    // Sur la feuille, pas dans la couche des blocs : celle-ci est repeinte
+    // a chaque mise en page (la vue qui se rattache), le cadre disparaissait.
+    loaded.sheet.append(marker);
+    // Le cadre lui-meme au centre : sur une page longue, le haut de la
+    // feuille ne suffit pas.
+    marker.scrollIntoView({ block: "center" });
     setTimeout(() => marker.remove(), 1800);
   }
 
@@ -1580,6 +1717,14 @@ const EDIT_SENTINEL = "\u0000corriger-a-la-main";
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Texte coupe sur un mot pour tenir dans un message. */
+function shorten(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > max / 2 ? cut.slice(0, sp) : cut) + "…";
 }
 
 function clamp(v: number, lo: number, hi: number): number {

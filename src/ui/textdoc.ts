@@ -5,8 +5,9 @@ import { el } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardText, normalizeTokens, parseDoc, serializeDoc, trailingOperand, type DocToken,
+  docClipboardText, normalizeTokens, parseDoc, serializeDoc, texToPlain, trailingOperand, type DocToken,
 } from "../core/text/doc";
+import { foldChar, occurrences } from "../core/text/find";
 import {
   findFormulas, greekWordAtEnd, latexToSource, planLine, slashOpensFraction, subscriptVars, symbolAtEnd,
   type FoundFormula, type LinePart, type ScanMode,
@@ -609,6 +610,146 @@ export class TextDoc {
     fig.classList.add("flash");
     setTimeout(() => fig.classList.remove("flash"), 1800);
     return true;
+  }
+
+  /**
+   * Va au premier passage qui contient un des termes cherches (deja plies,
+   * voir core/text/find) : il passe au centre de l'ecran, surligne un
+   * instant, curseur a sa fin. Le texte est plie comme dans l'index de
+   * recherche, formules relues en texte : "vbe" retrouve V_{be}.
+   */
+  revealText(terms: string[]): boolean {
+    if (!terms.length || this.field) return false;
+    let folded = "";
+    const at: Spot[] = [];
+    const push = (s: string, spot: Spot) => {
+      for (const ch of s) {
+        const f = foldChar(ch);
+        // Blancs resserres, comme fold() : sinon une phrase a cheval sur
+        // deux espaces ne serait pas retrouvee.
+        if (f === " " && (folded === "" || folded.endsWith(" "))) continue;
+        for (const c of f) { folded += c; at.push(spot); }
+      }
+    };
+    const walk = (node: Node) => {
+      for (const child of Array.from(node.childNodes)) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          const text = child.textContent ?? "";
+          let i = 0;
+          for (const ch of text) {
+            push(ch, { node: child as Text, offset: i, len: ch.length });
+            i += ch.length;
+          }
+          continue;
+        }
+        if (!(child instanceof HTMLElement)) continue;
+        // Formule relue sans blanc autour, comme dans l'index : "d'$O_{hm}$" donne "d'Ohm".
+        if (child.classList.contains("eq")) { push(texToPlain(child.dataset.latex ?? ""), { el: child }); continue; }
+        if (child.tagName === "BR" || child.classList.contains("doc-img")) { push(" ", { el: child }); continue; }
+        walk(child);
+      }
+    };
+    walk(this.root);
+    const first = occurrences(folded, terms)[0];
+    if (!first) return false;
+    const a = at[first[0]], b = at[first[1] - 1];
+    const range = document.createRange();
+    if ("node" in a) range.setStart(a.node, a.offset); else range.setStartBefore(a.el);
+    if ("node" in b) range.setEnd(b.node, b.offset + b.len); else range.setEndAfter(b.el);
+
+    // Curseur a la fin du passage : on peut completer aussitot.
+    const caret = range.cloneRange();
+    caret.collapse(false);
+    this.root.focus({ preventScroll: true });
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(caret);
+    this.savedRange = caret.cloneRange();
+
+    scrollToCenter(this.root, range.getBoundingClientRect());
+    // Surlignage temporaire, sans toucher au texte (CSS Custom Highlight,
+    // present dans WebView2). Une formule trouvee clignote en plus.
+    const registry = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+    const HighlightCtor = (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+    if (registry && HighlightCtor) {
+      registry.set(FOUND_HIGHLIGHT, new HighlightCtor(range));
+      setTimeout(() => registry.delete(FOUND_HIGHLIGHT), 2600);
+    }
+    for (const eq of this.root.querySelectorAll<HTMLElement>(".eq")) {
+      if (!range.intersectsNode(eq)) continue;
+      eq.classList.add("flash");
+      setTimeout(() => eq.classList.remove("flash"), 2600);
+    }
+    return true;
+  }
+
+  /**
+   * Le curseur (ou la fin de la selection) : sa ligne a l'ecran et le texte
+   * qui l'entoure, formules relues. Sert au repere « pas compris », pose a
+   * la hauteur de la ligne qu'on ecrit. null s'il n'y a pas de curseur ici.
+   */
+  caretSpot(): { top: number; bottom: number; before: string; after: string } | null {
+    // Formule en cours d'edition : le texte de part et d'autre, et la
+    // formule elle-meme au milieu. Jamais de copie du champ MathLive (le
+    // cloner construirait un second champ, non monte).
+    const mf = this.field;
+    if (mf && this.root.contains(mf)) {
+      const rect = mf.getBoundingClientRect();
+      const head = document.createRange();
+      head.setStart(this.root, 0);
+      head.setEndBefore(mf);
+      const tail = document.createRange();
+      tail.setStartAfter(mf);
+      tail.setEnd(this.root, this.root.childNodes.length);
+      return {
+        top: rect.top, bottom: rect.bottom,
+        before: plainOf(this.readNodes(head.cloneContents())) + texToPlain(mf.getValue("latex")),
+        after: plainOf(this.readNodes(tail.cloneContents())),
+      };
+    }
+    const sel = document.getSelection();
+    const live = sel?.rangeCount ? sel.getRangeAt(0) : null;
+    const caret = live && this.root.contains(live.startContainer) ? live.cloneRange()
+      : this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange()
+      : null;
+    if (!caret) return null;
+    caret.collapse(false);
+    const rect = caretRect(caret, this.root);
+    if (!rect) return null;
+    const head = document.createRange();
+    head.setStart(this.root, 0);
+    head.setEnd(caret.endContainer, caret.endOffset);
+    const tail = document.createRange();
+    tail.setStart(caret.endContainer, caret.endOffset);
+    tail.setEnd(this.root, this.root.childNodes.length);
+    return {
+      top: rect.top, bottom: rect.bottom,
+      before: plainOf(this.readNodes(head.cloneContents())),
+      after: plainOf(this.readNodes(tail.cloneContents())),
+    };
+  }
+
+  /**
+   * La ligne de texte tape a une hauteur de l'ecran (repere pose apres un
+   * trait d'encre) : son texte, ou null s'il n'y a pas de texte a cette
+   * hauteur.
+   */
+  textLineAt(clientX: number, clientY: number): string | null {
+    if (this.field) return null; // formule ouverte : pas de copie du champ
+    const r = document.caretRangeFromPoint(clientX, clientY);
+    if (!r || !this.root.contains(r.startContainer)) return null;
+    const rect = caretRect(r, this.root);
+    if (!rect || clientY < rect.top - 6 || clientY > rect.bottom + 6) return null;
+    const head = document.createRange();
+    head.setStart(this.root, 0);
+    head.setEnd(r.startContainer, r.startOffset);
+    const tail = document.createRange();
+    tail.setStart(r.startContainer, r.startOffset);
+    tail.setEnd(this.root, this.root.childNodes.length);
+    const before = plainOf(this.readNodes(head.cloneContents()));
+    const after = plainOf(this.readNodes(tail.cloneContents()));
+    const line = (before.slice(before.lastIndexOf("\n") + 1) + after.split("\n")[0]).trim();
+    return line || null;
   }
 
   /* ---------------- formules ---------------- */
@@ -1299,6 +1440,60 @@ function colorAt(node: Node, root: HTMLElement): ColorKey | null {
 /** Point d'ancrage invisible : le curseur a toujours un texte ou se poser. */
 function anchor(): Text {
   return document.createTextNode("\u200b");
+}
+
+/** Nom du surlignage d'un passage retrouve (::highlight dans style.css). */
+const FOUND_HIGHLIGHT = "cahiers-found";
+
+/** Place d'un caractere plie : dans un texte, ou une formule / un saut de ligne entier. */
+type Spot = { node: Text; offset: number; len: number } | { el: HTMLElement };
+
+/** Texte simple de jetons : formules relues, photos omises. */
+function plainOf(tokens: DocToken[]): string {
+  return tokens.map((t) =>
+    t.kind === "br" ? "\n" : t.kind === "math" ? texToPlain(t.latex) : t.kind === "text" ? t.text : "").join("");
+}
+
+/**
+ * Rectangle d'un curseur. Un curseur replie en debut de ligne vide n'a pas
+ * de rectangle : on prend alors le caractere ou le noeud voisin.
+ */
+function caretRect(r: Range, root: HTMLElement): DOMRect | null {
+  const ok = (x: DOMRect | undefined | null) => !!x && (x.height > 0 || x.top !== 0);
+  const own = r.getClientRects()[0] ?? r.getBoundingClientRect();
+  if (ok(own)) return own;
+  const node = r.startContainer;
+  if (node.nodeType === Node.TEXT_NODE) {
+    const len = node.textContent?.length ?? 0;
+    const probe = document.createRange();
+    if (r.startOffset > 0) probe.setStart(node, r.startOffset - 1), probe.setEnd(node, r.startOffset);
+    else if (len) probe.setStart(node, 0), probe.setEnd(node, 1);
+    else probe.selectNode(node);
+    const rect = probe.getClientRects()[0] ?? probe.getBoundingClientRect();
+    if (ok(rect)) return rect;
+  }
+  const parent = node.nodeType === Node.TEXT_NODE ? node.parentNode : node;
+  const kids = parent ? Array.from(parent.childNodes) : [];
+  const offset = node.nodeType === Node.TEXT_NODE ? kids.indexOf(node as ChildNode) : r.startOffset;
+  for (const cand of [kids[offset - 1], kids[offset]]) {
+    if (cand instanceof HTMLElement && root.contains(cand)) {
+      const rect = cand.getBoundingClientRect();
+      if (ok(rect)) return rect;
+    }
+  }
+  return null;
+}
+
+/** Fait defiler le conteneur de la page pour mettre un rectangle au centre. */
+function scrollToCenter(from: HTMLElement, rect: DOMRect): void {
+  if (!rect.height && !rect.top) return;
+  let box: HTMLElement | null = from.parentElement;
+  while (box && !(box.scrollHeight > box.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(box).overflowY))) {
+    box = box.parentElement;
+  }
+  if (!box) return;
+  const b = box.getBoundingClientRect();
+  box.scrollTop += (rect.top + rect.bottom) / 2 - (b.top + b.height / 2);
 }
 
 /**

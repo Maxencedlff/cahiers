@@ -194,15 +194,18 @@ describe("recherche", () => {
     await repo.createDivider(nb, "Cours");
     const n = await repo.createPage(nb, "Cours");
     const page = await repo.readPage(nb, "Cours", n);
+    // La photo est posee dans le texte : son OCR compte.
+    const img = uuid();
     page.blocks.push(
-      { id: uuid(), type: "text", content: "Critère de Riemann" },
+      { id: uuid(), type: "text", content: `Critère de Riemann ![](img:${img})` },
       { id: uuid(), type: "math", mode: "math", strokes: [], latex: "\\int_0^{+\\infty} e^{-x}" },
-      { id: uuid(), type: "image", src: "assets/a.png", ocr: "photo du tableau" },
+      { id: img, type: "image", src: "assets/a.png", ocr: "photo du tableau" },
     );
     await repo.writePage(nb, "Cours", n, page);
 
     expect(await searchAll(repo, "riemann")).toHaveLength(1);
-    expect(await searchAll(repo, "infty")).toHaveLength(1);
+    // Le LaTeX est relu en texte : \infty se cherche « infini ».
+    expect(await searchAll(repo, "infini")).toHaveLength(1);
     expect(await searchAll(repo, "tableau")).toHaveLength(1);
     expect(await searchAll(repo, "introuvable")).toHaveLength(0);
   });

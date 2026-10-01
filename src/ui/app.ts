@@ -9,7 +9,7 @@ import { PALETTE, NEUTRAL_INK, labelOf, shortcutOf } from "../core/palette";
 import type { ColorKey, InkColor, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
 import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
-import { searchAll } from "../core/storage/search";
+import { searchAll, type FlagHit } from "../core/storage/search";
 import type { FsAdapter } from "../core/storage/fs";
 import {
   RecognitionQueue, SEND_DEBOUNCE_MS, MyScriptBackend, NoBackend,
@@ -64,6 +64,13 @@ export class App {
    * d'etat et la fermeture de la fenetre les voient encore.
    */
   private orphans = new Set<PageView>();
+  /**
+   * Ecran d'ou l'on est venu a la recherche ou aux reperes : Echap et
+   * « Retour » y ramenent, a la page ou l'on ecrivait plutot qu'au menu.
+   */
+  private auxFrom: "menu" | "notebook" = "menu";
+  /** Derniere recherche tapee, reproposee au Ctrl+K suivant. */
+  private lastQuery = "";
 
   private tool: Tool = "pen";
   /**
@@ -256,27 +263,85 @@ export class App {
       rootLabel: this.rootLabel,
       openNotebook: (dir: string, divider?: string, page?: number) =>
         void this.openNotebook(dir, divider, page),
+      openAt: (dir: string, divider: string, page: number, blockId: string, query?: string) =>
+        void this.openAt(dir, divider, page, blockId, query),
       openSearch: () => void this.showSearch(),
-      openFlags: () => void this.showFlags(),
+      openFlags: (notebook?: string) => void this.showFlags(notebook),
+      setFlagResolved: (f: FlagHit, resolved: boolean) => this.setFlagResolved(f, resolved),
       openProbe: () => this.showProbe(),
     };
   }
 
+  /** Retient l'ecran de travail avant d'ouvrir la recherche ou les reperes. */
+  private noteAuxFrom(): void {
+    if (this.screen === "menu" || this.screen === "notebook") this.auxFrom = this.screen;
+  }
+
+  /** Echap ou « Retour » depuis la recherche ou les reperes. */
+  private leaveAux(): void {
+    if (this.auxFrom === "notebook" && this.tabs.length) void this.backToWork();
+    else void this.showMenu();
+  }
+
   private async showSearch(): Promise<void> {
+    this.noteAuxFrom();
+    // Lancee depuis un cahier : la recherche part dans cette matiere (on
+    // peut l'elargir d'un appui).
+    const tab = this.auxFrom === "notebook" ? this.activeTab() : undefined;
     this.screen = "search";
     await this.flushAll();
     clear(this.main);
+    this.paintTabs();
     this.main.append(buildSearchView(
       this.menuHost(),
-      () => void this.showMenu(),
-      (q) => searchAll(this.repo, q),
+      () => this.leaveAux(),
+      (q, opts) => searchAll(this.repo, q, opts),
+      {
+        initial: this.lastQuery,
+        onQuery: (q) => { this.lastQuery = q; },
+        notebook: tab ? { dir: tab.notebook, title: tab.title } : undefined,
+      },
     ));
   }
 
-  private async showFlags(): Promise<void> {
+  private async showFlags(notebook?: string): Promise<void> {
+    this.noteAuxFrom();
     this.screen = "flags";
+    // Les reperes poses a l'instant doivent etre sur le disque pour etre listes.
+    await this.flushAll();
     clear(this.main);
-    this.main.append(await buildFlagsView(this.menuHost(), () => void this.showMenu()));
+    this.paintTabs();
+    this.main.append(await buildFlagsView(this.menuHost(), () => this.leaveAux(), notebook));
+  }
+
+  /** Ouvre une page et va au bloc (resultat de recherche, repere). */
+  private async openAt(dir: string, divider: string, page: number, blockId: string, query?: string): Promise<void> {
+    await this.openNotebook(dir, divider, page);
+    await this.activeTab()?.view?.focusBlock(page, blockId, query);
+  }
+
+  /**
+   * Repere marque compris (ou rendu) depuis la liste. Une vue qui a cette
+   * page en memoire la modifie elle-meme ; sinon on ecrit le fichier.
+   */
+  private async setFlagResolved(f: FlagHit, resolved: boolean): Promise<boolean> {
+    const views = [...this.tabs.map((t) => t.view), ...this.orphans]
+      .filter((v): v is PageView => !!v && v.notebook === f.notebook && v.divider === f.divider);
+    try {
+      for (const v of views) if (await v.setFlagResolved(f.page, f.blockId, resolved)) return true;
+      const page = await this.repo.readPage(f.notebook, f.divider, f.page);
+      const block = page.blocks.find((b) => b.id === f.blockId);
+      if (block?.type !== "flag") {
+        toast("Ce repère n'est plus sur sa page (pages renumérotées ?)", "warn");
+        return false;
+      }
+      if (resolved) block.resolved = true; else delete block.resolved;
+      await this.repo.writePage(f.notebook, f.divider, f.page, page);
+      return true;
+    } catch (e) {
+      toast(`Repère non modifié : ${(e as Error).message}`, "err", 6000);
+      return false;
+    }
   }
 
   private showProbe(): void {
@@ -1051,6 +1116,11 @@ export class App {
     // ne doit pas en plus renvoyer au menu.
     if (dialog) return;
 
+    if (e.key === "Escape" && (this.screen === "search" || this.screen === "flags")) {
+      e.preventDefault();
+      this.leaveAux();
+      return;
+    }
     if (e.key === "Escape" && this.screen !== "menu") { e.preventDefault(); void this.showMenu(); return; }
     if (this.screen !== "notebook") return;
 

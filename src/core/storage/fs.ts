@@ -11,6 +11,12 @@ export interface FsAdapter {
   readonly kind: "tauri" | "browser";
   listDirs(rel: string): Promise<string[]>;
   listFiles(rel: string): Promise<string[]>;
+  /**
+   * Fichiers d'un dossier avec date et taille, en un seul appel. Sert a
+   * savoir si une page a bouge depuis sa derniere lecture (OneDrive,
+   * explorateur) sans la relire. Absent : tout est relu, comme avant.
+   */
+  listFilesStat?(rel: string): Promise<FileStat[]>;
   readText(rel: string): Promise<string>;
   writeText(rel: string, content: string): Promise<void>;
   exists(rel: string): Promise<boolean>;
@@ -29,6 +35,13 @@ export interface FsAdapter {
    */
   writeDataUrl(rel: string, dataUrl: string): Promise<void>;
   readDataUrl(rel: string): Promise<string>;
+}
+
+export interface FileStat {
+  name: string;
+  /** Date de modification, en ms (avec decimales cote Windows). */
+  mtime: number;
+  size: number;
 }
 
 /** "data:image/png;base64,AAA" donne ["image/png", "AAA"]. */
@@ -58,6 +71,7 @@ export class TauriFs implements FsAdapter {
 
   listDirs(rel: string) { return this.invoke<string[]>("list_dirs", { rel }); }
   listFiles(rel: string) { return this.invoke<string[]>("list_files", { rel }); }
+  listFilesStat(rel: string) { return this.invoke<FileStat[]>("list_files_meta", { rel }); }
   readText(rel: string) { return this.invoke<string>("read_text", { rel }); }
   writeText(rel: string, content: string) { return this.invoke<void>("write_text", { rel, content }); }
   exists(rel: string) { return this.invoke<boolean>("path_exists", { rel }); }
@@ -96,6 +110,13 @@ export class BrowserFs implements FsAdapter {
   readonly kind = "browser" as const;
   /** chemin -> contenu. Un dossier est une entree de valeur null. */
   private tree: Record<string, string | null>;
+  /**
+   * Version de chaque fichier ecrit depuis le lancement, en guise de date
+   * de modification. Un fichier relu du stockage n'en a pas (0) : sa
+   * taille seule le distingue, et Repo oublie son cache a chaque ecriture.
+   */
+  private revs = new Map<string, number>();
+  private clock = 0;
 
   constructor(private persist = true) {
     let loaded: Record<string, string | null> | null = null;
@@ -133,6 +154,14 @@ export class BrowserFs implements FsAdapter {
     const prefix = rel === "" ? "" : rel + "/";
     return this.childrenOf(rel).filter((c) => this.tree[prefix + c] !== null);
   }
+  async listFilesStat(rel: string) {
+    const prefix = rel === "" ? "" : rel + "/";
+    return (await this.listFiles(rel)).map((name) => ({
+      name,
+      mtime: this.revs.get(prefix + name) ?? 0,
+      size: (this.tree[prefix + name] ?? "").length,
+    }));
+  }
   async readText(rel: string) {
     const v = this.tree[rel];
     if (v == null) throw new Error(`fichier introuvable : ${rel}`);
@@ -145,6 +174,7 @@ export class BrowserFs implements FsAdapter {
       if (!(dir in this.tree)) this.tree[dir] = null;
     }
     this.tree[rel] = content;
+    this.revs.set(rel, ++this.clock);
     this.flush();
   }
   async exists(rel: string) { return rel === "" || rel in this.tree; }
@@ -158,7 +188,7 @@ export class BrowserFs implements FsAdapter {
   }
   async remove(rel: string) {
     for (const key of Object.keys(this.tree)) {
-      if (key === rel || key.startsWith(rel + "/")) delete this.tree[key];
+      if (key === rel || key.startsWith(rel + "/")) { delete this.tree[key]; this.revs.delete(key); }
     }
     this.flush();
   }
@@ -168,6 +198,8 @@ export class BrowserFs implements FsAdapter {
         const next = to + key.slice(from.length);
         this.tree[next] = this.tree[key];
         delete this.tree[key];
+        this.revs.delete(key);
+        this.revs.set(next, ++this.clock);
       }
     }
     this.flush();

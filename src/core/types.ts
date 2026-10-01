@@ -154,6 +154,14 @@ export interface FlagBlock extends BlockBase {
   type: "flag";
   note: string;
   resolved?: boolean;
+  /**
+   * La ligne ou le repere a ete pose (environ 80 caracteres), pour savoir
+   * le soir ce qui n'etait pas compris. Optionnel : les anciens reperes
+   * restent valides.
+   */
+  context?: string;
+  /** Date de pose (ISO), pour trier la vue « Pas compris ». */
+  created?: string;
 }
 
 export type Block =

@@ -98,6 +98,45 @@ fn list_files(state: State<Root>, rel: String) -> Res<Vec<String>> {
     Ok(out)
 }
 
+/// Un fichier avec sa date et sa taille : le frontend sait si une page a
+/// change depuis sa derniere lecture sans la relire (cache de recherche).
+#[derive(serde::Serialize)]
+struct FileMeta {
+    name: String,
+    /// Millisecondes depuis 1970, avec decimales.
+    mtime: f64,
+    size: u64,
+}
+
+#[tauri::command]
+fn list_files_meta(state: State<Root>, rel: String) -> Res<Vec<FileMeta>> {
+    let path = resolve(&root_of(&state)?, &rel)?;
+    let mut out = Vec::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(&path).map_err(|e| fail(e.to_string()))? {
+        let entry = entry.map_err(|e| fail(e.to_string()))?;
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        out.push(FileMeta {
+            name: entry.file_name().to_string_lossy().to_string(),
+            mtime,
+            size: meta.len(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 #[tauri::command]
 fn read_text(state: State<Root>, rel: String) -> Res<String> {
     let path = resolve(&root_of(&state)?, &rel)?;
@@ -440,6 +479,7 @@ pub fn run() {
             machine_name,
             list_dirs,
             list_files,
+            list_files_meta,
             read_text,
             write_text,
             read_binary,
