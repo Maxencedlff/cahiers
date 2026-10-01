@@ -62,6 +62,8 @@ button.on { background: var(--accent-soft); border-color: var(--accent); color: 
 button.ghost { border-color: transparent; background: transparent; }
 button.ghost:hover { background: rgba(0,0,0,.05); }
 button:disabled { opacity: .45; cursor: default; }
+button.danger { color: #a51b1b; border-color: #f0c4c4; }
+button.danger:hover { background: #fdf0f0; }
 
 input, textarea, select {
   font: inherit;
@@ -209,6 +211,14 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   background: var(--page-bg); border: 1px solid var(--line); border-radius: 4px;
   box-shadow: var(--shadow); position: relative; overflow: hidden;
 }
+.sheet.unreadable {
+  aspect-ratio: auto; min-height: 420px; padding: 36px 40px; display: flex; flex-direction: column;
+  gap: 12px; justify-content: center; border: 2px dashed #e7b4b4;
+}
+.sheet.unreadable h2 { margin: 0; color: #a51b1b; font-size: 22px; }
+.sheet.unreadable p { margin: 0; max-width: 620px; line-height: 1.5; }
+.sheet.unreadable code { font-size: 12px; word-break: break-all; }
+.unreadable-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
 /* Aucun geste natif sur la zone d'encre : ecrire ne doit jamais faire
    defiler la page. Le defilement au doigt est gere dans InkSurface. */
 .sheet canvas { touch-action: none; }
@@ -339,6 +349,11 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 }
 .toast.warn { background: #92590a; }
 .toast.err { background: #a51b1b; }
+.toast.with-action { display: flex; align-items: center; gap: 14px; pointer-events: auto; padding: 6px 8px 6px 16px; }
+.toast-action {
+  background: transparent; color: #9cc0ff; border-color: transparent; font-weight: 600; min-height: 44px;
+}
+.toast-action:hover { background: rgba(255,255,255,.1); }
 
 .status {
   display: flex; align-items: center; gap: 14px; padding: 5px 12px; min-height: 32px;
@@ -348,6 +363,8 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .pill .led { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
 .pill .led.off { background: #9ca3af; }
 .pill .led.wait { background: #f0b429; }
+.pill .led.err { background: #dc2626; }
+.pill.unsaved { color: #a51b1b; font-weight: 600; }
 
 .hits { display: flex; flex-direction: column; gap: 6px; }
 .hit {

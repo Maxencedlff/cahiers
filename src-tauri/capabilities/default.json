@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Permissions de la fenetre principale",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy"
+  ]
 }

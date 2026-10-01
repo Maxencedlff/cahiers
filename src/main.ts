@@ -2,7 +2,31 @@ import "./style.css";
 import "katex/dist/katex.min.css";
 import { App } from "./ui/app";
 import { detectPlatform } from "./platform";
-import { el, toast } from "./ui/dom";
+import { el, toast, confirmDialog } from "./ui/dom";
+
+/**
+ * Fermeture de la fenetre (croix, Alt+F4) : on ecrit ce qui attend AVANT de
+ * fermer. Sans cela la derniere seconde de notes partait avec la fenetre.
+ * Si une page reste refusee par le disque, on demande avant de la perdre.
+ */
+async function guardClose(app: App): Promise<void> {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  let asking = false;
+  await getCurrentWindow().onCloseRequested(async (event) => {
+    if (asking) { event.preventDefault(); return; }
+    await app.flushAll();
+    if (!app.hasUnsaved) return; // la fenetre se ferme (destroy)
+    asking = true;
+    const close = await confirmDialog(
+      "Modifications non enregistrées",
+      `Une page n'a pas pu être écrite (${app.unsavedError ?? "erreur inconnue"}). `
+        + "Fermer maintenant la ferait perdre.",
+      "Fermer quand même",
+    );
+    asking = false;
+    if (!close) event.preventDefault();
+  });
+}
 
 /**
  * Point d'entree. L'application s'ouvre directement sur le menu,
@@ -19,6 +43,7 @@ async function main() {
       platform.ocr, platform.keys, platform.saveKeys,
     );
     mount.replaceChildren(app.element);
+    if (platform.isTauri) await guardClose(app);
     await app.start();
 
     if (!platform.isTauri) {

@@ -8,7 +8,7 @@ import type { Calculator } from "./calculator/index";
 import { PALETTE } from "../core/palette";
 import type { ColorKey, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
-import { Repo } from "../core/storage/repo";
+import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
 import { searchAll } from "../core/storage/search";
 import type { FsAdapter } from "../core/storage/fs";
 import {
@@ -108,7 +108,14 @@ export class App {
         toast("Stylet detecte : le doigt sert maintenant a naviguer");
       }
     }, true);
+    // Filet de securite seulement : beforeunload n'attend pas une ecriture.
+    // La fermeture de la fenetre passe par main.ts (onCloseRequested).
     window.addEventListener("beforeunload", () => { void this.flushAll(); });
+    // Fenetre reduite, PC mis en veille, session verrouillee : on ecrit tout
+    // de suite plutot qu'au bout du delai.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") void this.flushAll();
+    });
   }
 
   get element(): HTMLElement { return this.root; }
@@ -245,7 +252,8 @@ export class App {
   }
 
   private async mountView(tab: Tab, page?: number): Promise<void> {
-    tab.view?.dispose();
+    // La vue precedente finit d'ecrire AVANT que la suivante relise le disque.
+    await tab.view?.dispose();
     const view = new PageView({
       repo: this.repo,
       recognitionReady: () => this.queueState.backendReady,
@@ -257,6 +265,7 @@ export class App {
       requestRecognition: (key, kind, strokes) => this.enqueue(key, kind, strokes),
       onDirty: () => this.paintStatus(),
       openLink: (target) => void this.followLink(target),
+      onTrashed: (entry) => this.offerRestore(entry),
     }, tab.notebook, tab.divider);
     tab.view = view;
     view.setRenderMode(this.renderMode);
@@ -273,8 +282,18 @@ export class App {
   private async closeTab(id: string): Promise<void> {
     const i = this.tabs.findIndex((t) => t.id === id);
     if (i === -1) return;
-    await this.tabs[i].view?.flush();
-    this.tabs[i].view?.dispose();
+    const view = this.tabs[i].view;
+    await view?.flush();
+    if (view?.hasUnsaved) {
+      const close = await confirmDialog(
+        "Modifications non enregistrées",
+        `Une page n'a pas pu être écrite (${view.unsavedError ?? "erreur inconnue"}). `
+          + "Fermer l'onglet maintenant la ferait perdre si l'écriture échoue encore.",
+        "Fermer quand même",
+      );
+      if (!close) return;
+    }
+    await view?.dispose();
     this.tabs.splice(i, 1);
     if (this.splitId === id) this.splitId = null;
     if (this.activeId === id) this.activeId = this.tabs[Math.max(0, i - 1)]?.id ?? null;
@@ -437,24 +456,15 @@ export class App {
         ]);
         if (choice === "rename") {
           const next = await askText("Renommer l'intercalaire", "Nouveau nom", d);
-          if (next) {
-            const applied = await this.repo.renameDivider(tab.notebook, d, next);
-            if (tab.divider === d) tab.divider = applied;
-            await this.renderNotebookScreen();
-          }
+          if (next) await this.renameDivider(tab, d, next);
         } else if (choice === "delete") {
           const ok = await confirmDialog(
             "Supprimer l'intercalaire",
-            `${d} et toutes ses pages seront supprimes du disque. Irreversible.`,
+            `${d} et toutes ses pages partent à la corbeille (dossier ESEO/.corbeille). `
+              + "Le bouton « Annuler » du message qui suit le remet en place.",
             "Supprimer",
           );
-          if (ok) {
-            await this.repo.deleteDivider(tab.notebook, d);
-            const rest = await this.repo.listDividers(tab.notebook);
-            tab.divider = rest[0] ?? await this.repo.createDivider(tab.notebook, "Cours");
-            await this.mountView(tab);
-            await this.renderNotebookScreen();
-          }
+          if (ok) await this.deleteDivider(tab, d);
         }
       });
       bar.append(node);
@@ -470,6 +480,103 @@ export class App {
       },
     }, "+"));
     return bar;
+  }
+
+  /**
+   * Renomme le dossier reel. Ce qui attend d'etre ecrit l'est d'abord, puis
+   * la vue est remontee sur le nouveau nom : sinon la frappe suivante
+   * recreait l'ancien dossier et y partait.
+   */
+  private async renameDivider(tab: Tab, d: string, next: string): Promise<void> {
+    const shown = tab.divider === d ? tab.view : null;
+    await shown?.flush();
+    if (shown?.hasUnsaved) {
+      toast("Une page n'est pas encore enregistrée : renommage annulé. Réessaie dans un instant.", "err", 6000);
+      return;
+    }
+    let applied: string;
+    try {
+      applied = await this.repo.renameDivider(tab.notebook, d, next);
+    } catch (e) {
+      toast(`Renommage impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    if (applied === d) {
+      if (safeName(next) !== d) toast("Un intercalaire porte déjà ce nom", "warn");
+      return;
+    }
+    if (tab.divider === d) {
+      // Une ecriture tardive de l'ancienne vue va dans le nouveau dossier.
+      if (tab.view) tab.view.divider = applied;
+      tab.divider = applied;
+      await this.mountView(tab, tab.view?.pageNumber);
+    }
+    await this.renderNotebookScreen();
+  }
+
+  /**
+   * L'intercalaire part a la corbeille avec ce qu'on vient d'ecrire : la file
+   * est videe sur le disque, puis abandonnee, pour qu'aucune ecriture
+   * tardive ne recree le dossier.
+   */
+  private async deleteDivider(tab: Tab, d: string): Promise<void> {
+    const shown = tab.divider === d ? tab.view : null;
+    await shown?.flush();
+    shown?.discard();
+    let entry: TrashEntry;
+    try {
+      entry = await this.repo.deleteDivider(tab.notebook, d);
+    } catch (e) {
+      toast(`Suppression impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    if (tab.divider === d) {
+      const rest = await this.repo.listDividers(tab.notebook);
+      tab.divider = rest[0] ?? await this.repo.createDivider(tab.notebook, "Cours");
+      await this.mountView(tab);
+    }
+    await this.renderNotebookScreen();
+    this.offerRestore(entry);
+  }
+
+  /** Message « Annuler » de 8 s apres une suppression (page ou intercalaire). */
+  private offerRestore(entry: TrashEntry): void {
+    const what = entry.page != null
+      ? `Page ${entry.page} de ${entry.divider} mise à la corbeille`
+      : `Intercalaire ${entry.divider} mis à la corbeille`;
+    toast(what, "info", 8000, { label: "Annuler", run: () => void this.restore(entry) });
+  }
+
+  private async restore(entry: TrashEntry): Promise<void> {
+    const tab = this.tabs.find((t) => t.notebook === entry.dir);
+    if (entry.page != null) {
+      // La vue de cet intercalaire tient des numeros de page : c'est elle
+      // qui restaure, pour les decaler en meme temps que le disque.
+      if (tab?.view && tab.divider === entry.divider) {
+        await tab.view.restorePage(entry);
+        this.paintToolbar();
+        return;
+      }
+      try {
+        const n = await this.repo.restorePage(entry);
+        toast(`Page ${n} de ${entry.divider} restaurée`);
+      } catch (e) {
+        toast(`Restauration impossible : ${(e as Error).message}. La page reste dans ESEO/.corbeille.`, "err", 8000);
+      }
+      return;
+    }
+    let name: string;
+    try {
+      name = await this.repo.restoreDivider(entry);
+    } catch (e) {
+      toast(`Restauration impossible : ${(e as Error).message}. L'intercalaire reste dans ESEO/.corbeille.`, "err", 8000);
+      return;
+    }
+    toast(`Intercalaire ${name} restauré`);
+    if (tab && this.screen === "notebook") {
+      await this.switchDivider(tab, name);
+      await this.renderNotebookScreen();
+    }
   }
 
   private async switchDividerAndRender(tab: Tab, d: string): Promise<void> {
@@ -595,7 +702,6 @@ export class App {
       el("div", { class: "sep" }),
       el("button", { onclick: () => void view()?.newPage(), title: "Nouvelle page a la fin" }, "Nouvelle page"),
       el("button", { onclick: () => void view()?.newPage(true), title: "Inserer apres la page courante" }, "Inserer ici"),
-      el("button", { onclick: () => void view()?.deleteCurrentPage() }, "Supprimer la page"),
       el("div", { class: "sep" }),
     );
 
@@ -638,6 +744,14 @@ export class App {
           this.paintToolbar();
         },
       }, this.renderMode === "ink" ? "Encre" : "Rendu"),
+      // En bas de la colonne, loin de « Inserer ici » : un appui de travers
+      // au stylet ne doit pas tomber dessus.
+      el("div", { class: "sep" }),
+      el("button", {
+        class: "danger",
+        title: "La page part à la corbeille (ESEO/.corbeille), « Annuler » la remet en place",
+        onclick: () => void view()?.deleteCurrentPage(),
+      }, "Supprimer la page"),
     );
     // Outils a gauche : la hauteur de l'ecran reste a la feuille.
     return el("aside", { class: "side-tools" },
@@ -878,13 +992,26 @@ export class App {
     saveSettings(this.settings);
   }
 
-  private async flushAll(): Promise<void> {
+  /** Ecrit tout ce qui attend, dans tous les onglets. */
+  async flushAll(): Promise<void> {
     for (const t of this.tabs) await t.view?.flush();
+  }
+
+  /** Il reste des pages que le disque n'a pas acceptees. */
+  get hasUnsaved(): boolean {
+    return this.tabs.some((t) => t.view?.hasUnsaved);
+  }
+
+  /** Derniere erreur d'ecriture, pour la demande de confirmation a la fermeture. */
+  get unsavedError(): string | null {
+    for (const t of this.tabs) if (t.view?.unsavedError) return t.view.unsavedError;
+    return null;
   }
 
   private paintStatus(): void {
     const q = this.queueState;
-    const unsaved = this.tabs.some((t) => t.view?.hasUnsaved);
+    const unsaved = this.hasUnsaved;
+    const failed = this.unsavedError;
     this.statusbar.replaceChildren(
       el("span", { class: "pill" },
         el("span", { class: `led ${q.online ? "" : "off"}` }),
@@ -902,10 +1029,14 @@ export class App {
             ? `${q.pending} conversion${q.pending > 1 ? "s" : ""} en attente`
             : "aucune conversion en attente",
       ),
-      el("span", { class: "pill" },
-        el("span", { class: `led ${unsaved ? "wait" : ""}` }),
-        unsaved ? "enregistrement..." : "enregistre",
-      ),
+      // Une ecriture en echec reste affichee en rouge tant qu'elle n'a pas
+      // abouti : on ne doit pas fermer l'appli en la croyant enregistree.
+      failed
+        ? el("span", { class: "pill unsaved", title: failed }, el("span", { class: "led err" }), "Non enregistré")
+        : el("span", { class: "pill" },
+          el("span", { class: `led ${unsaved ? "wait" : ""}` }),
+          unsaved ? "enregistrement..." : "enregistre",
+        ),
       el("span", { class: "pill" },
         el("span", { class: `led ${this.sawPen ? "" : "off"}` }),
         this.sawPen

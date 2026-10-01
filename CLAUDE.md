@@ -245,6 +245,9 @@ Le portable tient environ 3 h. Chaque watt compte.
 - **Séparer strictement la logique du calcul de l'interface.** La calculatrice et le moteur symbolique dans leurs propres modules, sans dépendance à l'UI. Objectif : pouvoir ajouter un bouton sans risquer de casser la dérivation.
 - Même séparation pour la couche de stockage : lecture/écriture des pages isolée du rendu.
 - Formules automatiques du texte tapé : logique pure dans `src/core/text/automath.ts` (`findFormulas` avec un mode `final`/`space`/`pause`, `planLine` pour relire une ligne déjà en partie en forme), DOM dans `src/ui/textdoc.ts`. Variable seule (« Vz », « I1 ») : liste blanche, convertie au mot suivant ou à Entrée, jamais à la pause ; une unité (`isUnit`) n'en est jamais une.
+- Annulation : `src/core/history.ts`, logique pure. `PageHistory` garde des piles par id de page (jamais par numéro), `drop` à la suppression ; `restoreBlocks` ne restaure ni le texte tapé (il a son propre Ctrl+Z) ni les photos posées dedans. Tests : `src/tests/history.test.ts`.
+- Sauvegarde (`pageview.ts`) : file indexée par id de page, numéro lu au moment d'écrire ; écritures et renumérotations passent l'une après l'autre (`serial`) ; échec = nouvel essai 3 s et pastille « Non enregistré ». Aucune renumérotation tant qu'une page reste non écrite. Fermeture de la fenêtre : `onCloseRequested` (main.ts) attend `flushAll`. Côté Rust : `sync_all` avant le renommage, 5 essais si le fichier est verrouillé.
+- Suppression = corbeille, jamais effacement : `ESEO/.corbeille/<horodatage>/<chemin relatif>` (`repo.deletePage`/`deleteDivider` rendent un `TrashEntry`, `restorePage`/`restoreDivider` le remettent). Toast « Annuler » de 8 s (`toast(..., action)` dans dom.ts).
 - **Tests dès le début.** Une vingtaine de calculs à résultat connu, lancés automatiquement. Ajouter les matrices ne doit pas casser la dérivation sans qu'on le voie tout de suite.
 
 ---

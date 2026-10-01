@@ -19,6 +19,8 @@ export interface FsAdapter {
   rename(from: string, to: string): Promise<void>;
   /** Racine reelle, affichee a l'utilisateur. */
   rootLabel(): Promise<string>;
+  /** Montre un fichier dans l'explorateur Windows. Absent dans le navigateur. */
+  reveal?(rel: string): Promise<void>;
 
   /**
    * Fichiers binaires (images, PDF), echanges en data URL.
@@ -63,6 +65,7 @@ export class TauriFs implements FsAdapter {
   remove(rel: string) { return this.invoke<void>("remove_path", { rel }); }
   rename(from: string, to: string) { return this.invoke<void>("rename_path", { from, to }); }
   rootLabel() { return this.invoke<string>("root_path"); }
+  reveal(rel: string) { return this.invoke<void>("reveal_path", { rel }); }
 
   async writeDataUrl(rel: string, dataUrl: string) {
     const { base64 } = splitDataUrl(dataUrl);

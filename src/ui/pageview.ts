@@ -7,7 +7,7 @@ import type {
   Block, ColorKey, ImageBlock, InkBlock, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
 import { uuid } from "../core/id";
-import type { Repo } from "../core/storage/repo";
+import type { Repo, TrashEntry } from "../core/storage/repo";
 import type { RecoResult } from "../core/ink/recognizer";
 import {
   carryEdits, convertedStrokeIds, dropStrokes, joinWords, layoutWords,
@@ -16,6 +16,7 @@ import {
 import { colorOf } from "../core/palette";
 import { TextDoc } from "./textdoc";
 import { absorbTextBoxes } from "../core/text/doc";
+import { PageHistory, restoreBlocks } from "../core/history";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -34,6 +35,8 @@ export interface PageViewHost {
   requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
   onDirty: () => void;
   openLink: (target: string) => void;
+  /** Une page vient de partir a la corbeille : l'appli propose « Annuler ». */
+  onTrashed: (entry: TrashEntry) => void;
 }
 
 /** Cle stable d'un bloc dans toute l'arborescence, utilisee par la file. */
@@ -52,6 +55,14 @@ interface LoadedPage {
   placed?: PlacedWord[];
   /** Texte tape au clavier, toujours present sur la page. */
   doc: TextDoc;
+  /** Suit la hauteur du texte ; deconnecte quand la page quitte l'ecran. */
+  ro: ResizeObserver | null;
+  /**
+   * Page retiree de l'ecran (changement de page, suppression). Elle ne se
+   * met plus en file d'ecriture : ce qu'elle contenait a deja ete ecrit ou
+   * attend dans la file.
+   */
+  dead?: boolean;
 }
 
 /**
@@ -65,12 +76,29 @@ export class PageView {
   private viewMode: ViewMode = "pages";
   private renderMode: RenderMode = "ink";
   private current = 1;
-  private undoStack: { number: number; blocks: string }[] = [];
-  private redoStack: { number: number; blocks: string }[] = [];
+  /** Annulation par page, par id : un numero change a chaque suppression. */
+  private history = new PageHistory();
+  /** Derniere page modifiee, que suit Ctrl+Z en mode defilement. */
+  private lastEditedId: string | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Bloc texte a mettre au clavier des qu'il est rendu. */
   private focusBlockId: string | null = null;
-  private pendingSave = new Map<number, Page>();
+  /**
+   * Pages a ecrire, par id de page. Le numero n'est lu qu'au moment
+   * d'ecrire (LoadedPage.number, tenu a jour a chaque renumerotation) :
+   * indexee par numero, la file ecrivait une page sur sa voisine apres une
+   * suppression.
+   */
+  private pendingSave = new Map<string, LoadedPage>();
+  /** Derniere ecriture en echec, affichee dans la barre d'etat. */
+  private saveError: string | null = null;
+  /**
+   * Les ecritures et les renumerotations passent l'une apres l'autre : une
+   * sauvegarde ne part jamais au milieu d'une suppression de page.
+   */
+  private io: Promise<unknown> = Promise.resolve();
+  /** Un rendu plus recent abandonne le precedent (deux PageDown rapides). */
+  private renderGen = 0;
   private resizeObserver: ResizeObserver;
 
   constructor(
@@ -81,6 +109,8 @@ export class PageView {
     this.root = el("div", { class: "pages" });
     this.resizeObserver = new ResizeObserver(() => this.relayout());
     this.resizeObserver.observe(this.root);
+    // Pose une seule fois : un ecouteur par rendu s'accumulait.
+    this.root.addEventListener("scroll", throttle(() => this.onScroll(), 250));
   }
 
   get pageNumber(): number { return this.current; }
@@ -99,22 +129,53 @@ export class PageView {
     await this.render();
   }
 
-  dispose(): void {
+  /**
+   * La vue quitte l'ecran. Ce qui attend d'etre ecrit l'est avant de rendre
+   * la main : la vue suivante relit le disque et doit y trouver la derniere
+   * frappe. Une ecriture en echec continue d'etre retentee.
+   */
+  async dispose(): Promise<void> {
     this.resizeObserver.disconnect();
-    for (const p of this.list) p.surface?.dispose();
-    void this.flush();
+    this.renderGen++;
+    this.teardown();
+    await this.flush();
+  }
+
+  /**
+   * Abandonne la file sans rien ecrire. Sert avant de mettre l'intercalaire
+   * a la corbeille : une ecriture tardive recreerait son dossier.
+   */
+  discard(): void {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+    this.pendingSave.clear();
+    this.saveError = null;
+  }
+
+  /** Detache les pages affichees et libere leur memoire (canvas, ecouteurs). */
+  private teardown(): void {
+    for (const p of this.list) {
+      p.dead = true;
+      p.ro?.disconnect();
+      p.doc.dispose();
+      p.surface?.dispose();
+    }
+    this.list = [];
   }
 
   /* ---------------- rendu ---------------- */
 
   async render(): Promise<void> {
-    await this.flush();
-    for (const p of this.list) p.surface?.dispose();
-    this.list = [];
+    const gen = ++this.renderGen;
+    // Les pages quittent l'ecran AVANT l'ecriture : une frappe pendant le
+    // rendu ne peut plus aller dans une page qu'on s'apprete a relire.
+    this.teardown();
     this.root.replaceChildren();
+    await this.flush();
+    if (gen !== this.renderGen) return;
     this.root.classList.toggle("scroll-mode", this.viewMode === "scroll");
 
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
+    if (gen !== this.renderGen) return;
     const visible = this.viewMode === "pages"
       ? nums.filter((n) => n === this.current)
       : nums;
@@ -123,19 +184,67 @@ export class PageView {
       let page: Page;
       try {
         page = await this.host.repo.readPage(this.notebook, this.divider, n);
-      } catch {
+      } catch (e) {
+        if (gen !== this.renderGen) return;
+        // Jamais d'ecran gris muet : on dit ce qui se passe. Rien n'est
+        // ecrit sous ce numero tant que la page reste illisible.
+        if (this.viewMode === "scroll" && this.root.childElementCount) {
+          this.root.append(el("div", { class: "page-sep" }));
+        }
+        this.root.append(this.unreadableSheet(n, e, nums));
+        toast(`Page ${n} de ${this.divider} illisible : ${errorText(e)}`, "err", 6000);
         continue;
       }
+      if (gen !== this.renderGen) return;
+      // Page dont l'ecriture a echoue : le disque a une version ancienne.
+      // On reprend la version en attente, sinon la frappe suivante
+      // l'ecraserait.
+      const waiting = this.pendingSave.get(page.id);
+      if (waiting) page = waiting.page;
       const loaded = this.buildPage(n, page);
+      if (waiting) this.pendingSave.set(page.id, loaded);
       this.list.push(loaded);
       // Separateur discret entre deux pages en mode defilement.
-      if (this.viewMode === "scroll" && this.list.length > 1) {
+      if (this.viewMode === "scroll" && this.root.childElementCount) {
         this.root.append(el("div", { class: "page-sep" }));
       }
       this.root.append(loaded.wrap);
     }
     this.relayout();
-    if (this.viewMode === "scroll") this.watchScroll(nums);
+  }
+
+  /**
+   * A la place d'une page qu'on ne peut pas lire (JSON tronque, fichier
+   * OneDrive pas encore telecharge) : ce qui se passe et quoi faire.
+   */
+  private unreadableSheet(n: number, err: unknown, nums: number[]): HTMLElement {
+    const path = this.host.repo.pagePath(this.notebook, this.divider, n);
+    const other = nums.find((x) => x > n) ?? [...nums].reverse().find((x) => x < n);
+    const actions = el("div", { class: "unreadable-actions" },
+      el("button", { class: "primary", onclick: () => void this.render() }, "Réessayer"),
+      this.host.repo.canReveal
+        ? el("button", {
+            onclick: () => void this.host.repo.revealPage(this.notebook, this.divider, n)
+              .catch((e) => toast(`Dossier introuvable : ${errorText(e)}`, "err", 6000)),
+          }, "Ouvrir le dossier")
+        : null,
+      other != null
+        ? el("button", { onclick: () => void this.goTo(other) },
+            other > n ? "Page suivante" : "Page précédente")
+        : null,
+    );
+    return el("div", { class: "page-wrap unreadable-wrap", dataset: { page: String(n) } },
+      el("div", { class: "sheet unreadable" },
+        el("h2", {}, "Page illisible"),
+        el("p", {}, "Cette page n'a pas pu être lue. Elle n'est pas modifiée : rien ne sera "
+          + "écrit dessus tant qu'elle reste illisible."),
+        el("p", { class: "muted" }, "Si le dossier est dans OneDrive, vérifie que le fichier est "
+          + "bien téléchargé (« Toujours conserver sur cet appareil »), puis réessaie."),
+        el("p", { class: "small muted" }, el("code", {}, path), " : ", errorText(err)),
+        actions,
+      ),
+      el("div", { class: "page-num" }, `${this.divider} p. ${n}`),
+    );
   }
 
   private buildPage(n: number, page: Page): LoadedPage {
@@ -170,7 +279,7 @@ export class PageView {
       el("div", { class: "page-num" }, `${this.divider} p. ${n}`),
     );
 
-    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet, doc };
+    const loaded: LoadedPage = { number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null };
 
     const surface = new InkSurface(canvas, {
       getTool: this.host.getTool,
@@ -186,7 +295,8 @@ export class PageView {
     loaded.surface = surface;
     this.routePointers(loaded);
     // Une photo qui finit de charger allonge le texte : la feuille suit.
-    new ResizeObserver(() => this.fitSheet(loaded)).observe(doc.root);
+    loaded.ro = new ResizeObserver(() => this.fitSheet(loaded));
+    loaded.ro.observe(doc.root);
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
@@ -396,20 +506,18 @@ export class PageView {
   }
 
   /** Repere la page en vue pour que "derniere position" reste juste. */
-  private watchScroll(nums: number[]): void {
-    const onScroll = () => {
-      const top = this.root.scrollTop + 80;
-      let best = nums[0] ?? 1;
-      for (const p of this.list) {
-        if (p.wrap.offsetTop <= top) best = p.number;
-      }
-      if (best !== this.current) {
-        this.current = best;
-        void this.host.repo.setLastPosition(this.notebook, this.divider, best);
-        this.host.onDirty();
-      }
-    };
-    this.root.addEventListener("scroll", throttle(onScroll, 250));
+  private onScroll(): void {
+    if (this.viewMode !== "scroll" || !this.list.length) return;
+    const top = this.root.scrollTop + 80;
+    let best = this.list[0].number;
+    for (const p of this.list) {
+      if (p.wrap.offsetTop <= top) best = p.number;
+    }
+    if (best !== this.current) {
+      this.current = best;
+      void this.host.repo.setLastPosition(this.notebook, this.divider, best);
+      this.host.onDirty();
+    }
   }
 
   /* ---------------- edition ---------------- */
@@ -527,7 +635,10 @@ export class PageView {
     const hash = key.indexOf("#");
     const blockId = key.slice(hash + 1);
     const pageNum = Number(key.slice(0, hash).split("/").pop());
-    const loaded = this.list.find((p) => p.number === pageNum);
+    // Le bloc est retrouve par son id, pas par le numero de la cle : une
+    // page supprimee ou inseree entre temps a decale les numeros.
+    const has = (p: LoadedPage) => p.page.blocks.some((b) => b.id === blockId);
+    const loaded = this.list.find(has);
 
     if (loaded) {
       const block = loaded.page.blocks.find((b) => b.id === blockId);
@@ -540,17 +651,28 @@ export class PageView {
       }
       return;
     }
-    // La page n'est pas a l'ecran : on ecrit directement sur le disque.
+    // Page quittee mais pas encore ecrite : le resultat part avec elle.
+    const waiting = [...this.pendingSave.values()].find(has);
+    if (waiting) {
+      const block = waiting.page.blocks.find((b) => b.id === blockId);
+      if (block) applyToBlock(block, result);
+      return;
+    }
+    // La page n'est pas a l'ecran : on ecrit directement sur le disque, a la
+    // suite des autres ecritures. Si le numero a change, le bloc n'est pas
+    // dans la page lue et rien n'est ecrit.
     const path = key.slice(0, hash).split("/");
     const nb = path[0], div = path[1];
-    try {
-      const page = await this.host.repo.readPage(nb, div, pageNum);
-      const block = page.blocks.find((b) => b.id === blockId);
-      if (block) {
-        applyToBlock(block, result);
-        await this.host.repo.writePage(nb, div, pageNum, page);
-      }
-    } catch { /* page disparue entre temps */ }
+    await this.serial(async () => {
+      try {
+        const page = await this.host.repo.readPage(nb, div, pageNum);
+        const block = page.blocks.find((b) => b.id === blockId);
+        if (block) {
+          applyToBlock(block, result);
+          await this.host.repo.writePage(nb, div, pageNum, page);
+        }
+      } catch { /* page disparue entre temps */ }
+    });
   }
 
   /* ---------------- blocs affiches ---------------- */
@@ -981,30 +1103,107 @@ export class PageView {
     if (i > 0) await this.goTo(nums[i - 1]);
   }
 
-  async newPage(insertHere = false): Promise<void> {
+  /**
+   * Toute renumerotation part d'un disque a jour : si une page n'a pas pu
+   * etre ecrite, on ne decale rien, sinon elle atterrirait sur sa voisine.
+   */
+  private async readyToRenumber(what: string): Promise<boolean> {
     await this.flush();
-    const n = await this.host.repo.createPage(
-      this.notebook, this.divider, insertHere ? this.current + 1 : undefined,
-    );
+    if (!this.hasUnsaved) return true;
+    toast(`Une page n'est pas encore enregistrée : ${what} annulée pour ne rien écraser. `
+      + "Réessaie dans un instant.", "err", 6000);
+    return false;
+  }
+
+  /** En defilement, ramene a l'ecran la page courante apres un nouveau rendu. */
+  private revealCurrent(): void {
+    if (this.viewMode !== "scroll") return;
+    this.list.find((p) => p.number === this.current)?.wrap.scrollIntoView({ block: "start" });
+  }
+
+  /** Decale les numeros des pages en memoire (affichees ou en file d'ecriture). */
+  private shiftNumbers(from: number, delta: number): void {
+    const all = new Set<LoadedPage>([...this.list, ...this.pendingSave.values()]);
+    for (const p of all) if (p.number >= from) p.number += delta;
+  }
+
+  async newPage(insertHere = false): Promise<void> {
+    if (!(await this.readyToRenumber(insertHere ? "insertion" : "création"))) return;
+    const at = insertHere ? this.current + 1 : undefined;
+    const n = await this.serial(async () => {
+      const made = await this.host.repo.createPage(this.notebook, this.divider, at);
+      this.shiftNumbers(made, +1);
+      return made;
+    });
     this.current = n;
     await this.render();
+    this.revealCurrent();
     this.host.onDirty();
   }
 
+  /**
+   * La page part a la corbeille (ESEO/.corbeille), jamais effacee. En
+   * defilement, c'est la page en vue qui est visee : la confirmation la nomme.
+   */
   async deleteCurrentPage(): Promise<void> {
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (nums.length <= 1) { toast("Un intercalaire garde au moins une page", "warn"); return; }
+    // La page courante, meme illisible (pas de repli sur une autre page).
+    const n = this.current;
     const ok = await confirmDialog(
       "Supprimer la page",
-      `La page ${this.current} de ${this.divider} sera supprimee et les suivantes renumerotees.`,
+      `La page ${n} de ${this.divider} part à la corbeille et les suivantes sont renumérotées. `
+        + "Le bouton « Annuler » du message qui suit la remet en place.",
       "Supprimer",
     );
     if (!ok) return;
-    this.pendingSave.delete(this.current);
-    await this.host.repo.deletePage(this.notebook, this.divider, this.current);
-    this.current = Math.max(1, this.current - 1);
+    if (!(await this.readyToRenumber("suppression"))) return;
+    let entry: TrashEntry;
+    try {
+      entry = await this.serial(async () => {
+        const made = await this.host.repo.deletePage(this.notebook, this.divider, n);
+        for (const p of this.list.filter((x) => x.number === n)) {
+          // Plus rien ne doit s'ecrire sous ce numero, qui est maintenant
+          // celui de la page suivante.
+          p.dead = true;
+          p.number = 0;
+          this.pendingSave.delete(p.page.id);
+          this.history.drop(p.page.id);
+        }
+        this.shiftNumbers(n + 1, -1);
+        return made;
+      });
+    } catch (e) {
+      toast(`Suppression impossible : ${errorText(e)}`, "err", 6000);
+      await this.render();
+      return;
+    }
+    this.current = Math.max(1, n - 1);
     await this.render();
+    this.revealCurrent();
     this.host.onDirty();
+    this.host.onTrashed(entry);
+  }
+
+  /** « Annuler » apres une suppression : la page revient a son numero. */
+  async restorePage(entry: TrashEntry): Promise<void> {
+    if (!(await this.readyToRenumber("restauration"))) return;
+    let n: number;
+    try {
+      n = await this.serial(async () => {
+        const at = await this.host.repo.restorePage(entry);
+        this.shiftNumbers(at, +1);
+        return at;
+      });
+    } catch (e) {
+      toast(`Restauration impossible : ${errorText(e)}. La page reste dans ESEO/.corbeille.`, "err", 8000);
+      return;
+    }
+    this.current = n;
+    await this.render();
+    this.revealCurrent();
+    this.host.onDirty();
+    toast(`Page ${n} restaurée`);
   }
 
   async setViewMode(mode: ViewMode): Promise<void> {
@@ -1104,27 +1303,40 @@ export class PageView {
   /* ---------------- annulation ---------------- */
 
   private pushUndo(loaded: LoadedPage): void {
-    this.undoStack.push({ number: loaded.number, blocks: JSON.stringify(loaded.page.blocks) });
-    // Annulation profonde, mais pas infinie : 200 pas suffisent largement.
-    if (this.undoStack.length > 200) this.undoStack.shift();
-    this.redoStack = [];
+    this.history.push(loaded.page.id, JSON.stringify(loaded.page.blocks));
+    this.lastEditedId = loaded.page.id;
   }
 
-  undo(): void { this.step(this.undoStack, this.redoStack); }
-  redo(): void { this.step(this.redoStack, this.undoStack); }
+  undo(): void { this.step("undo"); }
+  redo(): void { this.step("redo"); }
 
-  private step(from: { number: number; blocks: string }[], to: { number: number; blocks: string }[]): void {
-    const entry = from.pop();
-    if (!entry) return;
-    const loaded = this.list.find((p) => p.number === entry.number);
+  /**
+   * Page visee par Ctrl+Z. En mode pages, celle qu'on voit. En defilement,
+   * la derniere modifiee tant qu'elle est a l'ecran, sinon celle en vue.
+   */
+  private undoTarget(): LoadedPage | undefined {
+    if (this.viewMode === "scroll" && this.lastEditedId) {
+      const p = this.list.find((x) => x.page.id === this.lastEditedId);
+      if (p) {
+        const r = p.wrap.getBoundingClientRect(), v = this.root.getBoundingClientRect();
+        if (r.bottom > v.top && r.top < v.bottom) return p;
+      }
+    }
+    return this.activePage();
+  }
+
+  private step(dir: "undo" | "redo"): void {
+    const loaded = this.undoTarget();
     if (!loaded) return;
-    to.push({ number: entry.number, blocks: JSON.stringify(loaded.page.blocks) });
-    // Le texte tape a son propre Ctrl+Z (celui de l'editeur) : annuler un
-    // trait ne doit pas ramener le texte d'il y a cinq minutes.
-    const body = this.bodyText(loaded.page);
-    loaded.page.blocks = (JSON.parse(entry.blocks) as Block[])
-      .filter((b) => !(b.type === "text" && !b.rect));
-    if (body) loaded.page.blocks.push(body);
+    const id = loaded.page.id;
+    const current = JSON.stringify(loaded.page.blocks);
+    const entry = dir === "undo" ? this.history.undo(id, current) : this.history.redo(id, current);
+    if (entry === null) {
+      toast(dir === "undo" ? "Rien à annuler sur cette page" : "Rien à rétablir sur cette page", "info", 1800);
+      return;
+    }
+    this.lastEditedId = id;
+    loaded.page.blocks = restoreBlocks(loaded.page.blocks, JSON.parse(entry) as Block[]);
     this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
@@ -1132,33 +1344,62 @@ export class PageView {
 
   /* ---------------- ecriture disque groupee ---------------- */
 
+  /** File unique des acces disque de la vue (ecritures, renumerotations). */
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.io.then(fn, fn);
+    this.io = run.catch(() => undefined);
+    return run;
+  }
+
   /**
    * Ecriture groupee, pas a chaque trait (section 9). Un trait qui declenche
    * une ecriture disque, c'est la batterie qui part en fumee et OneDrive qui
    * synchronise en boucle.
    */
   private queueSave(loaded: LoadedPage): void {
-    this.pendingSave.set(loaded.number, loaded.page);
+    if (loaded.dead) return;
+    this.pendingSave.set(loaded.page.id, loaded);
     this.host.onDirty();
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => void this.flush(), 1200);
   }
 
-  async flush(): Promise<void> {
-    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
-    const pending = [...this.pendingSave.entries()];
-    this.pendingSave.clear();
-    for (const [n, page] of pending) {
-      try {
-        await this.host.repo.writePage(this.notebook, this.divider, n, page);
-      } catch (e) {
-        toast(`Ecriture impossible : ${(e as Error).message}`, "err", 6000);
-        this.pendingSave.set(n, page);
+  /**
+   * Ecrit la file. Chaque page part sous son numero DU MOMENT. Un echec
+   * (OneDrive ou l'antivirus tient le fichier) garde la page en file et
+   * relance un essai 3 s plus tard, sans attendre le prochain trait.
+   */
+  flush(): Promise<void> {
+    return this.serial(async () => {
+      if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+      const pending = [...this.pendingSave.values()];
+      if (!pending.length) return;
+      this.pendingSave.clear();
+      let error: string | null = null;
+      for (const p of pending) {
+        try {
+          await this.host.repo.writePage(this.notebook, this.divider, p.number, p.page);
+        } catch (e) {
+          error = errorText(e);
+          if (!this.pendingSave.has(p.page.id)) this.pendingSave.set(p.page.id, p);
+        }
       }
-    }
+      const before = this.saveError;
+      this.saveError = error;
+      if (error) {
+        if (!before) toast(`Écriture impossible : ${error}. Nouvel essai dans 3 s.`, "err", 6000);
+        if (!this.saveTimer) this.saveTimer = setTimeout(() => void this.flush(), 3000);
+      } else if (before) {
+        toast("Enregistrement rétabli");
+      }
+      this.host.onDirty();
+    });
   }
 
   get hasUnsaved(): boolean { return this.pendingSave.size > 0; }
+
+  /** Message de la derniere ecriture en echec, null si tout est sur le disque. */
+  get unsavedError(): string | null { return this.hasUnsaved ? this.saveError : null; }
 }
 
 /** Range le resultat la ou le bloc l'attend : LaTeX pour math, texte pour l'encre. */
@@ -1202,6 +1443,10 @@ function measurer(): (text: string, fontSize: number) => number {
 const EDIT_SENTINEL = "\u0000corriger-a-la-main";
 
 /* ---------------- utilitaires ---------------- */
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;

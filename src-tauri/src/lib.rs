@@ -8,8 +8,11 @@
 //! le dossier synchronise, sinon un plantage sur un PC bloquerait l'autre.
 
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use std::thread::sleep;
+use std::time::Duration;
 
 use tauri::{Manager, State};
 
@@ -101,41 +104,75 @@ fn read_text(state: State<Root>, rel: String) -> Res<String> {
     fs::read_to_string(&path).map_err(|e| fail(format!("{} : {}", rel, e)))
 }
 
-/// Ecriture atomique : on ecrit a cote puis on renomme.
+/// Fichier tenu par un autre programme : OneDrive pendant la synchro,
+/// l'antivirus pendant son analyse. Erreurs Windows 5 (acces refuse),
+/// 32 (fichier utilise) et 33 (zone verrouillee).
+fn is_locked(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33))
+}
+
+/// Retente une operation sur un fichier verrouille : 5 essais en tout,
+/// apres 50, 100, 200 puis 400 ms. Le verrou de OneDrive dure rarement plus.
+fn retry_locked<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let waits = [50u64, 100, 200, 400];
+    let mut tries = 0;
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) if tries < waits.len() && is_locked(&e) => {
+                sleep(Duration::from_millis(waits[tries]));
+                tries += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Ecriture atomique et durable : on ecrit a cote, on force les donnees sur
+/// le disque (sync_all), puis on renomme.
 ///
 /// Sur un dossier synchronise par OneDrive, une ecriture interrompue laisserait
 /// un fichier tronque, donc une page de cours perdue. Le renommage, lui, est
 /// atomique : le fichier est soit l'ancien, soit le nouveau, jamais un moitie.
-#[tauri::command]
-fn write_text(state: State<Root>, rel: String, content: String) -> Res<()> {
-    let path = resolve(&root_of(&state)?, &rel)?;
+/// Sans sync_all, une coupure de batterie juste apres pouvait garder le
+/// renommage mais pas les donnees : une page de 0 octet.
+fn write_durable(path: &Path, rel: &str, bytes: &[u8]) -> Res<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
+        fs::create_dir_all(parent).map_err(|e| fail(format!("{rel} : {e}")))?;
     }
     let temp = path.with_extension("tmp-write");
-    fs::write(&temp, content.as_bytes()).map_err(|e| fail(e.to_string()))?;
-    fs::rename(&temp, &path).map_err(|e| fail(e.to_string()))?;
+    let written = retry_locked(|| {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+    .and_then(|_| retry_locked(|| fs::rename(&temp, path)));
+    if let Err(e) = written {
+        // Pas de fichier temporaire oublie a cote des pages.
+        let _ = fs::remove_file(&temp);
+        return Err(fail(format!("{rel} : {e}")));
+    }
     Ok(())
+}
+
+#[tauri::command(async)]
+fn write_text(state: State<'_, Root>, rel: String, content: String) -> Res<()> {
+    let path = resolve(&root_of(&state)?, &rel)?;
+    write_durable(&path, &rel, content.as_bytes())
 }
 
 /* ------------------------------------------------------------------ */
 /* Fichiers binaires : images importees, PDF                           */
 /* ------------------------------------------------------------------ */
 
-#[tauri::command]
-fn write_binary(state: State<Root>, rel: String, base64: String) -> Res<()> {
+#[tauri::command(async)]
+fn write_binary(state: State<'_, Root>, rel: String, base64: String) -> Res<()> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64.as_bytes())
         .map_err(|e| fail(format!("image illisible : {e}")))?;
     let path = resolve(&root_of(&state)?, &rel)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
-    }
-    let temp = path.with_extension("tmp-write");
-    fs::write(&temp, &bytes).map_err(|e| fail(e.to_string()))?;
-    fs::rename(&temp, &path).map_err(|e| fail(e.to_string()))?;
-    Ok(())
+    write_durable(&path, &rel, &bytes)
 }
 
 #[tauri::command]
@@ -268,15 +305,43 @@ fn remove_path(state: State<Root>, rel: String) -> Res<()> {
     }
 }
 
-#[tauri::command]
-fn rename_path(state: State<Root>, from: String, to: String) -> Res<()> {
+/// Renommage, retente si OneDrive tient le fichier : une renumerotation de
+/// pages interrompue a mi-chemin laisserait un trou dans l'intercalaire.
+#[tauri::command(async)]
+fn rename_path(state: State<'_, Root>, from: String, to: String) -> Res<()> {
     let root = root_of(&state)?;
     let src = resolve(&root, &from)?;
     let dst = resolve(&root, &to)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
     }
-    fs::rename(&src, &dst).map_err(|e| fail(format!("{} vers {} : {}", from, to, e)))
+    retry_locked(|| fs::rename(&src, &dst)).map_err(|e| fail(format!("{} vers {} : {}", from, to, e)))
+}
+
+/// Montre un fichier dans l'explorateur Windows, selectionne. Sert a la
+/// feuille « Page illisible » : verifier que OneDrive l'a bien telecharge.
+#[tauri::command]
+fn reveal_path(state: State<Root>, rel: String) -> Res<()> {
+    let path = resolve(&root_of(&state)?, &rel)?;
+    reveal(&path).map_err(|e| fail(format!("{rel} : {e}")))
+}
+
+#[cfg(windows)]
+fn reveal(path: &Path) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    // /select, puis le chemin entre guillemets, sans autre echappement :
+    // c'est la seule forme qu'explorer.exe comprend avec des espaces.
+    let target = if path.exists() { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{}\"", target.display()))
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(not(windows))]
+fn reveal(path: &Path) -> io::Result<()> {
+    let dir = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open").arg(dir).spawn().map(|_| ())
 }
 
 /// Change la racine et la retient pour les prochains lancements.
@@ -383,6 +448,7 @@ pub fn run() {
             make_dir,
             remove_path,
             rename_path,
+            reveal_path,
             set_root,
         ])
         .run(tauri::generate_context!())
@@ -405,6 +471,38 @@ mod tests {
         let root = PathBuf::from("/base");
         let p = resolve(&root, "Maths/Cours/0001.page.json").unwrap();
         assert!(p.ends_with("Maths/Cours/0001.page.json"));
+    }
+
+    #[test]
+    fn ecriture_durable_sans_fichier_temporaire() {
+        let dir = std::env::temp_dir().join(format!("cahiers-test-{}", std::process::id()));
+        let path = dir.join("Maths").join("Cours").join("0001.page.json");
+        write_durable(&path, "Maths/Cours/0001.page.json", b"{}").unwrap();
+        write_durable(&path, "Maths/Cours/0001.page.json", b"{\"a\":1}").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert!(!path.with_extension("tmp-write").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retente_un_fichier_verrouille() {
+        let mut calls = 0;
+        let r = retry_locked(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(r.unwrap(), 3);
+        let mut other = 0;
+        let r: io::Result<()> = retry_locked(|| {
+            other += 1;
+            Err(io::Error::new(io::ErrorKind::NotFound, "absent"))
+        });
+        assert!(r.is_err());
+        assert_eq!(other, 1);
     }
 
     #[test]

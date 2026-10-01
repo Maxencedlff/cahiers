@@ -94,6 +94,9 @@ export class InkSurface {
     this.canvas.removeEventListener("pointerup", this.onUp);
     this.canvas.removeEventListener("pointercancel", this.onUp);
     this.canvas.removeEventListener("pointerleave", this.onUp);
+    // Libere tout de suite la memoire du canvas (4 a 10 Mo par page).
+    this.canvas.width = 0;
+    this.canvas.height = 0;
   }
 
   setStrokes(strokes: Stroke[], hidden: Stroke[] = []): void {

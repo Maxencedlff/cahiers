@@ -9,6 +9,24 @@ import { uuid, nowIso } from "../id";
 export const VRAC = "Vrac";
 export const META_FILE = "cahier.json";
 export const ASSETS_DIR = "assets";
+/**
+ * Corbeille, a la racine (ESEO/.corbeille). Le point la cache du menu. Une
+ * suppression y est deplacee, jamais effacee : OneDrive propagerait
+ * l'effacement sur l'autre PC, et perdre un cours est inacceptable.
+ */
+export const TRASH_DIR = ".corbeille";
+
+/** Ce qu'il faut pour remettre en place un element mis a la corbeille. */
+export interface TrashEntry {
+  /** Dossier de cette suppression dans la corbeille, un par suppression. */
+  bin: string;
+  dir: string;
+  divider: string;
+  /** Numero de la page ; absent quand c'est tout l'intercalaire. */
+  page?: number;
+  /** Place de l'intercalaire dans cahier.json. */
+  index?: number;
+}
 
 export interface NotebookSummary {
   /** Nom du dossier sur le disque. C'est l'identite. */
@@ -115,11 +133,27 @@ export class Repo {
     return d;
   }
 
+  /**
+   * Renomme le dossier reel. Rend le nom applique : `from` quand le nom est
+   * deja pris. Windows ne distingue pas la casse : « cours » est pris si
+   * « Cours » existe, et un changement de casse seul passe par un nom
+   * intermediaire.
+   */
   async renameDivider(dir: string, from: string, to: string): Promise<string> {
     const next = safeName(to);
     if (next === from) return from;
-    if (await this.fs.exists(joinPath(dir, next))) return from;
-    await this.fs.rename(joinPath(dir, from), joinPath(dir, next));
+    const key = next.toLowerCase();
+    const taken = (await this.fs.listDirs(dir)).filter((d) => d !== from);
+    if (key === ASSETS_DIR || next.startsWith(".") || taken.some((d) => d.toLowerCase() === key)) {
+      return from;
+    }
+    if (key === from.toLowerCase()) {
+      const step = `${from}.renommage`;
+      await this.fs.rename(joinPath(dir, from), joinPath(dir, step));
+      await this.fs.rename(joinPath(dir, step), joinPath(dir, next));
+    } else {
+      await this.fs.rename(joinPath(dir, from), joinPath(dir, next));
+    }
     const meta = await this.readMeta(dir);
     meta.dividers = meta.dividers.map((d) => (d === from ? next : d));
     if (meta.lastPosition?.divider === from) meta.lastPosition.divider = next;
@@ -137,11 +171,41 @@ export class Repo {
     await this.writeMeta(dir, meta);
   }
 
-  async deleteDivider(dir: string, name: string): Promise<void> {
-    await this.fs.remove(joinPath(dir, name));
+  /** Met l'intercalaire et toutes ses pages a la corbeille. */
+  async deleteDivider(dir: string, name: string): Promise<TrashEntry> {
     const meta = await this.readMeta(dir);
+    const index = meta.dividers.indexOf(name);
+    const bin = await this.newBin();
+    await this.fs.mkdir(joinPath(bin, dir));
+    await this.fs.rename(joinPath(dir, name), joinPath(bin, dir, name));
     meta.dividers = meta.dividers.filter((d) => d !== name);
     await this.writeMeta(dir, meta);
+    return { bin, dir, divider: name, index: index >= 0 ? index : undefined };
+  }
+
+  /**
+   * Sort un intercalaire de la corbeille, a sa place d'origine. Si un
+   * intercalaire du meme nom a ete cree entre temps, il n'est pas ecrase :
+   * le restaure prend « (restauré) ». Rend le nom applique.
+   */
+  async restoreDivider(entry: TrashEntry): Promise<string> {
+    const src = joinPath(entry.bin, entry.dir, entry.divider);
+    if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
+    const taken = (await this.fs.listDirs(entry.dir)).map((d) => d.toLowerCase());
+    let name = entry.divider;
+    for (let i = 1; taken.includes(name.toLowerCase()); i++) {
+      name = `${entry.divider} (restauré${i > 1 ? ` ${i}` : ""})`;
+    }
+    await this.fs.mkdir(entry.dir);
+    await this.fs.rename(src, joinPath(entry.dir, name));
+    const meta = await this.readMeta(entry.dir);
+    if (!meta.dividers.includes(name)) {
+      const at = Math.min(entry.index ?? meta.dividers.length, meta.dividers.length);
+      meta.dividers.splice(at, 0, name);
+    }
+    await this.writeMeta(entry.dir, meta);
+    await this.dropBinIfEmpty(entry.bin);
+    return name;
   }
 
   /* ---------------- pages ---------------- */
@@ -193,9 +257,14 @@ export class Repo {
     return target;
   }
 
-  /** Supprime et referme le trou de numerotation. */
-  async deletePage(dir: string, divider: string, n: number): Promise<void> {
-    await this.fs.remove(joinPath(dir, divider, pageFileName(n)));
+  /** Met la page a la corbeille et referme le trou de numerotation. */
+  async deletePage(dir: string, divider: string, n: number): Promise<TrashEntry> {
+    const bin = await this.newBin();
+    await this.fs.mkdir(joinPath(bin, dir, divider));
+    await this.fs.rename(
+      joinPath(dir, divider, pageFileName(n)),
+      joinPath(bin, dir, divider, pageFileName(n)),
+    );
     const nums = await this.listPageNumbers(dir, divider);
     for (const num of nums) {
       if (num > n) {
@@ -205,6 +274,65 @@ export class Repo {
         );
       }
     }
+    return { bin, dir, divider, page: n };
+  }
+
+  /**
+   * Remet une page de la corbeille a son numero d'origine ; les suivantes
+   * sont decalees comme pour une insertion. Rend le numero applique.
+   */
+  async restorePage(entry: TrashEntry): Promise<number> {
+    if (entry.page == null) throw new Error("ce n'est pas une page");
+    const src = joinPath(entry.bin, entry.dir, entry.divider, pageFileName(entry.page));
+    if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
+    await this.fs.mkdir(joinPath(entry.dir, entry.divider));
+    const nums = await this.listPageNumbers(entry.dir, entry.divider);
+    const last = nums.length ? nums[nums.length - 1] : 0;
+    const target = Math.max(1, Math.min(entry.page, last + 1));
+    for (let i = nums.length - 1; i >= 0; i--) {
+      if (nums[i] >= target) {
+        await this.fs.rename(
+          joinPath(entry.dir, entry.divider, pageFileName(nums[i])),
+          joinPath(entry.dir, entry.divider, pageFileName(nums[i] + 1)),
+        );
+      }
+    }
+    await this.fs.rename(src, joinPath(entry.dir, entry.divider, pageFileName(target)));
+    await this.dropBinIfEmpty(entry.bin);
+    return target;
+  }
+
+  /** Un dossier de corbeille par suppression, date a la milliseconde. */
+  private async newBin(): Promise<string> {
+    const stamp = trashStamp(new Date());
+    let bin = joinPath(TRASH_DIR, stamp);
+    for (let i = 2; await this.fs.exists(bin); i++) bin = joinPath(TRASH_DIR, `${stamp}-${i}`);
+    await this.fs.mkdir(bin);
+    return bin;
+  }
+
+  /** Apres une restauration, le dossier de corbeille vide s'en va. */
+  private async dropBinIfEmpty(bin: string): Promise<void> {
+    const hasFile = async (rel: string): Promise<boolean> => {
+      if ((await this.fs.listFiles(rel)).length) return true;
+      for (const d of await this.fs.listDirs(rel)) if (await hasFile(joinPath(rel, d))) return true;
+      return false;
+    };
+    try {
+      if (!(await hasFile(bin))) await this.fs.remove(bin);
+    } catch { /* un dossier vide de plus dans la corbeille, sans gravite */ }
+  }
+
+  /** Montre la page dans l'explorateur Windows. Absent en mode navigateur. */
+  get canReveal(): boolean { return !!this.fs.reveal; }
+
+  async revealPage(dir: string, divider: string, n: number): Promise<void> {
+    await this.fs.reveal?.(joinPath(dir, divider, pageFileName(n)));
+  }
+
+  /** Chemin d'une page, tel qu'on le montre a l'utilisateur. */
+  pagePath(dir: string, divider: string, n: number): string {
+    return joinPath(dir, divider, pageFileName(n));
   }
 
   /* ---------------- position et compteurs ---------------- */
@@ -280,6 +408,13 @@ export class Repo {
       });
     }
   }
+}
+
+/** Horodatage lisible et triable d'une suppression : 2026-10-01_14-03-22-123. */
+export function trashStamp(d: Date): string {
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_`
+    + `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
 }
 
 /** Nom de dossier valide : ni separateur, ni caractere interdit par Windows. */

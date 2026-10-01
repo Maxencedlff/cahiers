@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryFs } from "../core/storage/fs";
-import { Repo, safeName } from "../core/storage/repo";
+import { Repo, safeName, trashStamp, TRASH_DIR } from "../core/storage/repo";
 import { searchAll, listFlags, normalize } from "../core/storage/search";
 import { pageFileName, parsePageNumber } from "../core/types";
 import { uuid, nowIso } from "../core/id";
@@ -236,5 +236,91 @@ describe("tri du menu", () => {
 describe("horodatage", () => {
   it("nowIso est un ISO 8601 valide", () => {
     expect(new Date(nowIso()).toString()).not.toBe("Invalid Date");
+  });
+});
+
+describe("corbeille", () => {
+  const ids = async (nb: string, d: string) => {
+    const out: string[] = [];
+    for (const n of await repo.listPageNumbers(nb, d)) out.push((await repo.readPage(nb, d, n)).id);
+    return out;
+  };
+
+  it("horodatage lisible et triable", () => {
+    expect(trashStamp(new Date(2026, 9, 1, 9, 5, 7, 42))).toBe("2026-10-01_09-05-07-042");
+  });
+
+  it("une page supprimee part a la corbeille, pas dans le vide", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    for (let i = 0; i < 3; i++) await repo.createPage(nb, "Cours");
+    const [a, b, c] = await ids(nb, "Cours");
+    const entry = await repo.deletePage(nb, "Cours", 2);
+    expect(await ids(nb, "Cours")).toEqual([a, c]);
+    expect(entry.bin.startsWith(`${TRASH_DIR}/`)).toBe(true);
+    const kept = JSON.parse(await fs.readText(`${entry.bin}/Maths/Cours/0002.page.json`));
+    expect(kept.id).toBe(b);
+    // La corbeille ne se montre pas comme une matiere.
+    expect(await repo.listNotebookDirs()).not.toContain(TRASH_DIR);
+  });
+
+  it("Annuler remet la page a son numero et nettoie la corbeille", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    for (let i = 0; i < 4; i++) await repo.createPage(nb, "Cours");
+    const before = await ids(nb, "Cours");
+    const entry = await repo.deletePage(nb, "Cours", 2);
+    expect(await repo.restorePage(entry)).toBe(2);
+    expect(await ids(nb, "Cours")).toEqual(before);
+    expect(await fs.exists(entry.bin)).toBe(false);
+  });
+
+  it("deux suppressions rapides ont chacune leur dossier", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    for (let i = 0; i < 3; i++) await repo.createPage(nb, "Cours");
+    const e1 = await repo.deletePage(nb, "Cours", 1);
+    const e2 = await repo.deletePage(nb, "Cours", 1);
+    expect(e1.bin).not.toBe(e2.bin);
+  });
+
+  it("un intercalaire supprime revient a sa place", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    for (const d of ["Cours", "Exos", "TD"]) await repo.createDivider(nb, d);
+    await repo.createPage(nb, "Exos");
+    const id = (await repo.readPage(nb, "Exos", 1)).id;
+    const entry = await repo.deleteDivider(nb, "Exos");
+    expect(await repo.listDividers(nb)).toEqual(["Cours", "TD"]);
+    expect(await repo.restoreDivider(entry)).toBe("Exos");
+    expect(await repo.listDividers(nb)).toEqual(["Cours", "Exos", "TD"]);
+    expect((await repo.readPage(nb, "Exos", 1)).id).toBe(id);
+  });
+
+  it("n'ecrase pas un intercalaire recree entre temps", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "TD");
+    const entry = await repo.deleteDivider(nb, "TD");
+    await repo.createDivider(nb, "TD");
+    expect(await repo.restoreDivider(entry)).toBe("TD (restauré)");
+  });
+});
+
+describe("renommer un intercalaire", () => {
+  it("refuse un nom deja pris, sans tenir compte de la casse", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    await repo.createDivider(nb, "Exos");
+    expect(await repo.renameDivider(nb, "Exos", "cours")).toBe("Exos");
+    expect(await repo.renameDivider(nb, "Exos", "assets")).toBe("Exos");
+    expect(await repo.listDividers(nb)).toEqual(["Cours", "Exos"]);
+  });
+
+  it("change la casse seule", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "cours");
+    await repo.createPage(nb, "cours");
+    expect(await repo.renameDivider(nb, "cours", "Cours")).toBe("Cours");
+    expect(await repo.listDividers(nb)).toEqual(["Cours"]);
+    expect(await repo.listPageNumbers(nb, "Cours")).toEqual([1]);
   });
 });

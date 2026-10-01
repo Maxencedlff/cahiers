@@ -160,6 +160,25 @@ export class TextDoc {
   /** Lettre grecque posee par la derniere relecture ("pi" -> π). */
   private greekDone: GreekDone | null = null;
 
+  /** Ecouteur pose sur `document` : retire par dispose(), sinon chaque page vue reste en memoire. */
+  private onSelectionChange = (): void => {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return;
+    const r = sel.getRangeAt(0);
+    if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
+  };
+
+  /**
+   * Page quittee : plus aucun ecouteur global ni minuterie. Sans cela, chaque
+   * changement de page laissait en memoire la page, son canvas et ses traits.
+   */
+  dispose(): void {
+    document.removeEventListener("selectionchange", this.onSelectionChange);
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    this.savedRange = null;
+    if (lastDoc === this) lastDoc = null;
+  }
+
   constructor(
     content: string,
     private onChange: (content: string) => void,
@@ -222,12 +241,7 @@ export class TextDoc {
       const eq = (e.target as HTMLElement).closest?.(".eq");
       if (eq instanceof HTMLElement && this.root.contains(eq)) this.editEq(eq, "end");
     });
-    document.addEventListener("selectionchange", () => {
-      const sel = document.getSelection();
-      if (!sel?.rangeCount) return;
-      const r = sel.getRangeAt(0);
-      if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
-    });
+    document.addEventListener("selectionchange", this.onSelectionChange);
     // Photo glissee a la souris : elle se pose la ou on la lache, dans le
     // texte, qui se remet en page autour d'elle.
     this.root.addEventListener("dragover", (e) => {

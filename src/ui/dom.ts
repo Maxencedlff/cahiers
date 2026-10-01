@@ -31,12 +31,28 @@ export function clear(node: Element): void {
 
 let toastHost: HTMLElement | null = null;
 
-export function toast(message: string, kind: "info" | "warn" | "err" = "info", ms = 3200): void {
+/** Bouton d'un message ephemere, par exemple « Annuler » apres une suppression. */
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
+export function toast(
+  message: string, kind: "info" | "warn" | "err" = "info", ms = 3200, action?: ToastAction,
+): void {
   if (!toastHost) {
     toastHost = el("div", { class: "toast-host" });
     document.body.append(toastHost);
   }
   const node = el("div", { class: `toast ${kind === "info" ? "" : kind}` }, message);
+  if (action) {
+    node.classList.add("with-action");
+    // Un seul appui : le message part aussitot, l'action ne se rejoue pas.
+    node.append(el("button", {
+      class: "toast-action",
+      onclick: () => { node.remove(); action.run(); },
+    }, action.label));
+  }
   toastHost.append(node);
   setTimeout(() => node.remove(), ms);
 }
