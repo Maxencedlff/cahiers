@@ -1,25 +1,34 @@
-import type { ColorKey, InkPoint, Stroke, ToolKind } from "../core/types";
+import type { InkColor, InkPoint, Stroke, ToolKind } from "../core/types";
 import { colorOf } from "../core/palette";
 import {
-  newStroke, simplify, strokeBounds, strokeHitsCircle, unionBounds,
-  widthAt, boundsIntersect, type Bounds,
+  newStroke, simplify, cachedBounds, strokeHitsCircle, unionBounds, padBounds,
+  widthAt, boundsIntersect, roundPoint, HIGHLIGHT_FACTOR, type Bounds,
 } from "../core/ink/stroke";
+import { PAGE_W, PAGE_H } from "../core/ink/sheet";
+import { gestureTool, isPalm } from "../core/ink/pointer";
 
 /** Unites de page. Rapport proche d'une feuille A4 en portrait. */
-export const PAGE_W = 900;
-export const PAGE_H = 1240;
+export { PAGE_W, PAGE_H };
 
 export type PointerRole = "write" | "navigate" | "ignore";
+export type SurfaceTool = ToolKind | "region" | "textregion";
+
+/** Rayon de la gomme, en unites de page. */
+const ERASER_R = 12;
+/** Opacite du surligneur, appliquee une seule fois par trait. */
+const HIGHLIGHT_ALPHA = 0.4;
 
 export interface InkSurfaceOptions {
   /** Appele quand un trait est termine. */
   onStrokeEnd: (stroke: Stroke) => void;
+  /** Debut d'un geste de gomme : une seule entree d'annulation par geste. */
+  onEraseStart?: () => void;
   /** Appele quand la gomme a retire des traits. */
   onErase: (removedIds: string[]) => void;
-  /** Zone rectangulaire tracee au lasso "selection math". */
-  onRegion?: (bounds: Bounds) => void;
-  getTool: () => ToolKind | "region" | "textregion";
-  getColor: () => ColorKey;
+  /** Zone rectangulaire tracee au lasso "selection math" ou "zone texte". */
+  onRegion?: (bounds: Bounds, tool: "region" | "textregion") => void;
+  getTool: () => SurfaceTool;
+  getColor: () => InkColor;
   getWidth: () => number;
   /**
    * Ce que fait le doigt. Deduit automatiquement quand un stylet a ete vu
@@ -27,6 +36,22 @@ export interface InkSurfaceOptions {
    * secours de la section 3, pour une machine sans stylet.
    */
   touchRole: () => Exclude<PointerRole, "ignore">;
+}
+
+/**
+ * Derniere activite du stylet (survol, contact, lever), partagee par toutes
+ * les pages. Ecoutee sur la fenetre : la couche texte couvre le canvas, il
+ * ne voit donc pas le survol.
+ */
+let lastPenAt = -Infinity;
+let penWatched = false;
+function watchPen(): void {
+  if (penWatched || typeof window === "undefined") return;
+  penWatched = true;
+  const note = (e: PointerEvent) => { if (e.pointerType === "pen") lastPenAt = e.timeStamp; };
+  for (const t of ["pointerdown", "pointermove", "pointerup"] as const) {
+    window.addEventListener(t, note, { capture: true, passive: true });
+  }
 }
 
 /**
@@ -53,8 +78,19 @@ export class InkSurface {
   private raf = 0;
   private scale = 1;
   private dpr = 1;
+  /** Largeur CSS et hauteur logique du dernier dimensionnement. */
+  private cssWidth = 0;
+  private pageH = PAGE_H;
   private activePointer: number | null = null;
+  private activeType = "";
+  /**
+   * Outil du geste en cours, fige au pointerdown : un Alt+G en plein trait
+   * ne change plus l'outil au milieu, et le bout gomme reste une gomme.
+   */
+  private tool: SurfaceTool | null = null;
   private eraserPos: { x: number; y: number } | null = null;
+  /** Apercu de la gomme au survol (stylet ou souris), avant le contact. */
+  private hoverPos: { x: number; y: number } | null = null;
   private regionStart: { x: number; y: number } | null = null;
   private regionNow: { x: number; y: number } | null = null;
   private disposed = false;
@@ -77,6 +113,7 @@ export class InkSurface {
     const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
     if (!ctx) throw new Error("Canvas 2D indisponible");
     this.ctx = ctx;
+    watchPen();
     canvas.addEventListener("pointerdown", this.onDown);
     canvas.addEventListener("pointermove", this.onMove);
     canvas.addEventListener("pointerup", this.onUp);
@@ -105,21 +142,41 @@ export class InkSurface {
     this.repaintAll();
   }
 
-  /** Redimensionne le canvas et redessine. Appele au resize du conteneur. */
-  layout(cssWidth: number): void {
+  /** Hauteur logique actuelle du canvas, en unites de page. */
+  get height(): number { return this.pageH; }
+
+  /**
+   * Redimensionne le canvas et redessine. `pageH` = hauteur logique de la
+   * feuille : au-dela de l'A4 quand le texte ou l'encre la prolongent. Le
+   * canvas couvre toujours toute la feuille, sinon l'encre ecrite dessous
+   * n'aurait nulle part ou aller.
+   */
+  layout(cssWidth: number, pageH = PAGE_H): void {
     const declared = getComputedStyle(this.canvas).getPropertyValue("--page-bg").trim();
     if (declared) this.paperColor = declared;
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.cssWidth = cssWidth;
+    this.pageH = Math.max(PAGE_H, pageH);
     this.scale = cssWidth / PAGE_W;
+    const cssH = Math.round(cssWidth * (this.pageH / PAGE_W));
     this.canvas.width = Math.round(cssWidth * this.dpr);
-    this.canvas.height = Math.round(cssWidth * (PAGE_H / PAGE_W) * this.dpr);
-    this.canvas.style.height = `${Math.round(cssWidth * (PAGE_H / PAGE_W))}px`;
-    // Peint tout de suite : sans cela, la feuille reste noire jusqu'a la
-    // premiere frame, ce qui se voit a chaque redimensionnement.
+    this.canvas.height = Math.round(cssH * this.dpr);
+    this.canvas.style.height = `${cssH}px`;
+    // Peint tout de suite, fond ET traits : sans cela la feuille reste
+    // vide une frame, ce qui se voit a chaque agrandissement.
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.fillStyle = this.paperColor;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    this.repaintAll();
+    this.dirty = { x: 0, y: 0, w: PAGE_W, h: this.pageH };
+    this.flush();
+  }
+
+  /** Comme layout, mais seulement si la taille change (appele souvent). */
+  fit(cssWidth: number, pageH: number): void {
+    const h = Math.max(PAGE_H, pageH);
+    if (cssWidth === this.cssWidth && h === this.pageH
+        && this.dpr === Math.min(window.devicePixelRatio || 1, 2)) return;
+    this.layout(cssWidth, h);
   }
 
   /* ---------------- role du pointeur ---------------- */
@@ -144,6 +201,11 @@ export class InkSurface {
     };
   }
 
+  /** Le stylet est-il en train d'ecrire (ou de gommer) sur cette page ? */
+  private get penWriting(): boolean {
+    return this.activePointer !== null && this.activeType === "pen";
+  }
+
   /* ---------------- evenements ---------------- */
 
   /**
@@ -156,25 +218,43 @@ export class InkSurface {
   }
 
   private onDown = (e: PointerEvent) => {
-    if (this.roleOf(e) === "navigate") { this.startPan(e); return; }
+    if (this.roleOf(e) === "navigate") {
+      // Paume posee pendant ou juste apres un trait : elle ne fait pas
+      // defiler la page sous la plume.
+      if (!isPalm(e.timeStamp, this.penWriting, lastPenAt)) this.startPan(e);
+      return;
+    }
     if (this.roleOf(e) !== "write") return;
     // Clic droit ou molette : jamais un trait. Le clic droit corrige un mot.
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (this.activePointer !== null) return; // un seul pointeur ecrit a la fois
-    const tool = this.opts.getTool();
+    const tool = gestureTool(e, this.opts.getTool());
+    this.tool = tool;
     this.activePointer = e.pointerId;
+    this.activeType = e.pointerType;
+    if (e.pointerType === "pen") lastPenAt = e.timeStamp;
+    // Un defilement au doigt deja lance s'arrete quand le stylet se pose.
+    if (this.pan && e.pointerType === "pen") this.stopPan();
     this.capture(e.pointerId);
     e.preventDefault();
+    this.clearHover();
 
     const p = this.toPage(e);
 
-    if (tool === "eraser") { this.eraserPos = p; this.eraseAt(p); return; }
+    if (tool === "eraser") {
+      this.opts.onEraseStart?.();
+      this.moveEraser(p);
+      this.eraseAt(p);
+      return;
+    }
     if (tool === "region" || tool === "textregion") {
       this.regionStart = p; this.regionNow = p; return;
     }
 
     this.startedAt = e.timeStamp;
-    this.live = newStroke(this.opts.getColor(), this.opts.getWidth(), tool as Stroke["tool"]);
+    const base = this.opts.getWidth();
+    const width = tool === "highlighter" ? Math.round(base * HIGHLIGHT_FACTOR * 10) / 10 : base;
+    this.live = newStroke(this.opts.getColor(), width, tool);
     this.liveLast = null;
     this.addPoint(e, p);
   };
@@ -182,18 +262,25 @@ export class InkSurface {
   private onMove = (e: PointerEvent) => {
     if (this.pan && e.pointerId === this.pan.pointerId) { this.movePan(e); return; }
     if (e.pointerId !== this.activePointer) return;
-    const tool = this.opts.getTool();
+    const tool = this.tool;
     e.preventDefault();
 
     if (tool === "eraser") {
       const p = this.toPage(e);
-      this.eraserPos = p;
+      this.moveEraser(p);
       this.eraseAt(p);
       return;
     }
     if (tool === "region" || tool === "textregion") {
+      const before = this.regionNow;
       this.regionNow = this.toPage(e);
-      this.markDirty({ x: 0, y: 0, w: PAGE_W, h: PAGE_H });
+      // Seuls l'ancien et le nouveau rectangle sont repeints, jamais la page.
+      if (this.regionStart && before) {
+        this.markDirty(unionBounds([
+          padBounds(rectOf(this.regionStart, before), 3),
+          padBounds(rectOf(this.regionStart, this.regionNow), 3),
+        ]));
+      }
       return;
     }
     if (!this.live) return;
@@ -208,24 +295,29 @@ export class InkSurface {
 
   private onUp = (e: PointerEvent) => {
     if (this.pan && e.pointerId === this.pan.pointerId) {
-      this.pan = null;
-      this.release(e.pointerId);
+      this.stopPan();
       return;
     }
+    if (e.type === "pointerleave") this.clearHover();
     if (e.pointerId !== this.activePointer) return;
+    const tool = this.tool;
     this.activePointer = null;
+    this.activeType = "";
+    this.tool = null;
     this.release(e.pointerId);
 
     if (this.regionStart && this.regionNow) {
       const b = rectOf(this.regionStart, this.regionNow);
       this.regionStart = this.regionNow = null;
-      this.markDirty({ x: 0, y: 0, w: PAGE_W, h: PAGE_H });
-      if (b.w > 12 && b.h > 12) this.opts.onRegion?.(b);
+      this.markDirty(padBounds(b, 3));
+      if (b.w > 12 && b.h > 12 && (tool === "region" || tool === "textregion")) {
+        this.opts.onRegion?.(b, tool);
+      }
       return;
     }
     if (this.eraserPos) {
+      this.markDirty(circleBounds(this.eraserPos));
       this.eraserPos = null;
-      this.markDirty({ x: 0, y: 0, w: PAGE_W, h: PAGE_H });
       return;
     }
     if (!this.live) return;
@@ -241,10 +333,46 @@ export class InkSurface {
         return;
       }
     }
+    const before = cachedBounds(stroke, 2);
     stroke.points = simplify(stroke.points, 0.55);
     this.strokes.push(stroke);
+    // Repeint le trait simplifie : l'aspect apres coup est celui du fichier.
+    this.markDirty(before);
     this.opts.onStrokeEnd(stroke);
   };
+
+  /**
+   * Survol de la page (relaye par la feuille, car la couche texte couvre le
+   * canvas). Avec la gomme, ou le bout gomme du stylet, un cercle montre ou
+   * elle va frapper. null : le pointeur a quitte la feuille.
+   */
+  hover(e: PointerEvent | null): void {
+    if (this.activePointer !== null) return;
+    if (!e || e.buttons !== 0 && !(e.pointerType === "pen" && (e.buttons & 32))) {
+      this.clearHover();
+      return;
+    }
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    const eraser = (e.pointerType === "pen" && (e.buttons & 32) !== 0)
+      || this.opts.getTool() === "eraser";
+    if (!eraser) { this.clearHover(); return; }
+    const p = this.toPage(e);
+    if (this.hoverPos) this.markDirty(circleBounds(this.hoverPos));
+    this.hoverPos = p;
+    this.markDirty(circleBounds(p));
+  }
+
+  private clearHover(): void {
+    if (!this.hoverPos) return;
+    this.markDirty(circleBounds(this.hoverPos));
+    this.hoverPos = null;
+  }
+
+  /** La gomme avance : l'ancien cercle est efface, pas laisse en trainee. */
+  private moveEraser(p: { x: number; y: number }): void {
+    if (this.eraserPos) this.markDirty(circleBounds(this.eraserPos));
+    this.eraserPos = p;
+  }
 
   /**
    * Le canvas porte `touch-action: none` pour qu'un trait de stylet ne fasse
@@ -260,6 +388,12 @@ export class InkSurface {
     if (!box) return;
     this.capture(e.pointerId);
     this.pan = { pointerId: e.pointerId, startY: e.clientY, startScroll: box.scrollTop };
+  }
+
+  private stopPan(): void {
+    if (!this.pan) return;
+    this.release(this.pan.pointerId);
+    this.pan = null;
   }
 
   /** La capture est un confort, pas une condition : elle ne doit rien casser. */
@@ -278,51 +412,62 @@ export class InkSurface {
   private movePan(e: PointerEvent) {
     const box = this.scroller();
     if (!box || !this.pan) return;
+    // Le stylet s'est pose pendant le geste : c'etait la paume.
+    if (this.penWriting) { this.stopPan(); return; }
     e.preventDefault();
     box.scrollTop = this.pan.startScroll - (e.clientY - this.pan.startY);
   }
 
   private addPoint(e: PointerEvent, p: { x: number; y: number }) {
     if (!this.live) return;
-    const point: InkPoint = {
+    // Pas de borne en bas : la feuille s'allonge sous l'encre (sheetHeight),
+    // un trait ecrit sous l'A4 garde ses coordonnees.
+    const point = roundPoint({
       x: clamp(p.x, 0, PAGE_W),
-      y: clamp(p.y, 0, PAGE_H),
+      y: Math.max(0, p.y),
       p: e.pressure > 0 ? e.pressure : 0.5,
       t: Math.max(0, e.timeStamp - this.startedAt),
-    };
-    if (e.tiltX || e.tiltY) { point.tiltX = e.tiltX; point.tiltY = e.tiltY; }
+      ...(e.tiltX || e.tiltY ? { tiltX: e.tiltX, tiltY: e.tiltY } : {}),
+    });
 
     const prev = this.liveLast;
     // Sous le demi-pixel, le point n'apporte rien et coute du JSON.
     if (prev && Math.hypot(point.x - prev.x, point.y - prev.y) < 0.4) return;
     this.live.points.push(point);
 
-    // Trace immediate du seul nouveau segment : aucun repaint global.
-    if (prev) this.drawSegment(this.live, prev, point);
+    if (this.live.tool === "highlighter") {
+      // Le surligneur se peint d'un seul chemin, opacite appliquee une fois :
+      // on repeint la zone du nouveau segment, trait entier compris.
+      if (prev) {
+        this.markDirty(padBounds(rectOf(prev, point), this.live.width / 2 + 2));
+      }
+    } else if (prev) {
+      // Trace immediate du seul nouveau segment : aucun repaint global.
+      this.drawSegment(this.live, prev, point);
+    }
     this.liveLast = point;
   }
 
   private eraseAt(p: { x: number; y: number }) {
-    const radius = 12;
     const removed: string[] = [];
     const boxes: Bounds[] = [];
     this.strokes = this.strokes.filter((s) => {
-      if (strokeHitsCircle(s, p.x, p.y, radius)) {
+      if (strokeHitsCircle(s, p.x, p.y, ERASER_R)) {
         removed.push(s.id);
-        boxes.push(strokeBounds(s, 2));
+        boxes.push(cachedBounds(s, 2));
         return false;
       }
       return true;
     });
     this.hidden = this.hidden.filter((s) => {
-      if (strokeHitsCircle(s, p.x, p.y, radius)) { removed.push(s.id); return false; }
+      if (strokeHitsCircle(s, p.x, p.y, ERASER_R)) { removed.push(s.id); return false; }
       return true;
     });
     if (removed.length) {
       if (boxes.length) this.markDirty(unionBounds(boxes));
       this.opts.onErase(removed);
     }
-    this.markDirty({ x: p.x - radius - 2, y: p.y - radius - 2, w: 2 * radius + 4, h: 2 * radius + 4 });
+    this.markDirty(circleBounds(p));
   }
 
   /* ---------------- rendu ---------------- */
@@ -334,7 +479,7 @@ export class InkSurface {
   }
 
   repaintAll(): void {
-    this.markDirty({ x: 0, y: 0, w: PAGE_W, h: PAGE_H });
+    this.markDirty({ x: 0, y: 0, w: PAGE_W, h: this.pageH });
   }
 
   private schedule() {
@@ -347,12 +492,12 @@ export class InkSurface {
 
   /**
    * Repeint UNIQUEMENT la zone sale. Les traits qui n'y touchent pas ne sont
-   * jamais reparcourus : sur une page chargee, c'est la difference entre
-   * quelques traits et plusieurs milliers de points par frame.
+   * jamais reparcourus (bornes en cache) : sur une page chargee, c'est la
+   * difference entre quelques traits et plusieurs milliers de points par frame.
    */
   private flush() {
     const d = this.dirty;
-    if (!d) return;
+    if (!d || this.disposed) return;
     this.dirty = null;
 
     const k = this.scale * this.dpr;
@@ -374,15 +519,21 @@ export class InkSurface {
     ctx.clip();
     ctx.scale(k, k);
 
+    // Surligneurs d'abord, stylos ensuite : le surlignage passe sous
+    // l'encre, meme pose apres elle.
     const zone: Bounds = { x: x / k, y: y / k, w: w / k, h: h / k };
+    const marks: Stroke[] = [], pens: Stroke[] = [];
     for (const s of this.strokes) {
-      if (boundsIntersect(strokeBounds(s, 1), zone)) this.drawStroke(ctx, s);
+      if (boundsIntersect(cachedBounds(s, 1), zone)) (s.tool === "highlighter" ? marks : pens).push(s);
     }
-    if (this.live) this.drawStroke(ctx, this.live);
+    if (this.live) (this.live.tool === "highlighter" ? marks : pens).push(this.live);
+    for (const s of marks) this.drawStroke(ctx, s);
+    for (const s of pens) this.drawStroke(ctx, s);
 
-    if (this.eraserPos) {
+    const circle = this.eraserPos ?? this.hoverPos;
+    if (circle) {
       ctx.beginPath();
-      ctx.arc(this.eraserPos.x, this.eraserPos.y, 12, 0, Math.PI * 2);
+      ctx.arc(circle.x, circle.y, ERASER_R, 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(80,90,110,.7)";
       ctx.lineWidth = 1.2;
       ctx.stroke();
@@ -400,7 +551,7 @@ export class InkSurface {
     ctx.restore();
   }
 
-  /** Trace un seul segment, sans toucher au reste de la page. */
+  /** Trace un seul segment de stylo, sans toucher au reste de la page. */
   private drawSegment(s: Stroke, a: InkPoint, b: InkPoint) {
     const k = this.scale * this.dpr;
     const ctx = this.ctx;
@@ -409,7 +560,6 @@ export class InkSurface {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.strokeStyle = colorOf(s.color, s.tool);
-    ctx.globalAlpha = s.tool === "highlighter" ? 0.4 : 1;
     ctx.lineWidth = widthAt(s.width, (a.p + b.p) / 2);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
@@ -420,12 +570,25 @@ export class InkSurface {
 
   private drawStroke(ctx: CanvasRenderingContext2D, s: Stroke) {
     if (s.points.length < 2) return;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
     ctx.strokeStyle = colorOf(s.color, s.tool);
-    ctx.globalAlpha = s.tool === "highlighter" ? 0.4 : 1;
+    ctx.lineJoin = "round";
+
+    if (s.tool === "highlighter") {
+      // Une bande d'un seul chemin, largeur constante, bouts droits :
+      // l'opacite s'applique une fois, sans noeuds plus fonces aux jointures.
+      ctx.globalAlpha = HIGHLIGHT_ALPHA;
+      ctx.lineCap = "butt";
+      ctx.lineWidth = s.width;
+      ctx.beginPath();
+      ctx.moveTo(s.points[0].x, s.points[0].y);
+      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      return;
+    }
 
     // Un segment par paire de points : l'epaisseur suit la pression.
+    ctx.lineCap = "round";
     for (let i = 1; i < s.points.length; i++) {
       const a = s.points[i - 1], b = s.points[i];
       ctx.lineWidth = widthAt(s.width, (a.p + b.p) / 2);
@@ -434,12 +597,16 @@ export class InkSurface {
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     }
-    ctx.globalAlpha = 1;
   }
 }
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** Zone couverte par le cercle de la gomme. */
+function circleBounds(p: { x: number; y: number }): Bounds {
+  return { x: p.x - ERASER_R - 2, y: p.y - ERASER_R - 2, w: 2 * ERASER_R + 4, h: 2 * ERASER_R + 4 };
 }
 
 export function rectOf(a: { x: number; y: number }, b: { x: number; y: number }): Bounds {

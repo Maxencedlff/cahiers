@@ -14,6 +14,14 @@ export type ColorKey =
   | "attention"
   | "perso";
 
+/**
+ * Couleur d'un trait : une des 5 couleurs semantiques, ou "normal", l'encre
+ * neutre noire de 95 % des notes. Ce n'est pas une couleur libre : sans elle,
+ * tout le cours serait marque « Definition » et le filtrage par couleur ne
+ * voudrait plus rien dire. Les anciens fichiers (5 valeurs) restent valides.
+ */
+export type InkColor = ColorKey | "normal";
+
 export type ToolKind = "pen" | "highlighter" | "eraser";
 
 /** Un point de trait. `p` = pression 0..1, `t` = ms depuis le debut du trait. */
@@ -29,7 +37,7 @@ export interface InkPoint {
 export interface Stroke {
   id: string;
   points: InkPoint[];
-  color: ColorKey;
+  color: InkColor;
   width: number;
   tool: Exclude<ToolKind, "eraser">;
 }
@@ -164,6 +172,12 @@ export interface Page {
   id: string;
   created: string;
   modified: string;
+  /**
+   * Hauteur de la feuille en unites de page, quand l'encre descend sous la
+   * hauteur A4 (PAGE_H). Absente sur une page normale. Optionnelle : les
+   * anciens fichiers restent lisibles.
+   */
+  height?: number;
   blocks: Block[];
 }
 

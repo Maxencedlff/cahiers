@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryFs } from "../core/storage/fs";
-import { Repo, safeName, trashStamp, TRASH_DIR } from "../core/storage/repo";
+import { Repo, safeName, trashStamp, TRASH_DIR, serializePage } from "../core/storage/repo";
 import { searchAll, listFlags, normalize } from "../core/storage/search";
 import { pageFileName, parsePageNumber } from "../core/types";
 import { uuid, nowIso } from "../core/id";
@@ -149,6 +149,21 @@ describe("fichiers de page", () => {
     const raw = await fs.readText(`${nb}/Cours/0001.page.json`);
     expect(raw).toContain("\n");
     expect(JSON.parse(raw).version).toBe(1);
+  });
+
+  it("les points d'un trait tiennent sur une ligne, sans rien perdre", () => {
+    const pts = Array.from({ length: 50 }, (_, i) => ({ x: i * 1.5, y: 1400.2 + i, p: 0.42, t: i * 5 }));
+    const page = {
+      version: 1 as const, id: "p", created: "c", modified: "m", height: 1600,
+      blocks: [{ id: "ink", type: "ink" as const, mode: "raw" as const, recognized: null,
+        strokes: [{ id: "s1", color: "normal" as const, width: 2.2, tool: "pen" as const, points: pts }] }],
+    };
+    const raw = serializePage(page);
+    expect(JSON.parse(raw)).toEqual(page);
+    expect(raw).toContain("\n");
+    // Un seul point par ligne indentee aurait donne 50 x 6 lignes.
+    expect(raw.split("\n").length).toBeLessThan(40);
+    expect(raw.length).toBeLessThan(JSON.stringify(page, null, 2).length / 2);
   });
 
   it("memorise la derniere position et le mode par intercalaire", async () => {

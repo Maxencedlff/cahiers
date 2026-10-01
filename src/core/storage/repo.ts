@@ -228,10 +228,7 @@ export class Repo {
 
   async writePage(dir: string, divider: string, n: number, page: Page): Promise<void> {
     page.modified = nowIso();
-    await this.fs.writeText(
-      joinPath(dir, divider, pageFileName(n)),
-      JSON.stringify(page, null, 2),
-    );
+    await this.fs.writeText(joinPath(dir, divider, pageFileName(n)), serializePage(page));
   }
 
   /**
@@ -425,6 +422,25 @@ export function safeName(input: string): string {
     .trim()
     .replace(/[. ]+$/, "");
   return cleaned || "Sans titre";
+}
+
+/**
+ * Texte d'une page sur le disque. Le JSON reste lisible a la main (un
+ * champ par ligne), mais les points d'un trait tiennent sur une seule
+ * ligne compacte : indentes, chaque point prenait 6 lignes et une page de
+ * cours pesait 189 octets par point, reecrits et renvoyes a OneDrive a
+ * chaque pause. Un trait par ligne garde aussi les differences lisibles.
+ */
+export function serializePage(page: Page): string {
+  const compact: string[] = [];
+  const text = JSON.stringify(page, (key, value) => {
+    if (key === "points" && Array.isArray(value)) {
+      compact.push(JSON.stringify(value));
+      return `\u0000pts${compact.length - 1}\u0000`;
+    }
+    return value;
+  }, 1);
+  return text.replace(/"\\u0000pts(\d+)\\u0000"/g, (_, i: string) => compact[Number(i)]);
 }
 
 /**

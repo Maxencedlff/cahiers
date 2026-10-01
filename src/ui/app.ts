@@ -5,8 +5,8 @@ import { PageView, type ViewMode, type RenderMode } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
 import { insertMathTemplate, isEditingDoc, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
-import { PALETTE } from "../core/palette";
-import type { ColorKey, ToolKind } from "../core/types";
+import { PALETTE, NEUTRAL_INK, labelOf, shortcutOf } from "../core/palette";
+import type { ColorKey, InkColor, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
 import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
 import { searchAll } from "../core/storage/search";
@@ -19,6 +19,9 @@ import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import type { Presence } from "../platform";
 
 type Screen = "menu" | "notebook" | "search" | "flags" | "probe";
+type Tool = ToolKind | "region" | "textregion";
+
+const isZone = (t: Tool): t is "region" | "textregion" => t === "region" || t === "textregion";
 
 interface Tab {
   id: string;
@@ -54,8 +57,17 @@ export class App {
    */
   private orphans = new Set<PageView>();
 
-  private tool: ToolKind | "region" | "textregion" = "pen";
-  private color: ColorKey = "definition";
+  private tool: Tool = "pen";
+  /**
+   * Outil a remettre apres une zone math ou texte : ces outils sont
+   * ponctuels, sinon le trait suivant tracait une nouvelle zone et
+   * l'ecriture etait perdue.
+   */
+  private prevTool: Tool = "pen";
+  /** Zone verrouillee (Alt+Z deux fois) : on enchaine plusieurs zones. */
+  private toolLocked = false;
+  /** Couleur de l'encre ET du texte tape : une seule pastille active. */
+  private color: InkColor = "normal";
   /** Couleur du texte tape ; null = noir, le texte normal. */
   private textColor: ColorKey | null = null;
   private width = 2.2;
@@ -82,8 +94,12 @@ export class App {
   ) {
     this.repo = new Repo(fs);
     this.settings = loadSettings();
-    this.tool = this.settings.tool;
+    // Une zone n'est jamais l'outil de depart : elle est ponctuelle.
+    this.tool = isZone(this.settings.tool) ? "pen" : this.settings.tool;
     this.color = this.settings.color;
+    // Stylet deja vu sur cette machine : le doigt navigue des le lancement,
+    // il ne trace plus sur les notes en attendant le premier contact.
+    this.sawPen = this.settings.penSeen;
     this.textColor = this.settings.textColor;
     setTypingColor(this.textColor);
     this.width = this.settings.width;
@@ -109,9 +125,11 @@ export class App {
     window.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "pen" && !this.sawPen) {
         this.sawPen = true;
+        this.settings.penSeen = true;
+        saveSettings(this.settings);
         this.paintToolbar();
         this.paintStatus();
-        toast("Stylet detecte : le doigt sert maintenant a naviguer");
+        toast("Stylet détecté : le doigt sert maintenant à naviguer");
       }
     }, true);
     // Filet de securite seulement : beforeunload n'attend pas une ecriture.
@@ -270,6 +288,7 @@ export class App {
       getColor: () => this.color,
       getWidth: () => this.width,
       touchRole: () => this.touchRole(),
+      onRegionDone: () => this.restoreTool(),
       requestRecognition: (key, kind, strokes) => this.enqueue(key, kind, strokes),
       onDirty: () => this.paintStatus(),
       openLink: (target) => void this.followLink(target),
@@ -608,25 +627,29 @@ export class App {
     const bar = el("div", { class: "toolbar" });
     const view = () => this.activeTab()?.view;
 
-    const toolButton = (id: ToolKind | "region" | "textregion", label: string, title: string) =>
+    const toolButton = (id: Tool, label: string, title: string) =>
       el("button", {
-        class: this.tool === id ? "on" : "",
+        class: `${this.tool === id ? "on" : ""}${this.tool === id && this.toolLocked ? " locked" : ""}`,
         title,
-        onclick: () => { this.tool = id; this.persist(); this.paintToolbar(); },
+        onclick: () => this.selectTool(id),
       }, label);
 
     bar.append(
-      toolButton("pen", "Stylo", "Ecrire (Alt+E). La souris tape du texte."),
+      toolButton("pen", "Stylo", "Écrire (Alt+E). La souris tape du texte."),
       toolButton("highlighter", "Surligneur", "Surligner (Alt+H)"),
-      toolButton("eraser", "Gomme", "Effacer les traits touches (Alt+G)"),
-      toolButton("region", "Zone math", "Entourer une formule manuscrite pour la convertir (Alt+Z)"),
-      toolButton("textregion", "Zone texte", "Entourer du texte manuscrit pour le convertir (Alt+T)"),
+      toolButton("eraser", "Gomme", "Effacer les traits touchés (Alt+G). Le bout gomme du stylet gomme aussi."),
+      toolButton("region", "Zone math",
+        "Entourer une formule manuscrite pour la convertir (Alt+Z). Une zone, puis retour au stylo ; "
+          + "deux fois pour enchaîner plusieurs zones."),
+      toolButton("textregion", "Zone texte",
+        "Entourer du texte manuscrit pour le convertir (Alt+T). Une zone, puis retour au stylo ; "
+          + "deux fois pour enchaîner plusieurs zones."),
       el("div", { class: "sep" }),
     );
 
-    // Palette fermee a 5 couleurs a semantique fixe (section 8).
-    // La couleur choisie vaut pour l'encre et pour le texte tape ; le noir
-    // ne vaut que pour le texte (l'encre garde une des 5 couleurs).
+    // Palette fermee a 5 couleurs a semantique fixe (section 8), plus
+    // l'encre neutre noire. La couleur choisie vaut pour l'encre ET pour le
+    // texte tape : une seule pastille active, sa legende en dessous.
     // Pas de focus sur la pastille : la selection du texte reste, et prend
     // la couleur.
     const keep = (b: HTMLElement) => {
@@ -635,19 +658,22 @@ export class App {
       return b;
     };
     bar.append(keep(el("button", {
-      class: `swatch${this.textColor === null ? " on" : ""}`,
-      title: "Texte normal, en noir (Alt+0). L'encre garde sa couleur.",
+      class: `swatch${this.color === "normal" ? " on" : ""}`,
+      title: "Normal, en noir (Alt+0) : encre et texte tapé",
       onclick: () => this.pickColor(null),
-    }, el("i", { style: { background: "#16181d" } }))));
+    }, el("i", { style: { background: NEUTRAL_INK.ink } }))));
     for (const p of PALETTE) {
       bar.append(keep(el("button", {
         class: `swatch${this.color === p.key ? " on" : ""}`,
-        title: `${p.label} (Alt+${p.shortcut}) : encre et texte tape`,
+        title: `${p.label} (Alt+${p.shortcut}) : encre et texte tapé`,
         onclick: () => this.pickColor(p.key),
       }, el("i", { style: { background: p.ink } }))));
     }
+    // Le sens de la couleur, a l'ecran : au doigt, aucune infobulle.
+    bar.append(el("div", { class: "swatch-legend small muted" },
+      `${labelOf(this.color)} · Alt+${shortcutOf(this.color)}`));
 
-    const widths: [string, number][] = [["Fin", 1.4], ["Moyen", 2.2], ["Epais", 3.6]];
+    const widths: [string, number][] = [["Fin", 1.4], ["Moyen", 2.2], ["Épais", 3.6]];
     bar.append(el("div", { class: "sep" }));
     for (const [label, w] of widths) {
       bar.append(el("button", {
@@ -979,11 +1005,11 @@ export class App {
     if (idx >= 0) { this.pickColor(PALETTE[idx].key); return true; }
     if (e.code === "Digit0") { this.pickColor(null); return true; }
 
-    const tools: Record<string, ToolKind | "region" | "textregion"> = {
+    const tools: Record<string, Tool> = {
       KeyE: "pen", KeyH: "highlighter", KeyG: "eraser", KeyZ: "region", KeyT: "textregion",
     };
     const t = tools[e.code];
-    if (t) { this.tool = t; this.persist(); this.paintToolbar(); return true; }
+    if (t) { this.selectTool(t); return true; }
     return false;
   }
 
@@ -994,9 +1020,47 @@ export class App {
 
   /* ---------------- etat et statut ---------------- */
 
-  /** Couleur choisie : l'encre (si c'en est une) et le texte tape. */
+  /**
+   * Outil choisi (bouton ou Alt+lettre). Les zones sont ponctuelles : une
+   * zone tracee remet l'outil d'avant. Choisir deux fois la meme zone la
+   * verrouille, pour en enchainer plusieurs ; une troisieme fois rend
+   * l'outil d'avant.
+   */
+  private selectTool(t: Tool): void {
+    if (isZone(t)) {
+      if (this.tool === t && !this.toolLocked) {
+        this.toolLocked = true;
+        toast(`${t === "region" ? "Zone math" : "Zone texte"} verrouillée : plusieurs zones de suite`, "info", 1800);
+      } else if (this.tool === t) {
+        this.toolLocked = false;
+        this.tool = this.prevTool;
+      } else {
+        if (!isZone(this.tool)) this.prevTool = this.tool;
+        this.tool = t;
+        this.toolLocked = false;
+      }
+    } else {
+      this.tool = t;
+      this.toolLocked = false;
+    }
+    this.persist();
+    this.paintToolbar();
+  }
+
+  /** Une zone vient d'etre tracee : retour a l'outil d'avant, sauf verrou. */
+  private restoreTool(): void {
+    if (!isZone(this.tool) || this.toolLocked) return;
+    this.tool = this.prevTool;
+    this.persist();
+    this.paintToolbar();
+  }
+
+  /**
+   * Couleur choisie : l'encre et le texte tape. null = l'encre neutre
+   * (noire) et le texte normal.
+   */
   private pickColor(key: ColorKey | null): void {
-    if (key) this.color = key;
+    this.color = key ?? "normal";
     this.textColor = key;
     setTypingColor(key);
     this.persist();
@@ -1005,7 +1069,8 @@ export class App {
 
   private persist(): void {
     this.settings.textColor = this.textColor;
-    this.settings.tool = this.tool;
+    // Une zone ponctuelle n'est pas memorisee : on rouvre sur l'outil d'avant.
+    this.settings.tool = isZone(this.tool) && !this.toolLocked ? this.prevTool : this.tool;
     this.settings.color = this.color;
     this.settings.width = this.width;
     saveSettings(this.settings);

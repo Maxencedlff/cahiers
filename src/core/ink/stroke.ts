@@ -21,6 +21,49 @@ export function strokeBounds(s: Stroke, pad = 0): Bounds {
   return { x: minX - m, y: minY - m, w: maxX - minX + 2 * m, h: maxY - minY + 2 * m };
 }
 
+/**
+ * Bornes d'un trait, gardees en cache. Le repaint d'une zone sale interroge
+ * tous les traits de la page a chaque frame : sans cache, il reparcourait
+ * tous leurs points. Le cache suit le tableau de points (un trait simplifie
+ * en change) et sa longueur (le trait en cours s'allonge).
+ */
+const boundsCache = new WeakMap<Stroke, { pts: InkPoint[]; n: number; pad: number; b: Bounds }>();
+export function cachedBounds(s: Stroke, pad = 0): Bounds {
+  const c = boundsCache.get(s);
+  if (c && c.pts === s.points && c.n === s.points.length && c.pad === pad) return c.b;
+  const b = strokeBounds(s, pad);
+  boundsCache.set(s, { pts: s.points, n: s.points.length, pad, b });
+  return b;
+}
+
+/** Boite agrandie de `m` de chaque cote. */
+export function padBounds(b: Bounds, m: number): Bounds {
+  return { x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m };
+}
+
+/**
+ * Le surligneur est une bande, pas un trait : a epaisseur egale il etait
+ * aussi fin que le stylo. Fin / Moyen / Epais donnent environ 10 / 15 / 25.
+ */
+export const HIGHLIGHT_FACTOR = 7;
+
+/**
+ * Point arrondi pour le fichier : x et y au dixieme d'unite (bien sous le
+ * pixel), pression au centieme, temps a la milliseconde. Une page de cours
+ * pesait 189 octets par point en double precision.
+ */
+export function roundPoint(p: InkPoint): InkPoint {
+  const out: InkPoint = {
+    x: Math.round(p.x * 10) / 10,
+    y: Math.round(p.y * 10) / 10,
+    // Une pression infime ne doit pas devenir 0, lu comme « pas de pression ».
+    p: p.p > 0 ? Math.max(0.01, Math.round(p.p * 100) / 100) : 0,
+    t: Math.round(p.t),
+  };
+  if (p.tiltX || p.tiltY) { out.tiltX = Math.round(p.tiltX ?? 0); out.tiltY = Math.round(p.tiltY ?? 0); }
+  return out;
+}
+
 export function unionBounds(list: Bounds[]): Bounds {
   const real = list.filter((b) => b.w > 0 || b.h > 0);
   if (real.length === 0) return { x: 0, y: 0, w: 0, h: 0 };

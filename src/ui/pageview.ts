@@ -3,8 +3,9 @@ import { InkSurface, PAGE_W, PAGE_H } from "./canvas";
 import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
 import { strokeBounds, unionBounds } from "../core/ink/stroke";
+import { growForStroke, sheetHeight } from "../core/ink/sheet";
 import type {
-  Block, ColorKey, ImageBlock, InkBlock, MathBlock, Page, Stroke, TextBlock, ToolKind,
+  Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
 import { uuid } from "../core/id";
 import type { Repo, TrashEntry } from "../core/storage/repo";
@@ -16,7 +17,7 @@ import {
 import { colorOf } from "../core/palette";
 import { TextDoc } from "./textdoc";
 import { absorbTextBoxes } from "../core/text/doc";
-import { PageHistory, restoreBlocks } from "../core/history";
+import { PageHistory, applyStrokeCommand, restoreBlocks } from "../core/history";
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -28,9 +29,14 @@ export interface PageViewHost {
   /** Convertir l'ecriture au fil de la plume, sans entourer de zone. */
   autoConvert: () => boolean;
   getTool: () => ToolKind | "region" | "textregion";
-  getColor: () => ColorKey;
+  getColor: () => InkColor;
   getWidth: () => number;
   touchRole: () => "write" | "navigate";
+  /**
+   * Une zone math ou texte vient d'etre tracee. Les outils de zone sont
+   * ponctuels : l'appli remet l'outil d'avant, le trait suivant ecrit.
+   */
+  onRegionDone?: () => void;
   /** Demande la reconnaissance d'un bloc math ou texte manuscrit. */
   requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
   onDirty: () => void;
@@ -63,6 +69,8 @@ interface LoadedPage {
    * attend dans la file.
    */
   dead?: boolean;
+  /** Le geste de gomme en cours a deja son entree d'annulation. */
+  eraseNoted?: boolean;
 }
 
 /**
@@ -305,10 +313,13 @@ export class PageView {
       getWidth: this.host.getWidth,
       touchRole: this.host.touchRole,
       onStrokeEnd: (s) => this.onStrokeEnd(loaded, s),
+      onEraseStart: () => { loaded.eraseNoted = false; },
       onErase: (ids) => this.onErase(loaded, ids),
-      onRegion: (b) => void this.onRegion(
-        loaded, b, this.host.getTool() === "textregion" ? "text" : "math",
-      ),
+      // L'outil du geste, fige au pointerdown : pas celui du moment.
+      onRegion: (b, tool) => {
+        this.host.onRegionDone?.();
+        void this.onRegion(loaded, b, tool === "textregion" ? "text" : "math");
+      },
     });
     loaded.surface = surface;
     this.routePointers(loaded);
@@ -358,6 +369,9 @@ export class PageView {
       e.preventDefault();
       loaded.surface?.forwardDown(e);
     });
+    // Survol relaye au canvas (apercu de la gomme) : la couche texte le couvre.
+    loaded.sheet.addEventListener("pointermove", (e) => loaded.surface?.hover(e));
+    loaded.sheet.addEventListener("pointerleave", () => loaded.surface?.hover(null));
   }
 
   /**
@@ -388,10 +402,21 @@ export class PageView {
     this.queueSave(loaded);
   }
 
-  /** La feuille s'allonge quand le texte depasse le bas de la page. */
-  private fitSheet(loaded: LoadedPage): void {
-    const pageH = (loaded.sheet.clientWidth || PAGE_W) * (PAGE_H / PAGE_W);
-    loaded.sheet.style.minHeight = `${Math.max(pageH, loaded.doc.root.scrollHeight)}px`;
+  /**
+   * La feuille s'allonge quand le texte ou l'encre depasse le bas de l'A4.
+   * Le canvas prend la meme hauteur : sans cela, l'encre ecrite dans la
+   * partie allongee etait ecrasee sur le bord bas (y = PAGE_H). `force`
+   * redimensionne le canvas meme sans changement (fenetre retaillee).
+   */
+  private fitSheet(loaded: LoadedPage, force = false): void {
+    const width = loaded.sheet.clientWidth || PAGE_W;
+    const k = width / PAGE_W;
+    // Le texte couvre au moins toute la feuille (min-height: 100 %) : 1 px
+    // retire evite qu'un arrondi la fasse grandir d'une unite a chaque appel.
+    const h = sheetHeight(loaded.page, (loaded.doc.root.scrollHeight - 1) / k);
+    loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
+    if (force) loaded.surface?.layout(width, h);
+    else loaded.surface?.fit(width, h);
   }
 
   /** Donne le clavier au texte de la page en cours. */
@@ -413,6 +438,8 @@ export class PageView {
     const out: Stroke[] = [];
     const hiddenOut: Stroke[] = [];
     const clean = this.renderMode === "clean";
+    // Un surlignage n'est jamais converti : il reste visible en rendu propre.
+    const marks = (list: Stroke[]) => list.filter((st) => st.tool === "highlighter");
     for (const b of page.blocks) {
       if (b.type === "ink") {
         if (clean && !b.rect && b.words?.length) {
@@ -420,17 +447,19 @@ export class PageView {
           // mot tape. Ce qui vient d'etre ecrit reste a l'encre jusqu'a la
           // prochaine pause, comme sur iPad.
           const done = convertedStrokeIds(b.words);
-          for (const st of b.strokes) (done.has(st.id) ? hiddenOut : out).push(st);
+          for (const st of b.strokes) {
+            (done.has(st.id) && st.tool !== "highlighter" ? hiddenOut : out).push(st);
+          }
           continue;
         }
         // En rendu propre, l'encre convertie laisse la place au texte.
         // Elle n'est pas perdue pour autant : un clic sur "Rendu" la ramene.
         const hidden = clean && !!b.recognized;
-        if (!hidden) out.push(...b.strokes);
+        out.push(...(hidden ? marks(b.strokes) : b.strokes));
       }
       if (b.type === "math") {
         const hidden = clean && b.latex;
-        if (!hidden) out.push(...b.strokes);
+        out.push(...(hidden ? marks(b.strokes) : b.strokes));
       }
       if (b.type === "pdf") out.push(...b.annotations);
     }
@@ -471,6 +500,8 @@ export class PageView {
       if (p) void this.correctWord(loaded, p.index);
     });
     loaded.sheet.addEventListener("contextmenu", (e) => {
+      // Bouton lateral du stylet : c'est une gomme, pas un menu.
+      if ((e as PointerEvent).pointerType === "pen") { e.preventDefault(); return; }
       const p = hit(e);
       if (!p) return;
       e.preventDefault();
@@ -514,8 +545,7 @@ export class PageView {
       p.wrap.style.maxWidth = `${width}px`;
       p.sheet.style.height = "";
       p.sheet.style.setProperty("--k", String(width / PAGE_W));
-      p.surface?.layout(width);
-      this.fitSheet(p);
+      this.fitSheet(p, true);
       // Il faut la page reellement a l'ecran pour savoir quelle ligne passe
       // sous chaque ancienne photo : c'est le cas au premier relayout visible.
       if (this.root.isConnected && this.root.clientWidth > 0) this.adoptFloatingImages(p);
@@ -550,10 +580,16 @@ export class PageView {
   }
 
   private onStrokeEnd(loaded: LoadedPage, stroke: Stroke): void {
-    this.pushUndo(loaded);
-    this.mainInk(loaded.page).strokes.push(stroke);
+    const ink = this.mainInk(loaded.page);
+    // Commande legere : l'ajout d'un trait ne serialise plus toute la page.
+    this.history.push(loaded.page.id, { op: "add", blockId: ink.id, stroke });
+    this.lastEditedId = loaded.page.id;
+    ink.strokes.push(stroke);
+    // Trait ecrit sous l'A4 : la feuille (et le canvas) s'allongent.
+    if (growForStroke(loaded.page, stroke)) this.fitSheet(loaded);
     this.queueSave(loaded);
-    if (this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+    // Un surlignage ne part pas a la reconnaissance.
+    if (stroke.tool === "pen" && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
   }
 
   /**
@@ -568,10 +604,11 @@ export class PageView {
     if (ink.editedByHand && !ink.words) return;
     ink.pending = true;
     this.paintOverlay(loaded);
+    // Seule l'ecriture part chez MyScript : un surlignage la perturbe.
     this.host.requestRecognition(
       blockKey(this.notebook, this.divider, loaded.number, ink.id),
       "text",
-      [...ink.strokes],
+      ink.strokes.filter((s) => s.tool === "pen"),
     );
   }
 
@@ -580,13 +617,15 @@ export class PageView {
     const loaded = this.activePage();
     if (!loaded) return;
     const ink = this.mainInk(loaded.page);
-    if (ink.strokes.length === 0) { toast("Rien a convertir sur cette page", "warn"); return; }
+    if (!ink.strokes.some((s) => s.tool === "pen")) { toast("Rien à convertir sur cette page", "warn"); return; }
     ink.editedByHand = false;
     this.scheduleAutoConvert(loaded);
   }
 
   private onErase(loaded: LoadedPage, ids: string[]): void {
-    this.pushUndo(loaded);
+    // Un geste de gomme = une seule entree d'annulation, prise au premier
+    // trait touche (un geste dans le vide n'en cree aucune).
+    if (!loaded.eraseNoted) { this.pushUndo(loaded); loaded.eraseNoted = true; }
     const set = new Set(ids);
     for (const b of loaded.page.blocks) {
       if (b.type === "ink") {
@@ -621,7 +660,8 @@ export class PageView {
     loaded: LoadedPage, b: Bounds, kind: "math" | "text",
   ): Promise<void> {
     const ink = this.mainInk(loaded.page);
-    const inside = ink.strokes.filter((s) => insideBounds(strokeBounds(s), b));
+    // Les surlignages restent sur la page : ils ne sont pas a convertir.
+    const inside = ink.strokes.filter((s) => s.tool === "pen" && insideBounds(strokeBounds(s), b));
     if (inside.length === 0) {
       toast("Aucun trait dans la zone", "warn");
       return;
@@ -933,7 +973,9 @@ export class PageView {
    * en frottant dessus, le doigt le corrige (watchWordTaps).
    */
   private renderWords(loaded: LoadedPage, block: InkBlock, scale: number): HTMLElement {
-    const colors = new Map(block.strokes.map((st) => [st.id, colorOf(st.color, st.tool)]));
+    // Couleur du mot = celle de son ecriture, jamais d'un surlignage pose dessus.
+    const pens = new Map(block.strokes.filter((st) => st.tool === "pen")
+      .map((st) => [st.id, colorOf(st.color, st.tool)]));
     const placed = layoutWords(block.words!, measurer());
     loaded.placed = placed;
     const layer = el("div", { class: "word-layer" });
@@ -948,7 +990,7 @@ export class PageView {
         fontSize: `${p.fontSize * scale}px`,
         lineHeight: String(LINE_HEIGHT),
         fontFamily: WORD_FONT,
-        color: colors.get(p.word.strokeIds[0]) ?? "#16181d",
+        color: p.word.strokeIds.map((id) => pens.get(id)).find(Boolean) ?? "#16181d",
       });
       layer.append(span);
     }
@@ -1041,7 +1083,8 @@ export class PageView {
         bottom = Math.max(bottom, sb.y + sb.h);
       }
     }
-    return bottom > 0 ? Math.min(bottom + 24, PAGE_H - 140) : defaultY;
+    const pageH = loaded.surface?.height ?? PAGE_H;
+    return bottom > 0 ? Math.min(bottom + 24, pageH - 140) : defaultY;
   }
 
   /**
@@ -1347,14 +1390,25 @@ export class PageView {
     const loaded = this.undoTarget();
     if (!loaded) return;
     const id = loaded.page.id;
-    const current = JSON.stringify(loaded.page.blocks);
+    // L'etat courant n'est serialise que si l'entree est un instantane.
+    const current = () => JSON.stringify(loaded.page.blocks);
     const entry = dir === "undo" ? this.history.undo(id, current) : this.history.redo(id, current);
     if (entry === null) {
       toast(dir === "undo" ? "Rien à annuler sur cette page" : "Rien à rétablir sur cette page", "info", 1800);
       return;
     }
     this.lastEditedId = id;
-    loaded.page.blocks = restoreBlocks(loaded.page.blocks, JSON.parse(entry) as Block[]);
+    if (typeof entry === "string") {
+      loaded.page.blocks = restoreBlocks(loaded.page.blocks, JSON.parse(entry) as Block[]);
+    } else {
+      loaded.page.blocks = applyStrokeCommand(loaded.page.blocks, entry, dir);
+      if (dir === "redo") growForStroke(loaded.page, entry.stroke);
+      // Un trait remis repart a la conversion, comme a son premier lever.
+      if (dir === "redo" && entry.stroke.tool === "pen" && this.host.autoConvert()) {
+        queueMicrotask(() => this.scheduleAutoConvert(loaded));
+      }
+    }
+    this.fitSheet(loaded);
     this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
