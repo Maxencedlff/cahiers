@@ -282,6 +282,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Alt+0` a `Alt+5` | noir, puis les 5 couleurs de la palette |
 | `Alt+=` | nouvelle formule ; `Alt+F P I R N S L D V M` : modeles du ruban Maths |
 | `Echap` | quitter le texte ; une seconde fois, retour au menu |
+| `#` `##` `###` puis Espace | en debut de ligne : titre, sous-titre, niveau 3 ; `-` ou `*` : puce ; `1.` ou `1)` : liste numerotee (Entree continue, Entree sur un element vide en sort, Tab / Maj+Tab : retrait, Retour arriere au debut : texte normal, Ctrl+Z juste apres : le marqueur revient) |
 | `F1` | fiche des raccourcis |
 
 ## Etat

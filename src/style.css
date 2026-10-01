@@ -535,8 +535,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .text-doc .dl-h3 { font-size: 1.1em; font-weight: 700; line-height: 1.4; margin: .35em 0 .1em; }
 .text-doc > .dl-h1:first-child, .text-doc > .dl-h2:first-child, .text-doc > .dl-h3:first-child { margin-top: 0; }
 .text-doc .dl-li { padding-left: calc(1.5em * (var(--lvl, 0) + 1)); }
+/* Puce ou numero dans la marge, sur la ligne de base de la premiere ligne
+   (une fraction haute ne le fait pas remonter). */
 .text-doc .dl-li::before {
-  position: absolute; left: calc(1.5em * var(--lvl, 0)); width: 1.5em; padding-right: .4em;
+  display: inline-block; width: 1.5em; margin-left: -1.5em; padding-right: .4em;
   box-sizing: border-box; text-align: right; user-select: none; pointer-events: none;
 }
 .text-doc .dl-ul::before { content: "•"; }

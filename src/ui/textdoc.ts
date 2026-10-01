@@ -5,7 +5,8 @@ import { el, toast } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardText, normalizeTokens, parseDoc, serializeDoc, texToPlain, trailingOperand, type DocToken,
+  docClipboardText, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
+  texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences } from "../core/text/find";
 import {
@@ -188,6 +189,12 @@ export class TextDoc {
   private madeAtCaret = false;
   /** Lettre grecque posee par la derniere relecture ("pi" -> π). */
   private greekDone: GreekDone | null = null;
+  /**
+   * Derniere mise en forme de ligne ("# " devenu titre, titre rendu au
+   * texte par Retour arriere, sortie de liste) : le Ctrl+Z qui suit la
+   * defait, comme dans Word. Oubliee a la touche suivante.
+   */
+  private lastLine: { undo: () => boolean } | null = null;
 
   /** Ecouteur pose sur `document` : retire par dispose(), sinon chaque page vue reste en memoire. */
   private onSelectionChange = (): void => {
@@ -228,6 +235,7 @@ export class TextDoc {
     this.root.addEventListener("input", (e) => {
       if (this.quiet) return;
       const ie = e as InputEvent;
+      this.tidyLines();
       // Ctrl+Z d'un remplacement ("→" redevient "->") : le navigateur
       // reselectionne "->", la frappe suivante l'effacerait. Curseur apres.
       if (ie.inputType === "historyUndo") {
@@ -269,7 +277,7 @@ export class TextDoc {
     });
     this.root.addEventListener("keydown", (e) => this.onKey(e));
     // Un clic ailleurs : la derniere mise en forme n'est plus annulable.
-    this.root.addEventListener("pointerdown", () => { this.lastAuto = null; });
+    this.root.addEventListener("pointerdown", () => { this.lastAuto = null; this.lastLine = null; });
     this.root.addEventListener("focusin", () => { lastDoc = this; });
     this.root.addEventListener("click", (e) => {
       const eq = (e.target as HTMLElement).closest?.(".eq");
@@ -335,30 +343,56 @@ export class TextDoc {
     this.fieldOrigin = null;
     this.autoFrac = null;
     this.lastAuto = null;
+    this.lastLine = null;
     this.root.replaceChildren();
     const tokens = parseDoc(content);
     this.root.append(this.buildNodes(tokens));
     // Sans <br> final, une derniere ligne vide ne s'affiche pas.
     if (tokens[tokens.length - 1]?.kind === "br") this.root.append(el("br"));
+    this.renumber(tokens);
   }
 
   /** Noeuds du texte pour des jetons (page entiere ou morceau colle). */
   private buildNodes(tokens: DocToken[]): DocumentFragment {
     const frag = document.createDocumentFragment();
-    for (const t of tokens) {
-      if (t.kind === "br") { frag.append(el("br")); continue; }
+    // Ligne mise en forme (D11) : un bloc qui contient la ligne et la
+    // termine lui-meme ; le saut qui la finit n'est pas ecrit.
+    let block: HTMLElement | null = null;
+    let lastOut: Node | null = null;
+    tokens.forEach((t, k) => {
+      const into: Node = block ?? frag;
+      if (t.kind === "line") {
+        block = makeLine(t);
+        frag.append(block);
+        lastOut = block;
+        return;
+      }
+      if (t.kind === "br") {
+        if (block) { ensurePlaceholder(block); block = null; return; }
+        // Saut invisible juste avant un bloc (fin d'une ligne de texte) :
+        // inutile, et Suppr en fin de ligne n'aurait rien fait a l'ecran.
+        if (tokens[k + 1]?.kind === "line" && lastOut && lastOut.nodeName !== "BR" && !isLine(lastOut)) return;
+        lastOut = el("br");
+        frag.append(lastOut);
+        return;
+      }
       if (t.kind === "math") {
         const eq = makeEq(t.latex);
-        frag.append(t.color ? colorSpan(t.color, eq) : eq, anchor());
-        continue;
+        into.appendChild(t.color ? colorSpan(t.color, eq) : eq);
+        into.appendChild(anchor());
+      } else if (t.kind === "image") {
+        into.appendChild(this.makeImage(t.id));
+        into.appendChild(anchor());
+      } else {
+        let node: Node = document.createTextNode(t.text);
+        if (t.italic) node = el("i", {}, node);
+        if (t.bold) node = el("b", {}, node);
+        if (t.color) node = colorSpan(t.color, node);
+        into.appendChild(node);
       }
-      if (t.kind === "image") { frag.append(this.makeImage(t.id), anchor()); continue; }
-      let node: Node = document.createTextNode(t.text);
-      if (t.italic) node = el("i", {}, node);
-      if (t.bold) node = el("b", {}, node);
-      if (t.color) node = colorSpan(t.color, node);
-      frag.append(node);
-    }
+      if (!block) lastOut = frag.lastChild;
+    });
+    if (block) ensurePlaceholder(block);
     return frag;
   }
 
@@ -373,7 +407,10 @@ export class TextDoc {
   private readNodes(root: Node, base: { bold: boolean; italic: boolean; color?: ColorKey } = { bold: false, italic: false }): DocToken[] {
     const out: DocToken[] = [];
     const walk = (node: Node, bold: boolean, italic: boolean, color?: ColorKey) => {
+      // Dernier <br> d'un bloc de ligne : il la garde visible quand elle est vide.
+      const placeholder = isLine(node) ? lastContent(node) : null;
       for (const child of Array.from(node.childNodes)) {
+        if (child === placeholder && child.nodeName === "BR") continue;
         if (child.nodeType === Node.TEXT_NODE) {
           const text = (child.textContent ?? "").replace(/\u00a0/g, " ").replace(/\u200b/g, "");
           out.push({ kind: "text", text, bold, italic, color });
@@ -395,6 +432,14 @@ export class TextDoc {
         if (child.classList.contains("tc")) {
           const c = child.dataset.c;
           walk(child, bold, italic, c && c !== "none" ? c as ColorKey : undefined);
+          continue;
+        }
+        if (isLine(child)) {
+          // Titre, puce ou numero : sa propre ligne, finie par le bloc.
+          if (!endsLine(out)) out.push({ kind: "br" });
+          out.push({ kind: "line", ...lineFormatOfEl(child as HTMLElement) });
+          walk(child, bold, italic, color);
+          out.push({ kind: "br" });
           continue;
         }
         const tag = child.tagName;
@@ -444,7 +489,9 @@ export class TextDoc {
     const range = sel.getRangeAt(0);
     if (!this.root.contains(range.startContainer)) return;
     // Une photo d'une autre page n'existe pas ici : on ne colle pas un trou.
-    const usable = tokens.filter((t) => t.kind !== "image" || !!this.images?.lookup(t.id));
+    // Dans un titre ou une puce, les lignes collees restent du texte.
+    const inLine = !!closestLine(range.startContainer, this.root);
+    const usable = tokens.filter((t) => (t.kind !== "image" || !!this.images?.lookup(t.id)) && !(inLine && t.kind === "line"));
     if (!usable.length) return;
     this.lastAuto = null;
     range.deleteContents();
@@ -464,6 +511,7 @@ export class TextDoc {
       last.parentNode?.insertBefore(a, last.nextSibling);
       sel.collapse(a, 1);
     }
+    this.tidyLines();
     this.emit();
   }
 
@@ -479,6 +527,7 @@ export class TextDoc {
       this.quiet = false;
     }
     this.lastAuto = null;
+    this.tidyLines();
     this.emit();
   }
 
@@ -493,7 +542,9 @@ export class TextDoc {
   }
 
   private emit(): void {
-    this.onChange(this.content);
+    const tokens = this.read();
+    this.renumber(tokens);
+    this.onChange(serializeDoc(tokens));
   }
 
   /* ---------------- curseur ---------------- */
@@ -1284,14 +1335,14 @@ export class TextDoc {
       if (key === "Enter" && !shift) {
         this.commit(true);
         if (autoMath) this.convertLine("final");
-        document.execCommand("insertLineBreak");
+        this.newLine();
         return true;
       }
     }
     // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
     if (key === "Enter" && !shift) {
       this.commit(true);
-      document.execCommand("insertLineBreak");
+      this.newLine();
       return true;
     }
     // Tab : case suivante tant qu'il en reste, sinon sortie de la formule.
@@ -1669,6 +1720,346 @@ export class TextDoc {
     return done;
   }
 
+  /* ---------------- titres et listes (D11) ---------------- */
+
+  /**
+   * Numeros des listes a l'ecran, d'apres les jetons relus : un element de
+   * liste numerotee porte son numero (data-num, affiche par le CSS).
+   */
+  private renumber(tokens: DocToken[]): void {
+    const blocks = Array.from(this.root.querySelectorAll<HTMLElement>(".dl"));
+    if (!blocks.length) return;
+    const lines = docLines(tokens);
+    const nums = listNumbers(lines.map((l) => l.format)).filter((_, k) => lines[k].format);
+    if (nums.length !== blocks.length) return;
+    blocks.forEach((b, i) => {
+      const n = nums[i];
+      if (n === null) { if (b.dataset.num) delete b.dataset.num; }
+      else if (b.dataset.num !== String(n)) b.dataset.num = String(n);
+    });
+  }
+
+  /**
+   * Remet d'aplomb les lignes mises en forme apres une frappe ou un collage :
+   * un saut de ligne a l'interieur d'un titre ou d'une puce (texte colle sur
+   * plusieurs lignes) la coupe, la suite devient du texte normal en dessous.
+   * Les styles poses par le navigateur en fusionnant deux blocs (taille,
+   * graisse recopiees) sont retires : la ligne prend le style de son bloc.
+   */
+  private tidyLines(): void {
+    const sel = document.getSelection();
+    const caret = sel?.rangeCount && this.root.contains(sel.anchorNode)
+      ? { node: sel.getRangeAt(0).startContainer, offset: sel.getRangeAt(0).startOffset } : null;
+    let moved = false;
+    for (const span of Array.from(this.root.querySelectorAll<HTMLElement>("span[style]:not([class]), font"))) {
+      // Les spans de KaTeX dans les formules ont leurs styles a eux.
+      if (span.closest(".eq, .doc-img, math-field")) continue;
+      span.replaceWith(...Array.from(span.childNodes));
+      moved = true;
+    }
+    for (const block of Array.from(this.root.querySelectorAll<HTMLElement>(".dl"))) {
+      // Bloc dans un bloc (collage) : il passe apres son parent.
+      const outer = block.parentElement?.closest(".dl");
+      if (outer && this.root.contains(outer)) { outer.after(block); moved = true; }
+      for (let guard = 0; guard < 50; guard++) {
+        const cut = innerBreak(block);
+        if (!cut) break;
+        const r = document.createRange();
+        if (cut.kind === "br") r.setStartAfter(cut.node);
+        else r.setStart(cut.node, cut.at + 1);
+        r.setEnd(block, block.childNodes.length);
+        const caretAfterCut = !!caret && caret.node === cut.node && cut.kind === "nl" && caret.offset > cut.at;
+        const rest = r.extractContents();
+        if (cut.kind === "br") (cut.node as ChildNode).remove();
+        else (cut.node as Text).deleteData(cut.at, 1);
+        ensurePlaceholder(block);
+        const first = rest.firstChild;
+        const end = el("br");
+        block.after(rest, end);
+        if (caretAfterCut && caret) { caret.node = first ?? end; caret.offset = 0; }
+        moved = true;
+      }
+    }
+    if (moved && caret && sel && caret.node.isConnected && this.root.contains(caret.node)) {
+      const len = caret.node.nodeType === Node.TEXT_NODE ? (caret.node.textContent ?? "").length : caret.node.childNodes.length;
+      sel.collapse(caret.node, Math.min(caret.offset, len));
+    }
+  }
+
+  /**
+   * Entree. Dans un titre : la ligne suivante est un paragraphe (au debut
+   * du titre, une ligne vide passe au-dessus). Dans une liste : un nouvel
+   * element (numero suivant) ; sur un element vide, on sort de la liste.
+   * Ailleurs : un simple saut de ligne.
+   */
+  private newLine(): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return;
+    let r = sel.getRangeAt(0);
+    const block = closestLine(r.startContainer, this.root);
+    if (!block) { document.execCommand("insertLineBreak"); return; }
+    this.lastAuto = null;
+    this.lastLine = null;
+    if (!sel.isCollapsed) { r.deleteContents(); r.collapse(true); }
+    const f = lineFormatOfEl(block);
+    const list = f.style === "ul" || f.style === "ol";
+    const head = document.createRange();
+    head.setStart(block, 0);
+    head.setEnd(r.startContainer, r.startOffset);
+    const tail = document.createRange();
+    tail.setStart(r.startContainer, r.startOffset);
+    tail.setEnd(block, block.childNodes.length);
+    const emptyBlock = isEmptyRange(head) && isEmptyRange(tail);
+    if (list && emptyBlock) {
+      this.unwrapLine(block, false);
+      this.lastLine = { undo: () => this.rewrap(f) };
+      this.emit();
+      return;
+    }
+    if (!list && isEmptyRange(tail) && !emptyBlock) {
+      // Fin de titre : un paragraphe vide en dessous.
+      tail.deleteContents();
+      ensurePlaceholder(block);
+      const br = el("br");
+      block.after(br);
+      r = document.createRange();
+      r.setStartBefore(br);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } else if (!list && isEmptyRange(head) && !emptyBlock) {
+      // Debut de titre : une ligne vide au-dessus, le curseur reste au titre.
+      const prev = prevContent(block);
+      block.before(...(prev && isInline(prev) ? [el("br"), el("br")] : [el("br")]));
+    } else {
+      const rest = tail.extractContents();
+      const next = makeLine({ style: f.style, ...(f.level ? { level: f.level } : {}) });
+      next.append(rest);
+      dropPlaceholder(next);
+      ensurePlaceholder(block);
+      ensurePlaceholder(next);
+      block.after(next);
+      placeCaret(next);
+    }
+    this.emit();
+    scrollCaretIntoView(this.root);
+  }
+
+  /**
+   * Espace apres "#", "##", "###", "-", "*", "1." ou "1)" en debut de ligne :
+   * la ligne devient un titre ou un element de liste, le marqueur disparait.
+   * Vrai si la ligne a ete mise en forme (l'espace n'est alors pas tape).
+   */
+  private autoLine(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer) || closestLine(r.startContainer, this.root)) return false;
+    if (r.startContainer.parentElement?.closest(".eq, .raw")) return false;
+    const start = lineStart(this.root, r);
+    const typed = start.toString().replace(/\u200b/g, "");
+    const format = markerStyle(typed);
+    if (!format || start.cloneContents().querySelector?.(".eq, .doc-img")) return false;
+    start.deleteContents();
+    start.collapse(true);
+    const block = this.wrapLine(start, format);
+    const marker = `${typed} `;
+    this.lastAuto = null;
+    this.lastLine = { undo: () => this.unmark(block, marker) };
+    this.emit();
+    return true;
+  }
+
+  /**
+   * Met toute la ligne de `caret` dans un bloc de ligne (titre, puce), y
+   * compris ce qui suit le curseur ; le curseur passe au debut du bloc.
+   */
+  private wrapLine(caret: Range, format: LineFormat): HTMLElement {
+    const start = lineStart(this.root, caret);
+    const end = lineEnd(this.root, caret);
+    const line = document.createRange();
+    line.setStart(start.startContainer, start.startOffset);
+    line.setEnd(end.range.endContainer, end.range.endOffset);
+    const content = line.extractContents();
+    const block = makeLine(format);
+    block.append(content);
+    dropPlaceholder(block);
+    ensurePlaceholder(block);
+    line.insertNode(block);
+    removeBreak(end);
+    // Saut invisible juste avant le bloc : retire (sinon Suppr en fin de
+    // la ligne du dessus n'aurait rien fait a l'ecran).
+    const prev = prevContent(block);
+    if (prev?.nodeName === "BR") {
+      const before = prevContent(prev);
+      if (before && isInline(before)) (prev as ChildNode).remove();
+    }
+    placeCaret(block);
+    return block;
+  }
+
+  /** Ctrl+Z juste apres une mise en forme par l'Espace : le marqueur tape revient. */
+  private unmark(block: HTMLElement, marker: string): boolean {
+    if (!this.root.contains(block)) return false;
+    const at = this.unwrapLine(block, false);
+    const text = document.createTextNode(marker);
+    at.insertNode(text);
+    document.getSelection()?.collapse(text, marker.length);
+    this.emit();
+    return true;
+  }
+
+  /** Ctrl+Z juste apres un titre ou une puce rendu au texte : la ligne reprend sa forme. */
+  private rewrap(format: LineFormat): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer) || closestLine(r.startContainer, this.root)) return false;
+    this.wrapLine(r.cloneRange(), format);
+    this.emit();
+    return true;
+  }
+
+  /** Defait la derniere mise en forme de ligne, s'il y en a une a defaire. */
+  private undoLine(): boolean {
+    const last = this.lastLine;
+    this.lastLine = null;
+    return !!last && last.undo();
+  }
+
+  /**
+   * Bloc de ligne rendu au texte normal, a sa place. `joinPrev` : la ligne
+   * se colle a la fin de la ligne du dessus (Suppr). Rend un point
+   * d'insertion au debut de la ligne ; le curseur y est pose.
+   */
+  private unwrapLine(block: HTMLElement, joinPrev: boolean): Range {
+    dropPlaceholder(block);
+    const kids = Array.from(block.childNodes);
+    const prev = prevContent(block);
+    const parts: Node[] = [];
+    if (!joinPrev && prev && isInline(prev)) parts.push(el("br"));
+    const startMark = document.createTextNode("");
+    parts.push(startMark, ...kids);
+    // Le bloc finissait sa ligne : un saut prend sa place.
+    parts.push(el("br"));
+    block.replaceWith(...parts);
+    const at = document.createRange();
+    const first = startMark.nextSibling;
+    if (first?.nodeType === Node.TEXT_NODE) at.setStart(first, 0);
+    else at.setStartBefore(startMark);
+    startMark.remove();
+    at.collapse(true);
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(at.cloneRange());
+    return at;
+  }
+
+  /**
+   * Retour arriere et Suppr aux bords d'un titre ou d'une puce, faits ici
+   * plutot que par le navigateur (qui recopierait la taille du titre en
+   * style dans le texte colle). Vrai si la touche a ete traitee.
+   */
+  private joinLines(forward: boolean): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer)) return false;
+    const block = closestLine(r.startContainer, this.root);
+    if (!forward) {
+      const start = lineStart(block ?? this.root, r);
+      if (!isEmptyRange(start)) return false;
+      // Debut d'un titre ou d'une puce : paragraphe normal (Ctrl+Z le rend).
+      if (block) {
+        const f = lineFormatOfEl(block);
+        this.unwrapLine(block, false);
+        this.lastLine = { undo: () => this.rewrap(f) };
+        this.emit();
+        return true;
+      }
+      // Debut de la ligne qui suit un bloc : elle rejoint la fin du bloc.
+      const above = start.startContainer === this.root ? this.root.childNodes[start.startOffset - 1] : null;
+      if (!above || !isLine(above)) return false;
+      this.pullLineInto(above as HTMLElement);
+      return true;
+    }
+    const end = lineEnd(block ?? this.root, r);
+    if (!isEmptyRange(end.range)) return false;
+    if (block) {
+      // Fin d'un titre ou d'une puce : la ligne suivante le rejoint.
+      if (!block.nextSibling && !nextContent(block)) return true;
+      this.pullLineInto(block);
+      return true;
+    }
+    // Fin d'une ligne normale suivie d'un bloc : le bloc redevient du texte, colle a la ligne.
+    let next: Node | null = end.stop;
+    if (next && !isLine(next)) {
+      const after = end.stop?.nodeName === "BR" ? nextContent(end.stop) : end.nl ? nextAfterNewline(end.nl, end.at) : null;
+      if (!after || !isLine(after)) return false;
+      removeBreak(end);
+      next = after;
+    }
+    if (!next || !isLine(next)) return false;
+    const caret = r.cloneRange();
+    this.unwrapLine(next as HTMLElement, true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+    this.emit();
+    return true;
+  }
+
+  /** La ligne qui suit `block` (texte, ou un autre bloc) passe a la fin de `block`. */
+  private pullLineInto(block: HTMLElement): void {
+    dropPlaceholder(block);
+    const at = block.childNodes.length;
+    const nextBlock = nextContent(block);
+    if (nextBlock && isLine(nextBlock)) {
+      const nb = nextBlock as HTMLElement;
+      dropPlaceholder(nb);
+      block.append(...Array.from(nb.childNodes));
+      nb.remove();
+    } else {
+      const from = document.createRange();
+      from.setStartAfter(block);
+      from.collapse(true);
+      const end = lineEnd(this.root, from);
+      const line = document.createRange();
+      line.setStartAfter(block);
+      line.setEnd(end.range.endContainer, end.range.endOffset);
+      const content = line.extractContents();
+      block.append(content);
+      removeBreak(end);
+    }
+    ensurePlaceholder(block);
+    const sel = document.getSelection();
+    const kid = block.childNodes[at - 1];
+    if (kid?.nodeType === Node.TEXT_NODE) sel?.collapse(kid, (kid.textContent ?? "").length);
+    else sel?.collapse(block, Math.min(at, block.childNodes.length));
+    this.emit();
+  }
+
+  /**
+   * Tab / Maj+Tab dans une liste : un niveau de plus ou de moins, pour
+   * chaque element touche par la selection. Faux hors liste (Tab tape alors
+   * une tabulation).
+   */
+  private indentList(dir: 1 | -1): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer)) return false;
+    const blocks = Array.from(this.root.querySelectorAll<HTMLElement>(".dl-li"))
+      .filter((b) => r.intersectsNode(b) || b.contains(r.startContainer));
+    if (!blocks.length) return false;
+    this.lastLine = null;
+    for (const b of blocks) {
+      const f = lineFormatOfEl(b);
+      const level = Math.max(0, Math.min(MAX_LIST_LEVEL, (f.level ?? 0) + dir));
+      setLineFormat(b, { ...f, level });
+    }
+    this.emit();
+    return true;
+  }
+
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
     // Photo selectionnee : Suppr la retire, Echap la deselectionne, toute
@@ -1687,12 +2078,37 @@ export class TextDoc {
       if (undo && this.undoAuto(bs)) { e.preventDefault(); return; }
       if (!["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) this.lastAuto = null;
     }
+    // Titre ou puce que l'Espace vient de poser : Ctrl+Z rend "# " tape.
+    if (this.lastLine) {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z" && this.undoLine()) {
+        e.preventDefault();
+        return;
+      }
+      if (!["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) this.lastLine = null;
+    }
     // Retour a la ligne simple : pas de <div> par ligne, le texte reste plat
-    // et se relit sans surprise.
+    // et se relit sans surprise. Seuls les titres et les puces ont un bloc.
     if (e.key === "Enter") {
       e.preventDefault();
       if (autoMath) this.convertLine("final");
-      document.execCommand("insertLineBreak");
+      this.newLine();
+      return;
+    }
+    // Debut de ligne "# ", "- ", "1. " : titre ou liste (D11).
+    if (e.key === " " && !e.ctrlKey && !e.altKey && !e.metaKey && this.autoLine()) {
+      e.preventDefault();
+      return;
+    }
+    // Retour arriere au debut d'un titre ou d'une puce : paragraphe normal ;
+    // Suppr en fin de ligne colle la ligne suivante sans casser les blocs.
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey && !e.altKey && !e.metaKey
+        && this.joinLines(e.key === "Delete")) {
+      e.preventDefault();
+      return;
+    }
+    // Tab dans une liste : retrait (Maj+Tab : moins de retrait).
+    if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey && this.indentList(e.shiftKey ? -1 : 1)) {
+      e.preventDefault();
       return;
     }
     // "/" : la fraction s'ouvre tout de suite, ce qui precede au numerateur
@@ -1812,7 +2228,11 @@ function lineUnits(root: HTMLElement): LineUnit[] {
       } else if (c instanceof HTMLElement) {
         if (c.classList.contains("doc-img")) out.push({ kind: "img", node: c });
         else if (c.classList.contains("eq") || c.contentEditable === "false") out.push({ kind: "atom", node: c });
-        else walk(c);
+        else {
+          walk(c);
+          // Un titre ou une puce finit sa ligne.
+          if (isLine(c)) out.push({ kind: "br", node: c });
+        }
       }
     }
   };
@@ -2026,4 +2446,239 @@ export function insertMathTemplate(template: string, fallback?: TextDoc): void {
 export function isEditingDoc(target: EventTarget | null): boolean {
   if (target instanceof MathfieldElement) return true;
   return target instanceof HTMLElement && !!target.closest(".text-doc");
+}
+
+/* ---------------- lignes mises en forme (D11) ---------------- */
+
+const LINE_STYLES = new Set<string>(["h1", "h2", "h3", "ul", "ol"]);
+
+/**
+ * Bloc d'une ligne mise en forme : <div class="dl dl-h1">, ou
+ * <div class="dl dl-ul dl-li" data-lvl="1">. Il contient la ligne et la
+ * termine ; les lignes de texte normal restent a plat, separees par des sauts.
+ */
+function makeLine(f: LineFormat): HTMLElement {
+  const d = el("div", { class: "dl" });
+  setLineFormat(d, f);
+  return d;
+}
+
+function setLineFormat(d: HTMLElement, f: LineFormat): void {
+  const list = f.style === "ul" || f.style === "ol";
+  d.className = `dl dl-${f.style}${list ? " dl-li" : ""}`;
+  d.dataset.k = f.style;
+  const level = list ? Math.max(0, Math.min(MAX_LIST_LEVEL, f.level ?? 0)) : 0;
+  if (level) {
+    d.dataset.lvl = String(level);
+    d.style.setProperty("--lvl", String(level));
+  } else {
+    delete d.dataset.lvl;
+    d.style.removeProperty("--lvl");
+  }
+  if (f.style === "ol" && f.num !== undefined) d.dataset.n = String(f.num);
+  else delete d.dataset.n;
+  if (f.style !== "ol") delete d.dataset.num;
+}
+
+function lineFormatOfEl(d: HTMLElement): LineFormat {
+  const style = (LINE_STYLES.has(d.dataset.k ?? "") ? d.dataset.k : "h1") as LineStyle;
+  const level = Number(d.dataset.lvl) || 0;
+  const num = d.dataset.n ? Number(d.dataset.n) : undefined;
+  return {
+    style,
+    ...(level && (style === "ul" || style === "ol") ? { level } : {}),
+    ...(style === "ol" && num !== undefined && Number.isFinite(num) ? { num } : {}),
+  };
+}
+
+function isLine(n: Node | null | undefined): boolean {
+  return n instanceof HTMLElement && n.classList.contains("dl");
+}
+
+/** Bloc de ligne qui contient ce noeud, s'il y en a un. */
+function closestLine(node: Node, root: HTMLElement): HTMLElement | null {
+  const e = node instanceof HTMLElement ? node : node.parentElement;
+  const b = e?.closest(".dl") ?? null;
+  return b instanceof HTMLElement && root.contains(b) && b !== root ? b : null;
+}
+
+/** Texte vide ou fait d'ancres invisibles. */
+function isBlank(n: Node): boolean {
+  return n.nodeType === Node.TEXT_NODE && !(n.textContent ?? "").replace(/\u200b/g, "");
+}
+
+function prevContent(n: Node): Node | null {
+  let p = n.previousSibling;
+  while (p && isBlank(p)) p = p.previousSibling;
+  return p;
+}
+
+function nextContent(n: Node): Node | null {
+  let p = n.nextSibling;
+  while (p && isBlank(p)) p = p.nextSibling;
+  return p;
+}
+
+function lastContent(n: Node): Node | null {
+  let p = n.lastChild;
+  while (p && isBlank(p)) p = p.previousSibling;
+  return p;
+}
+
+/** Contenu d'une ligne non terminee (ni saut, ni bloc, ni texte fini par "\n"). */
+function isInline(n: Node): boolean {
+  if (n.nodeName === "BR" || isLine(n)) return false;
+  return !(n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").replace(/\u200b+$/, "").endsWith("\n"));
+}
+
+/** Les jetons lus finissent-ils une ligne (rien, saut, texte fini par "\n") ? */
+function endsLine(out: DocToken[]): boolean {
+  for (let k = out.length - 1; k >= 0; k--) {
+    const t = out[k];
+    if (t.kind === "text" && !t.text) continue;
+    if (t.kind === "text") return t.text.endsWith("\n");
+    return t.kind === "br" || t.kind === "line";
+  }
+  return true;
+}
+
+/** Rien de visible dans ce morceau (ancres et sauts de fin mis a part). */
+function isEmptyRange(r: Range): boolean {
+  if (r.toString().replace(/\u200b/g, "")) return false;
+  return !r.cloneContents().querySelector(".eq, .doc-img, math-field");
+}
+
+/** Une ligne vide garde sa hauteur : un <br> dedans, comme Word et Chrome. */
+function ensurePlaceholder(block: HTMLElement): void {
+  if (lastContent(block)?.nodeName === "BR") return;
+  const all = document.createRange();
+  all.selectNodeContents(block);
+  if (isEmptyRange(all)) block.append(el("br"));
+}
+
+function dropPlaceholder(block: HTMLElement): void {
+  const last = lastContent(block);
+  if (last?.nodeName === "BR") (last as ChildNode).remove();
+}
+
+function placeCaret(block: HTMLElement): void {
+  const sel = document.getSelection();
+  const first = block.firstChild;
+  if (first?.nodeType === Node.TEXT_NODE) sel?.collapse(first, 0);
+  else sel?.collapse(block, 0);
+}
+
+/** Debut de la ligne du curseur dans `box` (la page ou un bloc) : du debut au curseur. */
+function lineStart(box: Node, r: Range): Range {
+  const out = document.createRange();
+  out.setEnd(r.startContainer, r.startOffset);
+  const c = r.startContainer;
+  if (c.nodeType === Node.TEXT_NODE && c.parentNode === box) {
+    const nl = (c.textContent ?? "").slice(0, r.startOffset).lastIndexOf("\n");
+    if (nl >= 0) { out.setStart(c, nl + 1); return out; }
+  }
+  let n: Node | null;
+  if (c === box) n = box.childNodes[r.startOffset - 1] ?? null;
+  else {
+    let top: Node = c;
+    while (top.parentNode && top.parentNode !== box) top = top.parentNode;
+    n = top.previousSibling;
+  }
+  for (; n; n = n.previousSibling) {
+    if (n.nodeName === "BR" || isLine(n)) { out.setStartAfter(n); return out; }
+    if (n.nodeType === Node.TEXT_NODE) {
+      const nl = (n.textContent ?? "").lastIndexOf("\n");
+      if (nl >= 0) { out.setStart(n, nl + 1); return out; }
+    }
+  }
+  out.setStart(box, 0);
+  return out;
+}
+
+/**
+ * Fin de la ligne du curseur dans `box` : du curseur a ce qui la termine
+ * (`stop` : un saut, un bloc, un texte qui commence par "\n", ou rien).
+ */
+interface LineEnd { range: Range; stop: Node | null; nl: Text | null; at: number }
+function lineEnd(box: Node, r: Range): LineEnd {
+  const range = document.createRange();
+  range.setStart(r.startContainer, r.startOffset);
+  const c = r.startContainer;
+  const cut = (t: Text, at: number): LineEnd => {
+    // Le "\n" commence son propre noeud : extraire la ligne ne le deplace pas.
+    const nl = at > 0 ? t.splitText(at) : t;
+    if (at > 0 && c === t && r.startOffset >= at) range.setStart(t, at);
+    range.setEndBefore(nl);
+    return { range, stop: nl, nl, at: 0 };
+  };
+  if (c.nodeType === Node.TEXT_NODE && c.parentNode === box) {
+    const i = (c.textContent ?? "").indexOf("\n", r.startOffset);
+    if (i >= 0) return cut(c as Text, i);
+  }
+  let n: Node | null;
+  if (c === box) n = box.childNodes[r.startOffset] ?? null;
+  else {
+    let top: Node = c;
+    while (top.parentNode && top.parentNode !== box) top = top.parentNode;
+    n = top.nextSibling;
+  }
+  for (; n; n = n.nextSibling) {
+    if (n.nodeName === "BR" || isLine(n)) { range.setEndBefore(n); return { range, stop: n, nl: null, at: 0 }; }
+    if (n.nodeType === Node.TEXT_NODE) {
+      const i = (n.textContent ?? "").indexOf("\n");
+      if (i >= 0) return cut(n as Text, i);
+    }
+  }
+  range.setEnd(box, box.childNodes.length);
+  return { range, stop: null, nl: null, at: 0 };
+}
+
+/** Retire le saut qui finissait une ligne (pas un bloc : il se termine seul). */
+function removeBreak(end: LineEnd): void {
+  if (end.nl) {
+    const t = end.nl;
+    if ((t.textContent ?? "")[0] === "\n") t.deleteData(0, 1);
+    if (!t.textContent) t.remove();
+    return;
+  }
+  if (end.stop?.nodeName === "BR") (end.stop as HTMLElement).remove();
+}
+
+/** Ce qui suit un "\n" quand il finit son texte : le noeud suivant. */
+function nextAfterNewline(t: Text, at: number): Node | null {
+  if ((t.textContent ?? "").slice(at + 1).replace(/\u200b/g, "")) return null;
+  return nextContent(t);
+}
+
+/** Premier saut de ligne a l'interieur d'un bloc (hors son <br> de fin). */
+function innerBreak(block: HTMLElement): { kind: "br"; node: Node; at: 0 } | { kind: "nl"; node: Text; at: number } | null {
+  const placeholder = lastContent(block);
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n instanceof HTMLElement && n.matches(".eq, .doc-img, math-field")
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeName === "BR" && n !== placeholder) return { kind: "br", node: n, at: 0 };
+    if (n.nodeType === Node.TEXT_NODE) {
+      const at = (n.textContent ?? "").indexOf("\n");
+      if (at >= 0) return { kind: "nl", node: n as Text, at };
+    }
+  }
+  return null;
+}
+
+/** Le curseur reste a l'ecran apres un saut de ligne fait a la main. */
+function scrollCaretIntoView(root: HTMLElement): void {
+  const sel = document.getSelection();
+  if (!sel?.rangeCount) return;
+  const rect = caretRect(sel.getRangeAt(0), root);
+  if (!rect) return;
+  let box: HTMLElement | null = root.parentElement;
+  while (box && !(box.scrollHeight > box.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(box).overflowY))) {
+    box = box.parentElement;
+  }
+  if (!box) return;
+  const b = box.getBoundingClientRect();
+  if (rect.bottom > b.bottom - 24) box.scrollTop += rect.bottom - b.bottom + 96;
+  else if (rect.top < b.top + 8) box.scrollTop -= b.top - rect.top + 48;
 }

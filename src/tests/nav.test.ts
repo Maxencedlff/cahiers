@@ -139,4 +139,19 @@ describe("liste des pages (manque-nav-pages)", () => {
     page.blocks.pop();
     expect(indexPage(page).firstLine).toBe("écrit à la main");
   });
+
+  it("titres et listes (D11) : la liste montre le titre, la recherche le texte sans # ni -", () => {
+    const page: Page = {
+      version: 1, id: "p", created: "", modified: "",
+      blocks: [{ id: "t", type: "text", content: "intro du cours\n# Diode $V_z$\n## Polarisation\n- Vs = Vz\n1. on mesure" }],
+    };
+    const idx = indexPage(page);
+    expect(idx.title).toBe("Diode Vz");
+    expect(idx.firstLine).toBe("Diode Vz");
+    expect(idx.blocks[0].text).toBe("intro du cours\nDiode Vz\nPolarisation\nVs = Vz\non mesure");
+    // Sans titre : la premiere ligne, sans son marqueur.
+    page.blocks[0] = { id: "t", type: "text", content: "- premiere puce\nsuite" };
+    expect(indexPage(page).title).toBeUndefined();
+    expect(indexPage(page).firstLine).toBe("premiere puce");
+  });
 });

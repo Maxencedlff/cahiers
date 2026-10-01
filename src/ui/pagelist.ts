@@ -4,8 +4,10 @@ export interface PageRow {
   n: number;
   /** « 3 oct. » ; vide si la page n'a pas de date. */
   day: string;
-  /** Premiere ligne lisible de la page. */
+  /** Premiere ligne lisible de la page (son titre s'il y en a un). */
   line: string;
+  /** La ligne est le titre de la page (D11) : montree en gras. */
+  title?: boolean;
   unreadable?: boolean;
 }
 
@@ -40,7 +42,7 @@ export function pageListDialog(opts: {
       },
         el("span", { class: "pn" }, `p. ${p.n}`),
         el("span", { class: "day" }, p.day),
-        el("span", { class: `line${p.line ? "" : " muted"}` },
+        el("span", { class: `line${p.line ? "" : " muted"}${p.title && !p.unreadable ? " title" : ""}` },
           p.unreadable ? "Page illisible" : p.line || "Page sans texte (encre ou schéma)"),
       );
       if (p.n === opts.current) row.setAttribute("aria-current", "page");

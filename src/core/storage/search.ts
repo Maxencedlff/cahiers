@@ -1,6 +1,6 @@
 import type { Repo } from "./repo";
 import type { Block, ColorKey, Page } from "../types";
-import { docImageIds, parseDoc, texToPlain } from "../text/doc";
+import { docImageIds, docTitle, parseDoc, texToPlain } from "../text/doc";
 import {
   fold, makeExcerpt, matchesAll, notebookMatches, parseQuery, queryReady,
   type ExcerptPart,
@@ -63,8 +63,13 @@ export interface PageIndex {
   modified: string;
   /** Date de creation de la page (liste des pages). */
   created: string;
-  /** Premiere ligne lisible de la page : texte tape, sinon ecriture reconnue. */
+  /**
+   * Premiere ligne lisible de la page : son titre (D11) s'il y en a un,
+   * sinon la premiere ligne du texte tape, sinon l'ecriture reconnue.
+   */
   firstLine: string;
+  /** Titre de la page (premier titre de plus haut niveau, sans les #), si elle en a un. */
+  title?: string;
   flags: PageFlag[];
   blocks: IndexedBlock[];
 }
@@ -111,15 +116,17 @@ export function indexPage(page: Page): PageIndex {
   // Le texte tape d'abord, puis l'ecriture reconnue, puis le reste.
   const lead = blocks.find((b) => b.id === body?.id) ?? blocks.find((b) => b.type === "ink")
     ?? blocks.find((b) => b.type !== "flag");
+  const title = body?.type === "text" ? firstLineOf(docTitle(parseDoc(body.content))) : "";
   return {
     modified: page.modified ?? "", created: page.created ?? "",
-    firstLine: lead ? firstLineOf(lead.text) : "", flags, blocks,
+    firstLine: title || (lead ? firstLineOf(lead.text) : ""), ...(title ? { title } : {}), flags, blocks,
   };
 }
 
 /**
  * Texte simple d'un texte tape, tel qu'on le lit : sans **, sans
- * [..]{.couleur}, sans marqueur de photo, formules relues ("V_{be}" donne
+ * [..]{.couleur}, sans marqueur de photo ni de titre ou de liste (# - 1.),
+ * formules relues ("V_{be}" donne
  * "Vbe"). Les couleurs a part, pour le filtre.
  */
 function plainOfText(content: string, blockColor?: ColorKey): { text: string; colors?: Partial<Record<ColorKey, string>> } {
