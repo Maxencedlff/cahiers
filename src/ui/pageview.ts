@@ -100,6 +100,12 @@ export class PageView {
   private history = new PageHistory();
   /** Derniere page modifiee, que suit Ctrl+Z en mode defilement. */
   private lastEditedId: string | null = null;
+  /**
+   * Page du dernier geste, texte ou trait (LoadedPage.lastEdit) : en
+   * defilement, le repere « pas compris » y va, meme si une autre page
+   * occupe le haut de l'ecran.
+   */
+  private lastGestureId: string | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   /** Bloc texte a mettre au clavier des qu'il est rendu. */
   private focusBlockId: string | null = null;
@@ -369,6 +375,7 @@ export class PageView {
     if (body.content === content) return;
     body.content = content;
     loaded.lastEdit = "text";
+    this.lastGestureId = loaded.page.id;
     this.fitSheet(loaded);
     this.queueSave(loaded);
   }
@@ -385,7 +392,7 @@ export class PageView {
       const tool = this.host.getTool();
       const toInk = e.pointerType === "pen" || e.pointerType === "touch"
         || (e.pointerType === "mouse" && e.button === 0 && tool !== "pen");
-      if (!toInk) { loaded.lastEdit = "text"; return; }
+      if (!toInk) { loaded.lastEdit = "text"; this.lastGestureId = loaded.page.id; return; }
       e.preventDefault();
       loaded.surface?.forwardDown(e);
     });
@@ -618,6 +625,7 @@ export class PageView {
     ink.strokes.push(stroke);
     loaded.lastEdit = "ink";
     loaded.lastInk = strokeBounds(stroke);
+    this.lastGestureId = loaded.page.id;
     // Trait ecrit sous l'A4 : la feuille (et le canvas) s'allongent.
     if (growForStroke(loaded.page, stroke)) this.fitSheet(loaded);
     this.queueSave(loaded);
@@ -1088,8 +1096,7 @@ export class PageView {
     return this.list.find((p) => p.number === this.current) ?? this.list[0];
   }
 
-  addBlock(block: Block): void {
-    const loaded = this.activePage();
+  addBlock(block: Block, loaded = this.activePage()): void {
     if (!loaded) return;
     this.pushUndo(loaded);
     loaded.page.blocks.push(block);
@@ -1129,20 +1136,24 @@ export class PageView {
    * contexte pour que la vue « Pas compris » dise ce qui n'etait pas compris.
    */
   addFlag(): void {
-    const loaded = this.activePage();
+    const loaded = this.flagTarget();
     if (!loaded) return;
     const spot = this.flagSpot(loaded);
-    const bottom = (loaded.surface?.height ?? PAGE_H) - 34;
-    const y = clamp(Math.round(spot?.y ?? 20 + this.openFlags(loaded).length * 40), 4, bottom);
+    // La pastille fait 30 de large mais au moins 44 px de haut a l'ecran
+    // (cible tactile) : centree sur la ligne, pas posee 15 unites au-dessus.
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    const half = Math.max(30, 44 / k) / 2;
+    const bottom = (loaded.surface?.height ?? PAGE_H) - 2 * half - 4;
+    const y = clamp(Math.round(spot ? spot.mid - half : 20 + this.openFlags(loaded).length * 40), 4, bottom);
     // Deux reperes sur la meme ligne : cote a cote, pas l'un sur l'autre.
     let x = PAGE_W - 62;
     while (x > 40 && this.openFlags(loaded).some((b) =>
-      Math.abs(b.rect!.x - x) < 30 && Math.abs(b.rect!.y - y) < 30)) x -= 36;
+      Math.abs(b.rect!.x - x) < 30 && Math.abs(b.rect!.y - y) < half * 2)) x -= 36;
     const id = uuid();
     this.addBlock({
       id, type: "flag", note: DEFAULT_FLAG_NOTE, rect: { x, y, w: 30, h: 30 },
       created: nowIso(), ...(spot?.context ? { context: spot.context } : {}),
-    });
+    }, loaded);
     // Un seul message, mis a jour, meme apres trois appuis de suite. Un
     // repere pose par erreur s'enleve d'un appui, sans chercher la pastille.
     const burst = this.flagBurst?.page === loaded.page.id ? this.flagBurst : { page: loaded.page.id, ids: [] };
@@ -1162,6 +1173,22 @@ export class PageView {
       } }, "flag");
   }
 
+  /**
+   * Page du repere. En defilement, celle du dernier geste tant qu'elle est
+   * a l'ecran : on tape souvent en bas d'une page alors que la precedente
+   * occupe encore le haut de la vue (page « en vue »).
+   */
+  private flagTarget(): LoadedPage | undefined {
+    if (this.viewMode === "scroll" && this.lastGestureId) {
+      const p = this.list.find((x) => x.page.id === this.lastGestureId && !x.dead);
+      if (p) {
+        const r = p.wrap.getBoundingClientRect(), v = this.root.getBoundingClientRect();
+        if (r.bottom > v.top && r.top < v.bottom) return p;
+      }
+    }
+    return this.activePage();
+  }
+
   /** Reperes encore ouverts d'une page, places dans la marge. */
   private openFlags(loaded: LoadedPage): Block[] {
     return loaded.page.blocks.filter((b) => b.type === "flag" && !b.resolved && !!b.rect);
@@ -1171,11 +1198,11 @@ export class PageView {
   private flagBurst: { page: string; ids: string[]; timer?: ReturnType<typeof setTimeout> } | null = null;
 
   /**
-   * Ou poser le repere (haut de la pastille, unites de page) et quelle ligne
+   * Ou poser le repere (milieu de la ligne, unites de page) et quelle ligne
    * garder. Le curseur du texte si l'on tapait ; le dernier trait si l'on
    * ecrivait au stylet depuis ; sinon rien (haut de page, comme avant).
    */
-  private flagSpot(loaded: LoadedPage): { y: number; context: string } | null {
+  private flagSpot(loaded: LoadedPage): { mid: number; context: string } | null {
     const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
     const sheet = loaded.sheet.getBoundingClientRect();
     // Le texte garde le clavier pendant qu'on ecrit au stylet : c'est le
@@ -1183,12 +1210,12 @@ export class PageView {
     const caret = loaded.lastEdit !== "ink" ? loaded.doc.caretSpot() : null;
     if (caret) {
       const mid = ((caret.top + caret.bottom) / 2 - sheet.top) / k;
-      return { y: mid - 15, context: flagContext(caret.before, caret.after) };
+      return { mid, context: flagContext(caret.before, caret.after) };
     }
     const ink = loaded.lastInk ?? this.lastStrokeBounds(loaded.page);
     if (!ink) return null;
     const mid = ink.y + ink.h / 2;
-    return { y: mid - 15, context: this.inkLine(loaded, ink, k, sheet) };
+    return { mid, context: this.inkLine(loaded, ink, k, sheet) };
   }
 
   /** Le dernier trait de la page, a defaut d'un trait ecrit pendant la seance. */

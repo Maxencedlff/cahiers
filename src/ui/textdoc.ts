@@ -672,8 +672,10 @@ export class TextDoc {
     const registry = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
     const HighlightCtor = (window as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
     if (registry && HighlightCtor) {
-      registry.set(FOUND_HIGHLIGHT, new HighlightCtor(range));
-      setTimeout(() => registry.delete(FOUND_HIGHLIGHT), 2600);
+      const mark = new HighlightCtor(range);
+      registry.set(FOUND_HIGHLIGHT, mark);
+      // Seulement le sien : un second resultat ouvert entre-temps garde le sien.
+      setTimeout(() => { if (registry.get(FOUND_HIGHLIGHT) === mark) registry.delete(FOUND_HIGHLIGHT); }, 2600);
     }
     for (const eq of this.root.querySelectorAll<HTMLElement>(".eq")) {
       if (!range.intersectsNode(eq)) continue;

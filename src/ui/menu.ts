@@ -342,7 +342,8 @@ export function buildSearchView(
   };
 
   const key = () => `${only ? opts.notebook?.dir ?? "" : ""}|${input.value.trim()}`;
-  const run = async (): Promise<void> => {
+  /** true si ses resultats sont affiches (pas remplaces par une frappe plus recente). */
+  const run = async (): Promise<boolean> => {
     const q = input.value.trim();
     opts.onQuery?.(input.value);
     const mine = ++token;
@@ -353,7 +354,7 @@ export function buildSearchView(
       shownFor = k;
       info.textContent = "Tape au moins deux caractères.";
       infoRow.replaceChildren(info);
-      return;
+      return true;
     }
     info.textContent = "Recherche…";
     const found = await search(q, {
@@ -361,7 +362,7 @@ export function buildSearchView(
       isStale: () => mine !== token,
       notebook: only ? opts.notebook?.dir : undefined,
     });
-    if (mine !== token) return; // une frappe plus recente a pris la main
+    if (mine !== token) return false; // une frappe plus recente a pris la main
     hits = found;
     shownFor = k;
     results.replaceChildren();
@@ -389,6 +390,7 @@ export function buildSearchView(
       results.append(row);
     });
     select(0);
+    return true;
   };
 
   const later = debounce(() => void run(), 220);
@@ -403,8 +405,13 @@ export function buildSearchView(
       e.preventDefault();
       // Resultats pas encore a jour (frappe dans les 220 ms) : on cherche
       // d'abord, puis on ouvre le premier.
-      if (shownFor !== key()) void run().then(() => open(hits[0], input.value.trim()));
-      else open(hits[sel], input.value.trim());
+      // La recherche differee est annulee : partie apres, elle rendrait
+      // celle-ci perimee, et l'on ouvrirait les resultats de l'ancienne.
+      if (shownFor !== key()) {
+        later.cancel();
+        const q = input.value.trim();
+        void run().then((ok) => { if (ok && shownFor === key()) open(hits[0], q); });
+      } else open(hits[sel], input.value.trim());
       return;
     }
     if (e.key === "Escape") { e.preventDefault(); onBack(); }
@@ -423,12 +430,14 @@ export function buildSearchView(
   return el("div", { class: "screen" }, inner);
 }
 
-function debounce<T extends (...a: any[]) => void>(fn: T, ms: number): T {
+function debounce<T extends (...a: any[]) => void>(fn: T, ms: number): T & { cancel: () => void } {
   let t: ReturnType<typeof setTimeout> | null = null;
-  return ((...args: any[]) => {
+  const call = ((...args: any[]) => {
     if (t) clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  }) as T;
+    t = setTimeout(() => { t = null; fn(...args); }, ms);
+  }) as T & { cancel: () => void };
+  call.cancel = () => { if (t) clearTimeout(t); t = null; };
+  return call;
 }
 
 export { toast };

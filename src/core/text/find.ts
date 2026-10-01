@@ -20,14 +20,22 @@ const GREEK: Record<string, string> = {
 const LIGATURES: Record<string, string> = { "œ": "oe", "æ": "ae", "ß": "ss" };
 
 /**
+ * Chiffres en exposant et en indice, tapes tels quels (« r² », « x₁ ») :
+ * lus comme les formules relues par texToPlain (« r^2 », « x1 »).
+ */
+const SCRIPTS: Record<string, string> = {};
+"⁰¹²³⁴⁵⁶⁷⁸⁹".split("").forEach((c, i) => { SCRIPTS[c] = "^" + i; });
+"₀₁₂₃₄₅₆₇₈₉".split("").forEach((c, i) => { SCRIPTS[c] = String(i); });
+
+/**
  * Forme pliee d'un caractere : minuscule, sans accent, grec par son nom,
- * blanc pour tout espace, rien pour l'espace sans largeur des formules.
+ * exposants et indices en chiffres, blanc pour tout espace, rien pour l'espace sans largeur des formules.
  */
 export function foldChar(c: string): string {
   if (c === "​" || c === "﻿") return "";
   if (/\s/.test(c)) return " ";
   const low = c.toLowerCase();
-  const named = GREEK[low] ?? LIGATURES[low];
+  const named = GREEK[low] ?? LIGATURES[low] ?? SCRIPTS[low];
   if (named) return named;
   return low.normalize("NFD").replace(/[̀-ͯ]/g, "");
 }

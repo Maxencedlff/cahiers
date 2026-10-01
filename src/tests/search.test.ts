@@ -32,7 +32,8 @@ const text = (content: string): Block => ({ id: uuid(), type: "text", content })
 describe("pliage du texte", () => {
   it("casse, accents, grec par son nom, ligatures", () => {
     expect(normalize("Théorème")).toBe("theoreme");
-    expect(normalize("π r²")).toBe("pi r²");
+    expect(normalize("π r²")).toBe("pi r^2");
+    expect(normalize("x₁")).toBe("x1");
     expect(normalize("Cœur")).toBe("coeur");
     expect(normalize("Δ")).toBe("delta");
   });
@@ -116,6 +117,14 @@ describe("recherche dans le texte tape", () => {
     await pageWith([text("Aire = π r²")]);
     expect(await searchAll(repo, "pi r")).toHaveLength(1);
     expect(await searchAll(repo, "π")).toHaveLength(1);
+  });
+
+  it("un exposant tape se cherche comme la formule, et inversement", async () => {
+    await pageWith([text("Aire = π r²")]);
+    await pageWith([text("Energie $E = m c^2$ et $x_1$")]);
+    expect(await searchAll(repo, "r^2")).toHaveLength(1);
+    expect(await searchAll(repo, "c²")).toHaveLength(1);
+    expect(await searchAll(repo, "x₁")).toHaveLength(1);
   });
 
   it("le marqueur d'une photo ne matche pas « img »", async () => {
@@ -230,6 +239,18 @@ describe("cache de session", () => {
     expect(hits).toHaveLength(1);
     expect(hits[0].excerpt).toBe("beta page");
     expect(hits[0].page).toBe(1);
+  });
+
+  it("une page remise de la corbeille est relue a sa nouvelle place", async () => {
+    await pageWith([text("alpha page")]);
+    await pageWith([text("beta page")]);
+    await searchAll(repo, "page");
+    const trash = await repo.deletePage("Maths", "Cours", 1);
+    expect((await searchAll(repo, "page")).map((h) => h.excerpt)).toEqual(["beta page"]);
+    await repo.restorePage(trash);
+    const hits = await searchAll(repo, "page");
+    expect(hits.map((h) => `${h.page}:${h.excerpt}`).sort()).toEqual(["1:alpha page", "2:beta page"]);
+    expect((await repo.summary("Maths")).pageCount).toBe(2);
   });
 });
 
