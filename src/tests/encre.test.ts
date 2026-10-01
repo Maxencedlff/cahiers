@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { newStroke, roundPoint, cachedBounds, strokeBounds, HIGHLIGHT_FACTOR } from "../core/ink/stroke";
-import { PAGE_H, INK_MARGIN, inkBottom, sheetHeight, growForStroke } from "../core/ink/sheet";
+import { PAGE_H, INK_MARGIN, inkBottom, sheetHeight, growForStroke, shrinkToInk } from "../core/ink/sheet";
 import { gestureTool, isPalm, PALM_DELAY_MS } from "../core/ink/pointer";
 import { PageHistory, applyStrokeCommand, type StrokeAdded } from "../core/history";
 import { colorOf, labelOf, shortcutOf } from "../core/palette";
@@ -118,6 +118,39 @@ describe("bornes en cache", () => {
     s.points = [s.points[0], s.points[2]];
     expect(cachedBounds(s)).toEqual(strokeBounds(s));
     expect(cachedBounds(s, 3)).toEqual(strokeBounds(s, 3));
+  });
+
+  it("une marge differente ne fausse ni n'evince les bornes", () => {
+    const s = stroke([[5, 5], [40, 30]], "pen", 3);
+    for (const pad of [1, 2, 0, 1, 2, 0]) expect(cachedBounds(s, pad)).toEqual(strokeBounds(s, pad));
+    // Un trait vide reste une boite vide, meme avec une marge.
+    const empty = stroke([]);
+    expect(cachedBounds(empty, 2)).toEqual({ x: 0, y: 0, w: 0, h: 0 });
+  });
+});
+
+describe("hauteur notee qui redescend", () => {
+  it("encre gommee sous l'A4 : la page revient a l'A4", () => {
+    const low = stroke([[0, 1400], [10, 1500]]);
+    const p = page([low]);
+    growForStroke(p, low);
+    expect(p.height).toBe(1501 + INK_MARGIN);
+    (p.blocks[0] as InkBlock).strokes = [];
+    expect(shrinkToInk(p)).toBe(true);
+    expect(p.height).toBeUndefined();
+    expect(sheetHeight(p)).toBe(PAGE_H);
+  });
+
+  it("redescend jusqu'a l'encre restante, jamais en dessous", () => {
+    const mid = stroke([[0, 1300], [10, 1350]]), low = stroke([[0, 1400], [10, 1600]]);
+    const p = page([mid, low]);
+    growForStroke(p, low);
+    (p.blocks[0] as InkBlock).strokes = [mid];
+    expect(shrinkToInk(p)).toBe(true);
+    expect(p.height).toBe(1351 + INK_MARGIN);
+    // Rien a reduire : aucun changement.
+    expect(shrinkToInk(p)).toBe(false);
+    expect(shrinkToInk(page([mid]))).toBe(false);
   });
 });
 

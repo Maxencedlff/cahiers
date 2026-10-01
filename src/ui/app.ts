@@ -685,7 +685,7 @@ export class App {
     bar.append(
       el("div", { class: "sep" }),
       el("button", { onclick: () => view()?.undo(), title: "Annuler (Ctrl+Z)" }, "Annuler"),
-      el("button", { onclick: () => view()?.redo(), title: "Retablir (Ctrl+Y)" }, "Retablir"),
+      el("button", { onclick: () => view()?.redo(), title: "Rétablir (Ctrl+Y)" }, "Rétablir"),
       el("div", { class: "sep" }),
       ...(this.sawPen ? [] : [
         el("button", {
@@ -937,6 +937,20 @@ export class App {
         toast(this.autoConvert
           ? "Conversion au fil de la plume activee"
           : "Conversion a la demande");
+        return;
+      }
+      if (k === "d" && this.sawPen) {
+        // penSeen est memorise : sans cette sortie, un stylet a plat ou
+        // oublie laisserait le doigt sans moyen d'ecrire. Le prochain
+        // contact du stylet remet la separation.
+        e.preventDefault();
+        this.sawPen = false;
+        this.touchWrites = true;
+        this.settings.penSeen = false;
+        saveSettings(this.settings);
+        this.paintToolbar();
+        this.paintStatus();
+        toast("Stylet oublié : le doigt écrit jusqu'au prochain contact du stylet");
         return;
       }
       if (k === "d" && !this.sawPen) {

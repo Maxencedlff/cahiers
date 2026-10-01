@@ -3,7 +3,7 @@ import { InkSurface, PAGE_W, PAGE_H } from "./canvas";
 import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
 import { strokeBounds, unionBounds } from "../core/ink/stroke";
-import { growForStroke, sheetHeight } from "../core/ink/sheet";
+import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock, ToolKind,
 } from "../core/types";
@@ -275,6 +275,10 @@ export class PageView {
 
   private buildPage(n: number, page: Page): LoadedPage {
     const migrated = absorbTextBoxes(page.blocks as never[], uuid);
+    // Encre gommee sous l'A4 lors d'une seance precedente : la page se
+    // rouvre a la taille de l'encre restante. Pas pendant la seance, ou la
+    // feuille se replierait sous la gomme avant qu'on reecrive a la place.
+    shrinkToInk(page);
     const canvas = el("canvas");
     const overlay = el("div", { class: "overlay" });
     const imageOf = (id: string) =>
@@ -411,9 +415,16 @@ export class PageView {
   private fitSheet(loaded: LoadedPage, force = false): void {
     const width = loaded.sheet.clientWidth || PAGE_W;
     const k = width / PAGE_W;
-    // Le texte couvre au moins toute la feuille (min-height: 100 %) : 1 px
-    // retire evite qu'un arrondi la fasse grandir d'une unite a chaque appel.
-    const h = sheetHeight(loaded.page, (loaded.doc.root.scrollHeight - 1) / k);
+    // Le texte couvre au moins toute la feuille (min-height: 100 %) : mesure
+    // tel quel, il retenait la feuille a sa taille d'avant, et une page ne
+    // redescendait jamais (texte efface, trait annule). On mesure donc le
+    // contenu seul, le temps d'une lecture, sans peinture entre les deux.
+    const root = loaded.doc.root;
+    const minH = root.style.minHeight;
+    root.style.minHeight = "0px";
+    const textPx = root.scrollHeight;
+    root.style.minHeight = minH;
+    const h = sheetHeight(loaded.page, textPx / k);
     loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
     if (force) loaded.surface?.layout(width, h);
     else loaded.surface?.fit(width, h);
@@ -1403,6 +1414,8 @@ export class PageView {
     } else {
       loaded.page.blocks = applyStrokeCommand(loaded.page.blocks, entry, dir);
       if (dir === "redo") growForStroke(loaded.page, entry.stroke);
+      // Annuler le trait qui avait allonge la feuille la rend a sa taille.
+      else shrinkToInk(loaded.page);
       // Un trait remis repart a la conversion, comme a son premier lever.
       if (dir === "redo" && entry.stroke.tool === "pen" && this.host.autoConvert()) {
         queueMicrotask(() => this.scheduleAutoConvert(loaded));

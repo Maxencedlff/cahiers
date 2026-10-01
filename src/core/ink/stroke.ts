@@ -25,15 +25,21 @@ export function strokeBounds(s: Stroke, pad = 0): Bounds {
  * Bornes d'un trait, gardees en cache. Le repaint d'une zone sale interroge
  * tous les traits de la page a chaque frame : sans cache, il reparcourait
  * tous leurs points. Le cache suit le tableau de points (un trait simplifie
- * en change) et sa longueur (le trait en cours s'allonge).
+ * en change) et sa longueur (le trait en cours s'allonge). Seules les
+ * bornes nues sont gardees, la marge est ajoutee a la demande : le repaint
+ * (marge 1), la gomme (2) et la hauteur de feuille (0) ne s'evincent plus
+ * l'un l'autre.
  */
-const boundsCache = new WeakMap<Stroke, { pts: InkPoint[]; n: number; pad: number; b: Bounds }>();
+const boundsCache = new WeakMap<Stroke, { pts: InkPoint[]; n: number; b: Bounds }>();
 export function cachedBounds(s: Stroke, pad = 0): Bounds {
   const c = boundsCache.get(s);
-  if (c && c.pts === s.points && c.n === s.points.length && c.pad === pad) return c.b;
-  const b = strokeBounds(s, pad);
-  boundsCache.set(s, { pts: s.points, n: s.points.length, pad, b });
-  return b;
+  let b: Bounds;
+  if (c && c.pts === s.points && c.n === s.points.length) b = c.b;
+  else {
+    b = strokeBounds(s);
+    boundsCache.set(s, { pts: s.points, n: s.points.length, b });
+  }
+  return pad && s.points.length ? padBounds(b, pad) : b;
 }
 
 /** Boite agrandie de `m` de chaque cote. */
