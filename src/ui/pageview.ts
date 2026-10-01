@@ -574,10 +574,13 @@ export class PageView {
   /** Repere la page en vue pour que "derniere position" reste juste. */
   private onScroll(): void {
     if (this.viewMode !== "scroll" || !this.list.length) return;
-    const top = this.root.scrollTop + 80;
+    // Position de chaque page par rapport au haut de la vue. offsetTop se
+    // mesurait depuis le body (la vue n'est pas positionnee) : les barres du
+    // haut s'y ajoutaient et l'indicateur restait une page en retard.
+    const top = this.root.getBoundingClientRect().top + 80;
     let best = this.list[0].number;
     for (const p of this.list) {
-      if (p.wrap.offsetTop <= top) best = p.number;
+      if (p.wrap.getBoundingClientRect().top <= top) best = p.number;
     }
     if (best !== this.current) {
       this.current = best;

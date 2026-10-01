@@ -119,6 +119,17 @@ export function ctrlCommand(e: KeyLike): Command | null {
   return null;
 }
 
+/**
+ * F5, Ctrl+R et Ctrl+Maj+R rechargent le WebView2 : l'appli repartirait de
+ * zero et les dernieres frappes, pas encore ecrites, seraient perdues.
+ * Ctrl+R seul est deja une commande (conversion) ; ces touches ne doivent
+ * jamais arriver au WebView2, meme sous un dialogue.
+ */
+export function isReloadKey(e: KeyLike): boolean {
+  if (e.key === "F5") return true;
+  return (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "r";
+}
+
 /** Touches d'une commande, pour une infobulle : « Ctrl+F ». */
 export function keysOf(command: Command): string {
   return SHORTCUTS.find((s) => s.ctrl?.command === command)?.keys ?? "";

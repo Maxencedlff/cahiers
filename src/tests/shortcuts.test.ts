@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
-  SHORTCUTS, GROUPS, ctrlCommand, keysOf, titleOf, pageLabel, parsePageInput, type KeyLike,
+  SHORTCUTS, GROUPS, ctrlCommand, isReloadKey, keysOf, titleOf, pageLabel, parsePageInput, type KeyLike,
 } from "../core/shortcuts";
 import { MATH_TEMPLATES } from "../core/templates";
 import { SYMBOLS, symbolName } from "../core/symbols";
@@ -149,5 +149,24 @@ describe("reglages de disposition", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     store.set("cahiers.settings.v1", JSON.stringify({ mathOpen: false, layout: 2 }));
     expect(loadSettings().mathOpen).toBe(false);
+  });
+});
+
+describe("touches qui rechargeraient le WebView2", () => {
+  it("F5, Ctrl+R et Ctrl+Maj+R sont reconnues", () => {
+    expect(isReloadKey(press("F5"))).toBe(true);
+    expect(isReloadKey(ctrl("r"))).toBe(true);
+    expect(isReloadKey(ctrl("r", true))).toBe(true);
+  });
+
+  it("AltGr+R et la lettre seule tapent du texte", () => {
+    expect(isReloadKey(press("r", { ctrlKey: true, altKey: true }))).toBe(false);
+    expect(isReloadKey(press("r"))).toBe(false);
+    expect(isReloadKey(press("R", { shiftKey: true }))).toBe(false);
+  });
+
+  it("Ctrl+Maj+R n'est pas une commande : seul le blocage la retient", () => {
+    expect(ctrlCommand(ctrl("r", true))).toBeNull();
+    expect(ctrlCommand(ctrl("r"))).toBe("convert");
   });
 });

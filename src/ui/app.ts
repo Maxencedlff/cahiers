@@ -16,7 +16,7 @@ import {
   type RecognitionBackend, type QueueState,
 } from "../core/ink/recognizer";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
-import { ctrlCommand, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
+import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
 import { showShortcuts } from "./help";
 import type { Presence } from "../platform";
 
@@ -135,6 +135,15 @@ export class App {
 
     this.root.append(this.tabbar, this.main, this.statusbar);
     document.addEventListener("keydown", (e) => this.onKey(e));
+    // Fenetre retaillee (moitie d'ecran, portable tourne) : la calculatrice
+    // passe de la colonne a la fenetre flottante, ou l'inverse.
+    let resizing: ReturnType<typeof setTimeout> | undefined;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizing);
+      resizing = setTimeout(() => {
+        if (this.calculator) this.placeCalculator(this.calculator);
+      }, 200);
+    });
     // Le premier stylet vu bascule l'application en separation stylet/doigt.
     window.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "pen" && !this.sawPen) {
@@ -219,6 +228,8 @@ export class App {
       if (!calc.isIn(slot.side)) calc.dock(slot.side);
     } else if (!calc.isIn(slot.work)) {
       calc.float(slot.work);
+      // Ouverte, elle est ramenee dans l'ecran (show la recale).
+      if (calc.isVisible) calc.show();
     }
     slot.side.classList.toggle("closed", !calc.isVisible || !calc.isDocked);
   }
@@ -1019,7 +1030,16 @@ export class App {
     // toujours, Ctrl+F ou Ctrl+Pg↓ doivent marcher quand meme.
     const cmd = ctrlCommand(e);
     if (cmd) {
-      if (this.runCommand(cmd, { typing, dialog })) e.preventDefault();
+      // En split, la commande vise le panneau ou l'on tape : Ctrl+F pose le
+      // repere sur la page qu'on ecrit, pas sur celle de gauche.
+      const pane = this.tabs.find((t) => t.host.contains(e.target as Node));
+      if (this.runCommand(cmd, { typing, dialog, view: pane?.view ?? view })) e.preventDefault();
+      return;
+    }
+    // F5 et Ctrl+Maj+R rechargeraient le WebView2 : une appli de bureau ne
+    // se recharge pas, et les dernieres frappes pas encore ecrites partiraient.
+    if (isReloadKey(e)) {
+      e.preventDefault();
       return;
     }
     if (e.ctrlKey || e.metaKey) return;
@@ -1049,14 +1069,18 @@ export class App {
    * Execute une commande Ctrl. Renvoie true si la touche est prise
    * (preventDefault) ; false la laisse au texte (Ctrl+Z natif du texte).
    */
-  private runCommand(cmd: Command, ctx: { typing: boolean; dialog: boolean }): boolean {
-    const view = this.activeTab()?.view;
+  private runCommand(
+    cmd: Command,
+    ctx: { typing: boolean; dialog: boolean; view: PageView | null | undefined },
+  ): boolean {
+    const view = ctx.view;
     const notebook = this.screen === "notebook";
     if (ctx.dialog) {
-      // Sous un dialogue, rien ne se declenche ; Ctrl+F, Ctrl+G et Ctrl+P
-      // sont quand meme pris, sinon le WebView2 ouvre sa recherche ou
-      // imprime l'interface.
-      return cmd === "flag" || cmd === "goto" || cmd === "exportPage" || cmd === "exportAll" || cmd === "help";
+      // Sous un dialogue, rien ne se declenche, mais la touche est prise
+      // quand meme : sinon le WebView2 ouvre sa recherche (Ctrl+F), imprime
+      // l'interface (Ctrl+P) ou recharge l'appli (Ctrl+R). Seuls Ctrl+Z et
+      // Ctrl+Y restent au champ de saisie.
+      return cmd !== "undo" && cmd !== "redo";
     }
     switch (cmd) {
       case "menu": void (this.screen === "menu" ? this.backToWork() : this.showMenu()); return true;
@@ -1072,7 +1096,7 @@ export class App {
       case "finger": this.toggleFinger(); return true;
       case "newPage": if (notebook) void view?.newPage(); return true;
       case "insertPage": if (notebook) void view?.newPage(true); return true;
-      case "goto": if (notebook) void this.goToPrompt(); return true;
+      case "goto": if (notebook) void this.goToPrompt(view); return true;
       case "nextPage": if (notebook) void view?.next(); return true;
       case "prevPage": if (notebook) void view?.prev(); return true;
       case "nextDivider": if (notebook) void this.switchDividerBy(1); return true;
@@ -1097,8 +1121,8 @@ export class App {
   }
 
   /** Ctrl+G, ou un appui sur « p. 4 / 12 ». */
-  private async goToPrompt(): Promise<void> {
-    const view = this.activeTab()?.view;
+  private async goToPrompt(target?: PageView | null): Promise<void> {
+    const view = target ?? this.activeTab()?.view;
     if (!view || this.screen !== "notebook" || document.querySelector(".backdrop")) return;
     const nums = await view.pageNumbers();
     const last = nums[nums.length - 1] ?? 1;

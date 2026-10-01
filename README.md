@@ -146,7 +146,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+N` / `Ctrl+Maj+N` | nouvelle page a la fin, inserer apres la page courante |
 | `Ctrl+G` | aller a la page (ou un appui sur « p. 4 / 12 ») |
 | `Ctrl+P` / `Ctrl+Maj+P` | exporter en PDF la page, tout l'intercalaire |
-| `Ctrl+Z` / `Ctrl+Y` | annuler, retablir |
+| `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |
 | `Ctrl+K` | recherche globale |
 | `Ctrl+L` | calculatrice |
