@@ -47,6 +47,12 @@ export class App {
   private activeId: string | null = null;
   /** Onglet affiche dans le panneau droit, quand le split est ouvert. */
   private splitId: string | null = null;
+  /**
+   * Vues quittees (autre intercalaire, onglet ferme) dont une ecriture a
+   * echoue. Elles retentent toutes les 3 s ; gardees ici pour que la barre
+   * d'etat et la fermeture de la fenetre les voient encore.
+   */
+  private orphans = new Set<PageView>();
 
   private tool: ToolKind | "region" | "textregion" = "pen";
   private color: ColorKey = "definition";
@@ -253,7 +259,9 @@ export class App {
 
   private async mountView(tab: Tab, page?: number): Promise<void> {
     // La vue precedente finit d'ecrire AVANT que la suivante relise le disque.
-    await tab.view?.dispose();
+    const old = tab.view;
+    await old?.dispose();
+    if (old?.hasUnsaved) this.orphans.add(old);
     const view = new PageView({
       repo: this.repo,
       recognitionReady: () => this.queueState.backendReady,
@@ -267,6 +275,14 @@ export class App {
       openLink: (target) => void this.followLink(target),
       onTrashed: (entry) => this.offerRestore(entry),
     }, tab.notebook, tab.divider);
+    // Une vue quittee en echec sur ce meme intercalaire : la nouvelle reprend
+    // sa file, pour qu'une seule vue ecrive ces pages.
+    for (const o of [...this.orphans]) {
+      if (o.notebook === tab.notebook && o.divider === tab.divider) {
+        this.orphans.delete(o);
+        await view.adopt(o);
+      }
+    }
     tab.view = view;
     view.setRenderMode(this.renderMode);
     await view.load(page);
@@ -294,6 +310,8 @@ export class App {
       if (!close) return;
     }
     await view?.dispose();
+    // Fermer quand meme : la page continue d'etre retentee et reste signalee.
+    if (view?.hasUnsaved) this.orphans.add(view);
     this.tabs.splice(i, 1);
     if (this.splitId === id) this.splitId = null;
     if (this.activeId === id) this.activeId = this.tabs[Math.max(0, i - 1)]?.id ?? null;
@@ -488,12 +506,7 @@ export class App {
    * recreait l'ancien dossier et y partait.
    */
   private async renameDivider(tab: Tab, d: string, next: string): Promise<void> {
-    const shown = tab.divider === d ? tab.view : null;
-    await shown?.flush();
-    if (shown?.hasUnsaved) {
-      toast("Une page n'est pas encore enregistrée : renommage annulé. Réessaie dans un instant.", "err", 6000);
-      return;
-    }
+    if (!(await this.settle(tab.notebook, d, "renommage annulé"))) return;
     let applied: string;
     try {
       applied = await this.repo.renameDivider(tab.notebook, d, next);
@@ -502,7 +515,9 @@ export class App {
       return;
     }
     if (applied === d) {
-      if (safeName(next) !== d) toast("Un intercalaire porte déjà ce nom", "warn");
+      const wanted = safeName(next);
+      if (wanted.startsWith(".") || wanted.toLowerCase() === "assets") toast("Ce nom est réservé", "warn");
+      else if (wanted !== d) toast("Un intercalaire porte déjà ce nom", "warn");
       return;
     }
     if (tab.divider === d) {
@@ -520,9 +535,10 @@ export class App {
    * tardive ne recree le dossier.
    */
   private async deleteDivider(tab: Tab, d: string): Promise<void> {
-    const shown = tab.divider === d ? tab.view : null;
-    await shown?.flush();
-    shown?.discard();
+    for (const v of this.holders(tab.notebook, d)) {
+      await v.flush();
+      v.discard();
+    }
     let entry: TrashEntry;
     try {
       entry = await this.repo.deleteDivider(tab.notebook, d);
@@ -557,6 +573,9 @@ export class App {
         this.paintToolbar();
         return;
       }
+      // Une vue quittee en echec sur cet intercalaire tient des numeros :
+      // on ne decale rien tant qu'elle n'a pas ecrit.
+      if (!(await this.settle(entry.dir, entry.divider, "restauration annulée"))) return;
       try {
         const n = await this.repo.restorePage(entry);
         toast(`Page ${n} de ${entry.divider} restaurée`);
@@ -992,19 +1011,44 @@ export class App {
     saveSettings(this.settings);
   }
 
-  /** Ecrit tout ce qui attend, dans tous les onglets. */
+  /** Toutes les vues qui peuvent encore ecrire : onglets, puis vues quittees en echec. */
+  private views(): PageView[] {
+    for (const o of this.orphans) if (!o.hasUnsaved) this.orphans.delete(o);
+    const shown = this.tabs.map((t) => t.view).filter((v): v is PageView => !!v);
+    return [...shown, ...this.orphans];
+  }
+
+  /** Vues qui tiennent des pages de cet intercalaire. */
+  private holders(notebook: string, divider: string): PageView[] {
+    return this.views().filter((v) => v.notebook === notebook && v.divider === divider);
+  }
+
+  /**
+   * Avant de renommer ou de renumeroter un intercalaire : tout ce qui
+   * l'attend est ecrit. Faux (et un message) si une page reste refusee.
+   */
+  private async settle(notebook: string, divider: string, cancelled: string): Promise<boolean> {
+    const held = this.holders(notebook, divider);
+    for (const v of held) await v.flush();
+    if (!held.some((v) => v.hasUnsaved)) return true;
+    toast(`Une page n'est pas encore enregistrée : ${cancelled} pour ne rien écraser. `
+      + "Réessaie dans un instant.", "err", 6000);
+    return false;
+  }
+
+  /** Ecrit tout ce qui attend, dans tous les onglets et les vues quittees. */
   async flushAll(): Promise<void> {
-    for (const t of this.tabs) await t.view?.flush();
+    for (const v of this.views()) await v.flush();
   }
 
   /** Il reste des pages que le disque n'a pas acceptees. */
   get hasUnsaved(): boolean {
-    return this.tabs.some((t) => t.view?.hasUnsaved);
+    return this.views().some((v) => v.hasUnsaved);
   }
 
   /** Derniere erreur d'ecriture, pour la demande de confirmation a la fermeture. */
   get unsavedError(): string | null {
-    for (const t of this.tabs) if (t.view?.unsavedError) return t.view.unsavedError;
+    for (const v of this.views()) if (v.unsavedError) return v.unsavedError;
     return null;
   }
 

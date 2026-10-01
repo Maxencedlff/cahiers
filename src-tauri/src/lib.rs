@@ -332,8 +332,11 @@ fn reveal(path: &Path) -> io::Result<()> {
     // /select, puis le chemin entre guillemets, sans autre echappement :
     // c'est la seule forme qu'explorer.exe comprend avec des espaces.
     let target = if path.exists() { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
+    // Le chemin relatif arrive avec des "/" (Maths/Cours/0001.page.json) :
+    // explorer ne selectionne rien avec, il ouvre Documents.
+    let target = target.display().to_string().replace('/', "\\");
     std::process::Command::new("explorer")
-        .raw_arg(format!("/select,\"{}\"", target.display()))
+        .raw_arg(format!("/select,\"{target}\""))
         .spawn()
         .map(|_| ())
 }

@@ -177,6 +177,9 @@ export class TextDoc {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     this.savedRange = null;
     if (lastDoc === this) lastDoc = null;
+    // Formule ouverte sur une page quittee : la page suivante ne doit pas
+    // tenter de la figer.
+    if (editingDoc === this) editingDoc = null;
   }
 
   constructor(

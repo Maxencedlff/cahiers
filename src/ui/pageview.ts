@@ -151,6 +151,24 @@ export class PageView {
     this.saveError = null;
   }
 
+  /**
+   * Reprend la file d'une vue quittee sur le meme intercalaire, dont une
+   * ecriture a echoue. A appeler avant load() : la nouvelle vue affiche
+   * alors la version en attente, pas l'ancienne version du disque. Sans
+   * cela, les deux vues ecrivaient chacune leur version de la page et la
+   * derniere effacait l'autre.
+   */
+  async adopt(old: PageView): Promise<void> {
+    // Laisse finir un essai en cours de l'ancienne vue.
+    await old.io;
+    for (const [id, p] of old.pendingSave) if (!this.pendingSave.has(id)) this.pendingSave.set(id, p);
+    if (old.saveError) this.saveError = old.saveError;
+    old.discard();
+    if (this.pendingSave.size && !this.saveTimer) {
+      this.saveTimer = setTimeout(() => void this.flush(), 3000);
+    }
+  }
+
   /** Detache les pages affichees et libere leur memoire (canvas, ecouteurs). */
   private teardown(): void {
     for (const p of this.list) {
@@ -239,7 +257,7 @@ export class PageView {
         el("p", {}, "Cette page n'a pas pu être lue. Elle n'est pas modifiée : rien ne sera "
           + "écrit dessus tant qu'elle reste illisible."),
         el("p", { class: "muted" }, "Si le dossier est dans OneDrive, vérifie que le fichier est "
-          + "bien téléchargé (« Toujours conserver sur cet appareil »), puis réessaie."),
+          + "bien téléchargé («\u00a0Toujours conserver sur cet appareil\u00a0»), puis réessaie."),
         el("p", { class: "small muted" }, el("code", {}, path), " : ", errorText(err)),
         actions,
       ),

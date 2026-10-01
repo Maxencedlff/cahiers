@@ -303,6 +303,29 @@ describe("corbeille", () => {
     await repo.createDivider(nb, "TD");
     expect(await repo.restoreDivider(entry)).toBe("TD (restauré)");
   });
+
+  it("une page restauree apres d'autres suppressions ne laisse pas de trou", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    for (let i = 0; i < 3; i++) await repo.createPage(nb, "Cours");
+    const [a, , c] = await ids(nb, "Cours");
+    const entry = await repo.deletePage(nb, "Cours", 3);
+    await repo.deletePage(nb, "Cours", 2);
+    // Il ne reste qu'une page : la p.3 revient en p.2, pas en p.3.
+    expect(await repo.restorePage(entry)).toBe(2);
+    expect(await repo.listPageNumbers(nb, "Cours")).toEqual([1, 2]);
+    expect(await ids(nb, "Cours")).toEqual([a, c]);
+  });
+
+  it("un intercalaire supprime emporte ses photos", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "TD");
+    const src = await repo.writeAsset(nb, "TD", "x.png", "data:image/png;base64,AAAA");
+    const entry = await repo.deleteDivider(nb, "TD");
+    expect(await fs.exists(`${entry.bin}/Maths/TD/${src}`)).toBe(true);
+    await repo.restoreDivider(entry);
+    expect(await fs.exists(`Maths/TD/${src}`)).toBe(true);
+  });
 });
 
 describe("renommer un intercalaire", () => {
@@ -312,6 +335,8 @@ describe("renommer un intercalaire", () => {
     await repo.createDivider(nb, "Exos");
     expect(await repo.renameDivider(nb, "Exos", "cours")).toBe("Exos");
     expect(await repo.renameDivider(nb, "Exos", "assets")).toBe("Exos");
+    // Un nom cache (".corbeille") disparaitrait de la bande d'intercalaires.
+    expect(await repo.renameDivider(nb, "Exos", ".corbeille")).toBe("Exos");
     expect(await repo.listDividers(nb)).toEqual(["Cours", "Exos"]);
   });
 
