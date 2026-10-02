@@ -3,7 +3,7 @@ import { crc32, unzipStore, zipStore } from "../core/export/zip";
 import { latexToOmml, mathmlToOmml, parseXml } from "../core/export/omml";
 import { buildDocx, docxParts, type DxDoc, type DxImage } from "../core/export/docx";
 import {
-  docxFileName, estimateSpans, fitEmu, indentOf, inkZones, joinPages, planPage, planToParas, reviewToParas,
+  docxFileName, estimateSpans, tokenRuns, fitEmu, indentOf, inkZones, joinPages, planPage, planToParas, reviewToParas,
   EMU_PER_UNIT, type Assets, type PlanItem,
 } from "../core/export/plan";
 import { docLines, parseDoc } from "../core/text/doc";
@@ -336,5 +336,17 @@ describe("fiche de revision", () => {
     expect(paras[3].runs[0]).toMatchObject({ text: "Théorème : ", bold: true, color: "DC2626" });
     expect(paras[3].runs.some((r) => r.kind === "math")).toBe(true);
     expect(paras[4].runs.some((r) => r.kind === "image")).toBe(true);
+  });
+});
+
+describe("liens entre pages dans Word", () => {
+  it("un lien sort en texte souligne avec son libelle", () => {
+    const runs = tokenRuns(parseDoc('voir [Thévenin](cahiers:abc#titre:Thevenin "Elec/Cours/0002")'), { inline: () => [] });
+    const link = runs.find((r) => r.kind === "text" && r.text === "Thévenin");
+    expect(link).toMatchObject({ kind: "text", underline: true });
+    const entry = docxParts({ title: "t", paras: [{ runs }] } as DxDoc).find((e) => e.name === "word/document.xml");
+    const xml = String(entry?.data);
+    expect(xml).toContain('<w:u w:val="single"/>');
+    expect(xml).toContain("Thévenin");
   });
 });

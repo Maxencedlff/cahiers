@@ -24,6 +24,7 @@ import { cachedBounds, unionBounds, type Bounds } from "../ink/stroke";
 import { PAGE_W } from "../ink/sheet";
 import { LINE, TEXT_FONT, TEXT_SIDE, TEXT_TOP } from "../textlayout";
 import { clusterStrokes, whereLabel, type ReviewItem, type ReviewResult, type ReviewToken } from "../review";
+import { linkLabel } from "../links";
 import { EMU_PER_TWIP, TEXT_W_EMU, type DxImage, type DxPara, type DxRun } from "./docx";
 
 /** Intervalle vertical en unites de page. */
@@ -296,6 +297,9 @@ export function tokenRuns(tokens: readonly DocToken[], assets: Pick<Assets, "inl
       out.push(...assets.inline(t.id));
     } else if (t.kind === "br") {
       out.push({ kind: "br" });
+    } else if (t.kind === "link") {
+      // Lien entre pages : seul le libelle passe dans Word, souligne comme un renvoi.
+      out.push({ kind: "text", text: linkLabel(t), underline: true, ...colorOf(base) });
     }
   }
   return out;

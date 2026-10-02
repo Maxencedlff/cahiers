@@ -26,7 +26,7 @@ export interface DxImage {
 }
 
 export type DxRun =
-  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; color?: string; size?: number; highlight?: string }
+  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; color?: string; size?: number; highlight?: string; underline?: boolean }
   | { kind: "math"; latex: string; color?: string }
   | { kind: "image"; image: DxImage }
   | { kind: "br" };
@@ -152,6 +152,7 @@ class Builder {
     const pr = (r.bold ? "<w:b/><w:bCs/>" : "") + (r.italic ? "<w:i/><w:iCs/>" : "")
       + (r.color ? `<w:color w:val="${r.color}"/>` : para.caption ? "<w:color w:val=\"6B7280\"/>" : "")
       + (r.size ? `<w:sz w:val="${r.size}"/><w:szCs w:val="${r.size}"/>` : para.caption ? "<w:sz w:val=\"18\"/><w:szCs w:val=\"18\"/>" : "")
+      + (r.underline ? "<w:u w:val=\"single\"/>" : "")
       + (r.highlight ? `<w:shd w:val="clear" w:color="auto" w:fill="${r.highlight}"/>` : "");
     // Tabulations et retours : un run par morceau.
     return r.text.split("\n").map((part, i) =>
