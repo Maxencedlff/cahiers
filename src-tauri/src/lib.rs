@@ -214,6 +214,48 @@ fn write_binary(state: State<'_, Root>, rel: String, base64: String) -> Res<()> 
     write_durable(&path, &rel, &bytes)
 }
 
+/* ------------------------------------------------------------------ */
+/* Export : document enregistre ou l'utilisateur le choisit            */
+/* ------------------------------------------------------------------ */
+
+/// Export (Word) : boite « Enregistrer sous » de Windows, puis ecriture.
+/// Le chemin vient de la boite, jamais du frontend : la page ne peut rien
+/// ecrire hors du dossier des cahiers sans que l'utilisateur l'ait choisi.
+/// Rend le chemin ecrit, ou None si la boite a ete fermee.
+#[tauri::command(async)]
+fn save_export(
+    app: tauri::AppHandle,
+    name: String,
+    filter: String,
+    extension: String,
+    base64: String,
+) -> Res<Option<String>> {
+    use base64::Engine;
+    use tauri_plugin_dialog::DialogExt;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|e| fail(format!("document illisible : {e}")))?;
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Exporter")
+        .set_file_name(&name)
+        .add_filter(&filter, &[extension.as_str()]);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let Some(picked) = dialog.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| fail(format!("chemin refuse : {e}")))?;
+    let shown = path.display().to_string();
+    write_durable(&path, &shown, &bytes)
+        .map_err(|e| fail(format!("{e} (document ouvert dans Word ?)")))?;
+    Ok(Some(shown))
+}
+
 /// Async : hors du thread principal. Chaque photo affichee passe par ici, et
 /// une page qui en porte plusieurs figeait la fenetre le temps de les lire.
 #[tauri::command(async)]
@@ -484,6 +526,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .manage(Root(Mutex::new(resolve_root())))
         .invoke_handler(tauri::generate_handler![
             root_path,
@@ -495,6 +538,7 @@ pub fn run() {
             write_text,
             read_binary,
             write_binary,
+            save_export,
             ocr_image,
             myscript_keys,
             set_myscript_keys,
