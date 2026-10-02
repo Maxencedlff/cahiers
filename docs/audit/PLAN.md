@@ -57,7 +57,7 @@ Ce n'est pas un bug unique. Cinq causes s'additionnent, et toutes sont traitées
 | donnees-5 | Page illisible = écran gris muet | Afficher à la place une feuille « Page illisible » avec le message d'erreur, et des boutons Réessayer, Ouvrir le dossier, Page suivante. Aucune écriture pour ce numéro. | S |
 | donnees-6 | Écriture non durable et verrou OneDrive | Côté Rust : `sync_all` avant le rename, puis 5 essais sur les erreurs os 32/5, et nettoyage du `.tmp`. Côté TS : relancer un timer de 3 s après un échec, et pastille « Non enregistré » dans la barre d'état. | M |
 | nav-12, manque-corbeille | Suppression définitive | `repo.trash()` : renommer vers `.corbeille/<horodatage>_…`. Toast « Annuler » de 8 s. Bouton rouge, éloigné de « Insérer ici ». | M |
-| donnees-9 | Fuite mémoire à chaque changement de page (45 canvases gardés) | Ajouter `TextDoc.dispose()` (qui retire l'écouteur `selectionchange`), déconnecter le ResizeObserver, faire `surface.dispose()` avec `canvas.width = 0`, et n'ajouter l'écouteur de défilement qu'une seule fois. `textdoc.ts` est aussi touché au lot 1, donc faire ce point après. | S |
+| donnees-9 | Fuite mémoire à chaque changement de page (45 canvases gardés) | Ajouter `TextDoc.dispose()` (qui retire l'écouteur `selectionchange`), déconnecter le ResizeObserver, faire `surface.dispose()` avec `canvas.width = 0`, et n'ajouter l'écouteur de défilement qu'une seule fois. `textdoc.ts` est aussi touché au lot 1, donc faire ce point après. **Fait** (vérifié : 1 canvas et 1 écouteur `selectionchange` après 50 changements de page). | S |
 
 **Risques.** Le passage aux identifiants de page touche la file de reconnaissance (lot 6), qui utilise la même clé. Il faut concevoir la clé par `page.id` dès maintenant. Il faut aussi tester sur Tauri, pas seulement dans le navigateur, pour la fermeture et le fsync.
 
@@ -250,7 +250,7 @@ Ce n'est pas un bug unique. Cinq causes s'additionnent, et toutes sont traitées
 |---|---|---|
 | encre-13, manque-lasso | Sélection au lasso : déplacer, recolorer, supprimer, puis insérer de l'espace | L |
 | encre-11 | Zoom : pinch à deux doigts, Ctrl+molette, Ctrl+/- | M-L |
-| donnees-12 | Mode défilement virtualisé (100 pages = 2,9 s). Prérequis : `donnees-9` | L |
+| donnees-12 | Mode défilement virtualisé (100 pages = 2,9 s). Prérequis : `donnees-9`. **Fait** : ouverture 100 pages 2,1 s → 0,17 s, 100 → 2-3 canvases (`src/core/virtual.ts`) | L |
 | nav-4 (palier 2) | Arborescence à 3 niveaux (E3A/S1/Chapitre 1) | L |
 | reco-3 (fond) | Conversion incrémentale par bande de lignes | L |
 | rech-10, manque-liens | Création de liens, cibles par `page.id` | L |
