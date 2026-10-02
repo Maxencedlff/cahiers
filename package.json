@@ -15,9 +15,9 @@
     "app:build": "tauri build"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.1.1",
-    "@tauri-apps/plugin-dialog": "^2.2.0",
-    "@tauri-apps/plugin-fs": "^2.2.0",
+    "@tauri-apps/api": "~2.12.0",
+    "@tauri-apps/plugin-dialog": "~2.8.0",
+    "@tauri-apps/plugin-fs": "~2.6.0",
     "iink-ts": "^3.1.0",
     "katex": "^0.16.11",
     "mathjs": "^13.2.0",
