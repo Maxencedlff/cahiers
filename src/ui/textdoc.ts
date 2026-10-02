@@ -73,6 +73,14 @@ export interface DocImages {
   addFile?: (file: File) => Promise<string | null>;
   /** « Redresser a nouveau » : rouvre le dialogue sur l'original. */
   recrop?: (id: string) => void;
+  /**
+   * Bloc vivant (calcul, courbe) pose dans le texte avec le meme jeton
+   * qu'une photo : son rendu, sa largeur (courbe : retaillable), son nom.
+   * null si l'id n'est pas un bloc vivant de la page.
+   */
+  live?: (id: string) => { node: HTMLElement; width?: number; label: string; ready?: Promise<void> } | null;
+  /** Appui sur un bloc vivant : la calculatrice le rouvre (« Mettre à jour »). */
+  openLive?: (id: string) => void;
 }
 
 /** Fichier image d'un presse-papiers ou d'un depot, s'il y en a un. */
@@ -491,7 +499,7 @@ export class TextDoc {
     // Une photo d'une autre page n'existe pas ici : on ne colle pas un trou.
     // Dans un titre ou une puce, les lignes collees restent du texte.
     const inLine = !!closestLine(range.startContainer, this.root);
-    const usable = tokens.filter((t) => (t.kind !== "image" || !!this.images?.lookup(t.id)) && !(inLine && t.kind === "line"));
+    const usable = tokens.filter((t) => (t.kind !== "image" || this.canPlace(t.id)) && !(inLine && t.kind === "line"));
     if (!usable.length) return;
     this.lastAuto = null;
     range.deleteContents();
@@ -618,6 +626,8 @@ export class TextDoc {
    * retailler et mini-barre monter / descendre / supprimer.
    */
   private makeImage(id: string): HTMLElement {
+    const live = this.images?.live?.(id) ?? null;
+    if (live) return this.makeLive(id, live);
     const info = this.images?.lookup(id) ?? null;
     const img = el("img", { alt: "photo", draggable: "false" });
     const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
@@ -637,8 +647,48 @@ export class TextDoc {
       fig.classList.add("missing");
     }
     fig.addEventListener("pointerdown", (e) => this.onImageDown(e, fig));
+    this.gripResize(id, fig, grip);
+    return fig;
+  }
 
-    // Retaille par le coin bas droit, a la souris, au stylet ou au doigt.
+  /**
+   * Bloc vivant (calcul, courbe) dans le texte : il vit comme une photo
+   * (sa ligne, deplacer, monter/descendre, ✕ avec Annuler), et un appui le
+   * rouvre dans la calculatrice. Une courbe se retaille, un calcul suit sa
+   * formule.
+   */
+  private makeLive(id: string, live: { node: HTMLElement; width?: number; label: string; ready?: Promise<void> }): HTMLElement {
+    const fig = el("span", {
+      class: `doc-img live${live.width === undefined ? " live-fit" : ""}`, contenteditable: "false",
+      dataset: { id, live: "1" }, title: `${live.label} : toucher pour modifier, glisser pour déplacer`,
+    }, live.node);
+    if (live.width !== undefined) {
+      fig.style.setProperty("--w", String(live.width));
+      const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
+      fig.append(grip);
+      this.gripResize(id, fig, grip);
+    }
+    fig.addEventListener("pointerdown", (e) => this.onImageDown(e, fig));
+    // L'export PDF attend aussi le trace des courbes (imagesReady).
+    if (live.ready) this.imgReady.set(fig, live.ready);
+    return fig;
+  }
+
+  /** Une photo ou un bloc vivant peut-il etre (re)pose ici sans doublon ? */
+  private canPlace(id: string): boolean {
+    if (this.images?.lookup(id)) return true;
+    if (!this.images?.live?.(id)) return false;
+    return !this.root.querySelector(`.doc-img[data-id="${CSS.escape(id)}"]`);
+  }
+
+  /** Appui sans glisser sur une photo (selection) ou un bloc vivant (selection + calculatrice). */
+  private tapImage(fig: HTMLElement): void {
+    this.selectImage(fig);
+    if (fig.dataset.live) this.images?.openLive?.(fig.dataset.id ?? "");
+  }
+
+  /** Retaille par le coin bas droit, a la souris, au stylet ou au doigt. */
+  private gripResize(id: string, fig: HTMLElement, grip: HTMLElement): void {
     grip.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       e.preventDefault();
@@ -663,7 +713,6 @@ export class TextDoc {
       grip.addEventListener("pointerup", up);
       grip.addEventListener("pointercancel", up);
     });
-    return fig;
   }
 
   /** Chargement de chaque photo (src pose et image decodee). */
@@ -713,7 +762,7 @@ export class TextDoc {
       button("↑", "Monter d'une ligne", () => this.moveImage(fig, -1)),
       button("↓", "Descendre d'une ligne", () => this.moveImage(fig, 1)),
       recrop,
-      button("✕", "Retirer la photo", () => this.removeImage(fig)),
+      button("✕", fig.dataset.live ? "Retirer ce bloc de la page" : "Retirer la photo", () => this.removeImage(fig)),
     ));
   }
 
@@ -738,7 +787,7 @@ export class TextDoc {
         window.removeEventListener("pointermove", move, true);
         window.removeEventListener("pointerup", up, true);
         window.removeEventListener("pointercancel", up, true);
-        if (!moved && u.type === "pointerup") this.selectImage(fig);
+        if (!moved && u.type === "pointerup") this.tapImage(fig);
       };
       window.addEventListener("pointermove", move, true);
       window.addEventListener("pointerup", up, true);
@@ -769,7 +818,7 @@ export class TextDoc {
       fig.style.pointerEvents = "";
       fig.classList.remove("dragging");
       this.showDropMarker(null);
-      if (!moving) { if (u.type === "pointerup") this.selectImage(fig); return; }
+      if (!moving) { if (u.type === "pointerup") this.tapImage(fig); return; }
       if (u.type !== "pointerup" || !target) return;
       this.placeImage(fig, target);
     };
@@ -902,7 +951,9 @@ export class TextDoc {
     fig.remove();
     anchorNode?.remove();
     this.emit();
-    toast("Photo retirée", "info", 8000, {
+    const label = fig.dataset.live ? this.images?.live?.(fig.dataset.id ?? "")?.label ?? "Bloc" : "Photo";
+    const what = `${label} ${/e$/.test(label) ? "retirée" : "retiré"}`;
+    toast(what, "info", 8000, {
       label: "Annuler",
       run: () => {
         if (!this.root.isConnected) return;
@@ -965,19 +1016,118 @@ export class TextDoc {
    * Pose une nouvelle photo au curseur (ou a `at`), sinon a la fin du
    * texte. Rend la photo posee.
    */
-  insertImage(id: string, at?: Range | null): HTMLElement {
+  insertImage(id: string, at?: Range | null, noCaret = false): HTMLElement {
     if (this.field) this.commit(null);
     const fig = this.makeImage(id);
-    const r = at ?? this.savedRange;
+    const r = at ?? (noCaret ? null : this.savedRange);
     if (r && this.root.contains(r.startContainer)) {
       r.collapse(true);
       r.insertNode(fig);
     } else {
       this.root.append(fig);
     }
+    // Texte vide laisse par la coupure (insertNode en fin de texte) : une
+    // vraie ancre a la place, comme a la relecture du fichier. Sinon le
+    // bloc suivant remontait d'une ligne jusqu'au rechargement.
+    const next = fig.nextSibling;
+    if (next?.nodeType === Node.TEXT_NODE && next.textContent === "") next.remove();
     if (fig.nextSibling?.nodeType !== Node.TEXT_NODE) fig.after(anchor());
     this.emit();
     return fig;
+  }
+
+  /**
+   * Le curseur de ce texte, s'il est le dernier texte ou l'on a ecrit ou
+   * clique : la calculatrice y pose ses resultats. Le curseur garde survit
+   * au passage dans la calculatrice (son recepteur prend la selection).
+   */
+  hasCaret(): boolean {
+    return lastDoc === this && !!this.savedRange && this.root.contains(this.savedRange.startContainer);
+  }
+
+  /** Curseur garde apres `node` : l'envoi suivant se pose derriere, sans voler la selection. */
+  private caretAfter(node: Node): void {
+    const r = document.createRange();
+    const next = node.nextSibling;
+    if (next?.nodeType === Node.TEXT_NODE) r.setStart(next, (next.textContent ?? "").startsWith("\u200b") ? 1 : 0);
+    else r.setStartAfter(node);
+    r.collapse(true);
+    this.savedRange = r;
+  }
+
+  /**
+   * Bloc vivant envoye par la calculatrice : au curseur (hasCaret) ou a la
+   * fin du texte. Rend l'element pose.
+   */
+  insertLive(id: string, atCaret: boolean): HTMLElement {
+    if (this.field) this.commit(null);
+    const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
+    if (r) liftToRoot(r, this.root, 1);
+    const fig = this.insertImage(id, r ?? undefined, true);
+    this.caretAfter(fig);
+    return fig;
+  }
+
+  /**
+   * Resultat de la calculatrice en formule du texte (KaTeX, editable comme
+   * les autres) : au curseur, sinon sur une nouvelle ligne a la fin.
+   * La selection du document n'est pas touchee (la calculatrice armee la
+   * garde dans son recepteur), seul le curseur garde avance.
+   */
+  insertFormula(latex: string, atCaret: boolean): HTMLElement {
+    if (this.field) this.commit(null);
+    this.lastAuto = null;
+    const eq = makeEq(latex);
+    const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
+    if (r) {
+      r.deleteContents();
+      r.collapse(true);
+      // Un espace avant si la formule suit un mot.
+      const prev = r.startContainer.nodeType === Node.TEXT_NODE ? (r.startContainer.textContent ?? "").slice(0, r.startOffset) : "";
+      r.insertNode(eq);
+      if (/\S$/.test(prev.replace(/\u200b/g, ""))) eq.before(document.createTextNode(" "));
+    } else {
+      const last = this.root.lastChild;
+      // Derriere une photo, un calcul ou une courbe : la ligne de son ancre
+      // est deja une ligne neuve.
+      const prev = last?.previousSibling;
+      const afterBlock = last?.nodeType === Node.TEXT_NODE && !(last.textContent ?? "").replace(/\u200b/g, "")
+        && prev instanceof HTMLElement && prev.classList.contains("doc-img");
+      if (last && last.nodeName === "BR") last.before(eq);
+      else if (afterBlock) last!.after(eq);
+      else {
+        if ((this.root.textContent ?? "").replace(/\u200b/g, "").trim() || this.root.querySelector(".eq, .doc-img")) this.root.append(el("br"));
+        this.root.append(eq);
+      }
+    }
+    if (eq.nextSibling?.nodeType !== Node.TEXT_NODE) eq.after(anchor());
+    this.caretAfter(eq);
+    this.emit();
+    return eq;
+  }
+
+  /**
+   * Descend un element pose en fin de texte sous `clientY` (bas de l'encre) :
+   * des sauts de ligne avant lui, pour ne jamais le poser sur l'ecriture.
+   */
+  pushBelow(node: HTMLElement, clientY: number): void {
+    let n = 0;
+    while (n < 80 && node.isConnected && node.getBoundingClientRect().top < clientY) {
+      node.before(el("br"));
+      n++;
+    }
+    if (n) this.emit();
+  }
+
+  /** Bloc vivant modifie (« Mettre à jour ») : redessine sur place. */
+  refreshLive(id: string): boolean {
+    const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+    const live = this.images?.live?.(id);
+    if (!fig || !live) return false;
+    const fresh = this.makeLive(id, live);
+    if (fig.classList.contains("selected")) this.selectImage(null);
+    fig.replaceWith(fresh);
+    return true;
   }
 
   /**

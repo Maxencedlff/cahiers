@@ -1,4 +1,5 @@
 import type { Block, Stroke } from "./types";
+import { isInTextBlock } from "./liveblock";
 import { dropStrokes, joinWords } from "./ink/words";
 
 /**
@@ -87,7 +88,8 @@ export class PageHistory {
  * image alors que le texte le reference toujours (photo « introuvable »).
  */
 export function restoreBlocks(current: Block[], snapshot: Block[]): Block[] {
-  const inText = (b: Block) => (b.type === "text" || b.type === "image") && !b.rect;
+  // Texte, photos, calculs et courbes poses dans le texte : a lui.
+  const inText = isInTextBlock;
   const kept = current.filter(inText);
   const ids = new Set(kept.map((b) => b.id));
   // Une ancienne photo flottante rangee depuis dans le texte garde son id :

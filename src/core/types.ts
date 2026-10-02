@@ -168,17 +168,33 @@ export interface PdfBlock extends BlockBase {
   annotations: Stroke[];
 }
 
+/** Mode d'angle d'un calcul (meme valeur que core/calc/engine). */
+export type BlockAngle = "RAD" | "DEG";
+
+/**
+ * Bloc vivant (section 2) : il garde l'expression, jamais une image. Pose
+ * dans le texte (sans rect), comme une photo : jeton `![](img:<id>)` du
+ * texte tape. Un ancien bloc avec rect y est range a l'ouverture.
+ */
 export interface CalcBlock extends BlockBase {
   type: "calc";
+  /** Saisie telle que tapee (« 1/(2*pi*2,2k*10n) »). */
   expr: string;
   result: string | number | null;
+  /** Mode d'angle du calcul : un nouveau calcul doit donner le meme resultat. Absent = RAD. */
+  angle?: BlockAngle;
 }
 
 export interface GraphBlock extends BlockBase {
   type: "graph";
   fn: string;
   domain: [number, number];
+  /** Fenetre verticale [ymin, ymax] fixee a la main. Absent = fenetre auto. */
   range?: [number, number];
+  /** sin(x) en degres ou en radians. Absent = RAD. */
+  angle?: BlockAngle;
+  /** Largeur dans le texte, en unites de page (comme ImageBlock.width). */
+  width?: number;
 }
 
 export interface LinkBlock extends BlockBase {

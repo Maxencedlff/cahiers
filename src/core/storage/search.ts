@@ -102,9 +102,9 @@ export function indexPage(page: Page): PageIndex {
         ...(b.created ? { created: b.created } : {}),
       });
     }
-    // Photo retiree du texte : le bloc reste (l'annulation de l'editeur
-    // peut la ramener), mais son OCR ne doit plus remonter.
-    if (b.type === "image" && !b.rect && !inText.has(b.id)) continue;
+    // Photo, calcul ou courbe retire du texte : le bloc reste (l'annulation
+    // de l'editeur peut le ramener), mais il ne doit plus remonter.
+    if ((b.type === "image" || b.type === "calc" || b.type === "graph") && !b.rect && !inText.has(b.id)) continue;
     if (b.type === "text") {
       const { text, colors } = plainOfText(b.content, b.color);
       if (text.trim()) blocks.push({ id: b.id, type: b.type, text, ...(colors ? { colors } : {}) });

@@ -7,6 +7,10 @@ import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock,
 } from "../core/types";
+import {
+  GRAPH_RATIO, applyCalcSpec, applyGraphSpec, graphWidth, isLiveBlock, liveLabel, orphanLiveIds,
+  type CalcSpec, type GraphSpec, type LiveBlock,
+} from "../core/liveblock";
 import { isFutureVersion } from "../core/types";
 import { dayLabel } from "../core/nav";
 import { uuid, nowIso } from "../core/id";
@@ -89,6 +93,12 @@ export interface PageViewHost {
   onConflictsChanged?: () => void;
   /** OCR de la plateforme (Windows), pour une image collee ou deposee. */
   ocr?: (dataUrl: string) => Promise<string>;
+  /**
+   * Appui sur un bloc vivant (calcul, courbe) : la calculatrice le rouvre,
+   * preremplie. `update` le recalcule et le redessine sur place ; false si
+   * le bloc n'est plus dans la page.
+   */
+  editLive?: (block: LiveBlock, update: (spec: CalcSpec | GraphSpec) => boolean) => void;
 }
 
 /**
@@ -746,6 +756,10 @@ export class PageView {
 
   private buildPage(n: number, page: Page, copy?: ConflictCopy): LoadedPage {
     const migrated = absorbTextBoxes(page.blocks as never[], uuid);
+    // Calculs et courbes retires du texte a la seance precedente (✕, le
+    // bloc restait pour « Annuler ») : oublies.
+    const orphans = new Set(orphanLiveIds(page.blocks, this.bodyText(page)?.content ?? ""));
+    if (orphans.size) page.blocks = page.blocks.filter((b) => !orphans.has(b.id));
     // Encre gommee sous l'A4 lors d'une seance precedente : la page se
     // rouvre a la taille de l'encre restante. Pas pendant la seance, ou la
     // feuille se replierait sous la gomme avant qu'on reecrive a la place.
@@ -754,6 +768,8 @@ export class PageView {
     const overlay = el("div", { class: "overlay" });
     const imageOf = (id: string) =>
       page.blocks.find((b): b is ImageBlock => b.type === "image" && b.id === id);
+    const liveOf = (id: string) =>
+      page.blocks.find((b): b is LiveBlock => isLiveBlock(b) && b.id === id && !b.rect);
     const doc = new TextDoc(this.bodyText(page)?.content ?? "", (content) => {
       this.setBodyText(loaded, content);
     }, {
@@ -769,12 +785,25 @@ export class PageView {
       },
       recrop: (id) => void this.recropImage(loaded, id),
       resized: (id, width) => {
-        const b = imageOf(id);
-        if (!b) return;
+        const b = imageOf(id) ?? liveOf(id);
+        if (!b || b.type === "calc") return;
         b.width = width;
+        // Courbe retaillee : redessinee a sa nouvelle largeur (texte net).
+        if (b.type === "graph") loaded.doc.refreshLive(id);
         this.queueSave(loaded);
       },
       addFile: (file) => this.addImageFile(loaded, file),
+      live: (id) => {
+        const b = liveOf(id);
+        if (!b) return null;
+        const { node, ready } = this.renderLive(b);
+        return {
+          node, ready,
+          label: liveLabel(b),
+          ...(b.type === "graph" ? { width: graphWidth(b, PAGE_W) } : {}),
+        };
+      },
+      openLive: (id) => this.openLive(loaded, id),
     });
     const readOnly = isFutureVersion(page) || this.readOnly || !!copy;
     const sheet = el("div", { class: `sheet${readOnly ? " readonly" : ""}` }, canvas, doc.root, overlay);
@@ -828,7 +857,7 @@ export class PageView {
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
-    if (migrated && !readOnly) this.queueSave(loaded);
+    if ((migrated || orphans.size) && !readOnly) this.queueSave(loaded);
     if (!readOnly) this.resumePending(loaded);
     return loaded;
   }
@@ -919,8 +948,9 @@ export class PageView {
    * rangee ne decale pas la position des suivantes.
    */
   private adoptFloatingImages(loaded: LoadedPage): void {
+    // Anciens calculs et courbes flottants aussi : ils recouvraient le texte.
     const floating = loaded.page.blocks
-      .filter((b): b is ImageBlock => b.type === "image" && !!b.rect)
+      .filter((b): b is ImageBlock | LiveBlock => (b.type === "image" || isLiveBlock(b)) && !!b.rect)
       .sort((a, b) => b.rect!.y - a.rect!.y);
     if (!floating.length) return;
     const sheet = loaded.sheet.getBoundingClientRect();
@@ -930,7 +960,8 @@ export class PageView {
     loaded.overlay.style.display = "none";
     for (const b of floating) {
       const r = b.rect!;
-      b.width = Math.max(120, Math.min(PAGE_W - 128, Math.round(r.w)));
+      if (b.type === "image") b.width = Math.max(120, Math.min(PAGE_W - 128, Math.round(r.w)));
+      if (b.type === "graph") b.width = graphWidth(b, PAGE_W);
       delete b.rect;
       loaded.doc.adoptImage(b.id, sheet.left + 70 * k, sheet.top + (r.y + 4) * k);
     }
@@ -1495,7 +1526,6 @@ export class PageView {
         ink.pending = false;
       }
     }
-    this.paintStrokes(loaded);
 
     const box = unionBounds(inside.map((s) => strokeBounds(s, 4)));
     const id = uuid();
@@ -1505,6 +1535,11 @@ export class PageView {
       ? { id, type: "math", mode: "math", strokes: inside, latex: null, pending: true, rect: box }
       : { id, type: "ink", mode: "raw", strokes: inside, recognized: null, pending: true, rect: box };
     loaded.page.blocks.push(block);
+    // Traits repeints APRES l'ajout du bloc : peints avant, ils n'etaient
+    // plus dans le fond de page ni encore dans la zone, et l'encre de la
+    // zone disparaissait jusqu'au prochain trait (sans cles MyScript, elle
+    // restait invisible sous le cadre « clés MyScript manquantes »).
+    this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
 
@@ -1648,19 +1683,12 @@ export class PageView {
         }
         return place(box, block.rect ?? { x: 40, y: 40, w: PAGE_W - 80, h: 60 });
       }
-      case "calc": {
-        const box = el("div", { class: "block-box math" },
-          el("span", { class: "tag" }, "calcul"),
-          renderTex(`${safeTex(block.expr)} = ${safeTex(String(block.result ?? ""))}`),
-        );
-        return place(box, block.rect);
-      }
+      case "calc":
       case "graph": {
-        const box = el("div", { class: "block-box math" }, el("span", { class: "tag" }, "courbe"));
-        const canvas = el("canvas");
-        box.append(canvas);
-        queueMicrotask(() => drawMini(canvas, block.fn, block.domain));
-        return place(box, block.rect);
+        // Pose dans le texte : c'est TextDoc qui l'affiche. Un ancien bloc
+        // flottant (rect) y est range au premier affichage (adoptFloatingImages).
+        if (!block.rect) return null;
+        return place(el("div", { class: "block-box" }, this.renderLive(block).node), block.rect);
       }
       case "flag": {
         const said = block.context || block.note;
@@ -1919,6 +1947,136 @@ export class PageView {
 
   private activePage(): LoadedPage | undefined {
     return this.list.find((p) => p.number === this.current) ?? this.list[0];
+  }
+
+  /* ---------------- blocs vivants (calculatrice) ---------------- */
+
+  /**
+   * Rendu d'un bloc vivant : formule relue par le moteur (toLatex) pour un
+   * calcul, trace gradue pour une courbe (meme rendu et meme fenetre que
+   * l'onglet Courbes, drawPlot). Le trace est fait en unites de page (x2) :
+   * il suit le zoom comme le texte. mathjs est charge a la demande.
+   */
+  private renderLive(b: LiveBlock): { node: HTMLElement; ready: Promise<void> } {
+    if (b.type === "calc") {
+      const node = el("span", { class: "live-calc" }, `${b.expr} = ${b.result ?? ""}`);
+      const ready = import("../core/calc/live").then(({ calcTex }) => {
+        node.replaceChildren(renderTex(calcTex(b.expr, b.result)));
+        if (b.angle === "DEG") node.append(el("span", { class: "live-tag", title: "Calculé en degrés" }, "DEG"));
+      }).catch(() => undefined);
+      return { node, ready };
+    }
+    const W = graphWidth(b, PAGE_W), H = Math.round(W * GRAPH_RATIO);
+    const title = el("div", { class: "live-graph-title" }, `y = ${b.fn}`);
+    const canvas = el("canvas");
+    canvas.width = W * 2;
+    canvas.height = H * 2;
+    const node = el("div", { class: "live-graph" }, title, canvas);
+    const ready = Promise.all([import("../core/calc/plot"), import("./plotdraw"), import("../core/calc/live")])
+      .then(([plot, draw, live]) => {
+        title.replaceChildren(renderTex(live.graphTex(b.fn)));
+        if (b.angle === "DEG") title.append(el("span", { class: "live-tag", title: "x en degrés" }, "DEG"));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(2, 0, 0, 2, 0, 0);
+        const p = plot.samplePlot(b.fn, b.domain[0], b.domain[1], 500, "x", b.angle);
+        if (!p.ok || !p.samples) {
+          ctx.fillStyle = "#a51b1b";
+          ctx.font = "16px system-ui, sans-serif";
+          ctx.fillText(p.message ?? "expression invalide", 10, 24);
+          return;
+        }
+        const win = plot.plotWindow(p.samples, b.range);
+        draw.drawPlot(ctx, W, H, p.samples, { from: b.domain[0], to: b.domain[1], ...win }, { font: 14, line: 2.2 });
+      }).catch(() => undefined);
+    return { node, ready };
+  }
+
+  /** La page ecrite qui porte ce bloc (la vue a pu la reconstruire depuis l'appui). */
+  private holderOf(loaded: LoadedPage, id: string): { at: LoadedPage; block: LiveBlock } | null {
+    const pages = [loaded, ...this.list.filter((p) => p.page.id === loaded.page.id && p !== loaded)];
+    for (const at of pages) {
+      if (at.dead || at.copy) continue;
+      const block = at.page.blocks.find((b): b is LiveBlock => isLiveBlock(b) && b.id === id);
+      if (block && at.doc.root.querySelector(`.doc-img[data-id="${CSS.escape(id)}"]`)) return { at, block };
+    }
+    return null;
+  }
+
+  /** Appui sur un calcul ou une courbe : la calculatrice le rouvre (section 2). */
+  private openLive(loaded: LoadedPage, id: string): void {
+    const found = this.holderOf(loaded, id);
+    if (!found || !this.host.editLive) return;
+    if (found.at.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
+    this.host.editLive(found.block, (spec) => this.updateLive(loaded, id, spec));
+  }
+
+  /** « Mettre à jour » : le bloc recalcule et se redessine a sa place. */
+  private updateLive(loaded: LoadedPage, id: string, spec: CalcSpec | GraphSpec): boolean {
+    const found = this.holderOf(loaded, id);
+    if (!found) { toast("Ce bloc n'est plus dans la page : envoie-le à nouveau", "warn", 5000); return false; }
+    const { at, block } = found;
+    if (at.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
+    const changed = block.type === "calc" && "expr" in spec ? applyCalcSpec(block, spec)
+      : block.type === "graph" && "fn" in spec ? applyGraphSpec(block, spec) : false;
+    if (!changed) return true;
+    at.doc.refreshLive(id);
+    this.fitSheet(at);
+    this.queueSave(at);
+    return true;
+  }
+
+  /**
+   * Calcul ou courbe envoye par la calculatrice : dans la page en vue, au
+   * curseur du texte s'il y en a un, sinon sous le dernier contenu (texte
+   * et encre). Dans le texte, il ne recouvre jamais rien.
+   */
+  insertLive(block: LiveBlock): boolean {
+    const loaded = this.activePage();
+    if (!loaded) return false;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
+    loaded.page.blocks.push(block);
+    const atCaret = loaded.doc.hasCaret();
+    const fig = loaded.doc.insertLive(block.id, atCaret);
+    if (!atCaret) this.belowInk(loaded, fig);
+    this.fitSheet(loaded);
+    fig.scrollIntoView({ block: "nearest" });
+    toast(block.type === "graph" ? "Courbe posée dans la page : un appui la rouvre" : "Calcul posé dans la page : un appui le rouvre");
+    return true;
+  }
+
+  /**
+   * Resultat des onglets Matrices, Résoudre, Littéral : une formule du texte
+   * (KaTeX, editable comme les autres), au curseur ou sous le dernier contenu.
+   */
+  insertFormula(latex: string): boolean {
+    const loaded = this.activePage();
+    if (!loaded) return false;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
+    const atCaret = loaded.doc.hasCaret();
+    const eq = loaded.doc.insertFormula(latex, atCaret);
+    if (!atCaret) this.belowInk(loaded, eq);
+    this.fitSheet(loaded);
+    eq.scrollIntoView({ block: "nearest" });
+    toast("Résultat posé dans la page");
+    return true;
+  }
+
+  /** Pose en fin de texte : descendu sous l'encre la plus basse, s'il y en a dessous. */
+  private belowInk(loaded: LoadedPage, node: HTMLElement): void {
+    let bottom = 0;
+    for (const b of loaded.page.blocks) {
+      if (b.type === "flag") continue;
+      if (b.rect) bottom = Math.max(bottom, b.rect.y + b.rect.h);
+      const strokes = b.type === "ink" || b.type === "math" ? b.strokes : [];
+      for (const st of strokes) {
+        const sb = strokeBounds(st);
+        bottom = Math.max(bottom, sb.y + sb.h);
+      }
+    }
+    if (!bottom) return;
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    loaded.doc.pushBelow(node, loaded.sheet.getBoundingClientRect().top + (bottom + 12) * k);
   }
 
   addBlock(block: Block, loaded = this.activePage()): void {
@@ -3027,52 +3185,6 @@ function throttle<T extends (...args: any[]) => void>(fn: T, ms: number): T {
       timer = setTimeout(() => { timer = null; last = performance.now(); fn(...args); }, ms - (now - last));
     }
   }) as T;
-}
-
-function safeTex(s: string): string {
-  return s.replace(/[\\{}$&#^_%~]/g, (c) => `\\${c}`);
-}
-
-/** Apercu de courbe dans un bloc graph. Le bloc reste vivant : il stocke
- *  l'expression, jamais une image. */
-function drawMini(canvas: HTMLCanvasElement, fn: string, domain: [number, number]): void {
-  const parent = canvas.parentElement;
-  const w = Math.max(160, (parent?.clientWidth ?? 240) - 8);
-  const h = Math.round(w * 0.42);
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = w * dpr; canvas.height = h * dpr;
-  canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-
-  void import("../core/calc/plot").then(({ samplePlot }) => {
-    const plot = samplePlot(fn, domain[0], domain[1], 300);
-    if (!plot.ok || !plot.samples) {
-      ctx.fillStyle = "#a51b1b";
-      ctx.font = "12px system-ui";
-      ctx.fillText("expression invalide", 6, 16);
-      return;
-    }
-    let yMin = plot.yMin!, yMax = plot.yMax!;
-    if (yMin === yMax) { yMin -= 1; yMax += 1; }
-    const X = (x: number) => ((x - domain[0]) / (domain[1] - domain[0])) * w;
-    const Y = (y: number) => h - ((y - yMin) / (yMax - yMin)) * h;
-    ctx.strokeStyle = "#c9d2e0";
-    if (0 >= yMin && 0 <= yMax) {
-      ctx.beginPath(); ctx.moveTo(0, Y(0)); ctx.lineTo(w, Y(0)); ctx.stroke();
-    }
-    ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    let pen = false;
-    for (const s of plot.samples) {
-      if (s.y === null) { pen = false; continue; }
-      const px = X(s.x), py = Y(s.y);
-      if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
-    }
-    ctx.stroke();
-  });
 }
 
 /** Clone statique pour l'impression : les canvas gardent leur dessin. */

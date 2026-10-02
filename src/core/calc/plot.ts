@@ -1,5 +1,5 @@
 import { create, all } from "mathjs";
-import { normalizeInput, humanError } from "./engine";
+import { normalizeInput, humanError, angleScope, type AngleMode } from "./engine";
 import { numericRoots } from "./solve";
 import { findSingularity } from "./integrate";
 
@@ -23,11 +23,13 @@ export interface PlotOutcome {
 /**
  * Echantillonnage. Les points non definis valent null pour que le rendu
  * coupe le trait au lieu de relier les deux cotes d'une asymptote.
+ * `angle` : en DEG, sin(x) prend x en degres, comme dans l'onglet Calcul.
  */
 export function samplePlot(
-  fn: string, from: number, to: number, count = 600, variable = "x",
+  fn: string, from: number, to: number, count = 600, variable = "x", angle?: AngleMode,
 ): PlotOutcome {
-  let compiled: { evaluate(scope: Record<string, number>): unknown };
+  const scope = angleScope(angle);
+  let compiled: { evaluate(scope: Record<string, unknown>): unknown };
   try {
     compiled = math.compile(normalizeInput(stripY(fn))) as typeof compiled;
   } catch (e) {
@@ -42,7 +44,7 @@ export function samplePlot(
     const x = from + i * step;
     let y: number | null;
     try {
-      const raw = compiled.evaluate({ [variable]: x });
+      const raw = compiled.evaluate({ ...scope, [variable]: x });
       const num = typeof raw === "number" ? raw : Number(raw);
       y = Number.isFinite(num) ? num : null;
     } catch {
@@ -71,16 +73,17 @@ export interface TableRow { x: number; y: string }
 
 /** Tableau de valeurs. */
 export function valueTable(
-  fn: string, from: number, to: number, step: number, variable = "x",
+  fn: string, from: number, to: number, step: number, variable = "x", angle?: AngleMode,
 ): TableRow[] {
-  const compiled = math.compile(normalizeInput(stripY(fn))) as { evaluate(s: Record<string, number>): unknown };
+  const scope = angleScope(angle);
+  const compiled = math.compile(normalizeInput(stripY(fn))) as { evaluate(s: Record<string, unknown>): unknown };
   const rows: TableRow[] = [];
   const count = Math.min(Math.floor((to - from) / step) + 1, 500);
   for (let i = 0; i < count; i++) {
     const x = from + i * step;
     let y: string;
     try {
-      const v = compiled.evaluate({ [variable]: x });
+      const v = compiled.evaluate({ ...scope, [variable]: x });
       y = Number.isFinite(Number(v)) ? String(Math.round(Number(v) * 1e6) / 1e6) : "non défini";
     } catch {
       y = "non défini";
@@ -91,9 +94,9 @@ export function valueTable(
 }
 
 /** Racines visibles dans la fenetre courante. */
-export function rootsInWindow(fn: string, from: number, to: number, variable = "x"): number[] {
+export function rootsInWindow(fn: string, from: number, to: number, variable = "x", angle?: AngleMode): number[] {
   try {
-    return numericRoots(stripY(fn), variable, from, to, 2000);
+    return numericRoots(stripY(fn), variable, from, to, 2000, angleScope(angle));
   } catch {
     return [];
   }
@@ -105,14 +108,15 @@ export function rootsInWindow(fn: string, from: number, to: number, variable = "
  * un : la fonction doit rester bornee de part et d'autre (findSingularity).
  */
 export function extremaInWindow(
-  fn: string, from: number, to: number, variable = "x", count = 800,
+  fn: string, from: number, to: number, variable = "x", count = 800, angle?: AngleMode,
 ): { x: number; y: number; kind: "max" | "min" }[] {
-  const plot = samplePlot(fn, from, to, count, variable);
+  const plot = samplePlot(fn, from, to, count, variable, angle);
+  const scope = angleScope(angle);
   if (!plot.ok || !plot.samples) return [];
   let f: (x: number) => number;
   try {
     const compiled = math.compile(normalizeInput(stripY(fn)));
-    f = (x: number) => { try { return Number(compiled.evaluate({ [variable]: x })); } catch { return NaN; } };
+    f = (x: number) => { try { return Number(compiled.evaluate({ ...scope, [variable]: x })); } catch { return NaN; } };
   } catch {
     return [];
   }
@@ -152,6 +156,33 @@ export function autoWindow(samples: Sample[]): { yMin: number; yMax: number } {
   }
   const pad = (hi - lo) * 0.08;
   return { yMin: lo - pad, yMax: hi + pad };
+}
+
+/**
+ * Fenetre verticale fixee a la main (GraphBlock.range, champs ymin / ymax
+ * de l'onglet Courbes) : utilisee si elle est valable, sinon fenetre auto.
+ */
+export function plotWindow(samples: Sample[], range?: readonly [number, number] | null): { yMin: number; yMax: number } {
+  if (isRange(range)) return { yMin: range[0], yMax: range[1] };
+  return autoWindow(samples);
+}
+
+/** Bornes finies et dans l'ordre. */
+export function isRange(r: readonly number[] | null | undefined): r is readonly [number, number] {
+  return !!r && r.length === 2 && Number.isFinite(r[0]) && Number.isFinite(r[1]) && r[0] < r[1];
+}
+
+/**
+ * Saisie des champs ymin / ymax : deux nombres lus (null = champ vide ou
+ * illisible). Les deux vides = fenetre auto (undefined) ; un seul rempli ou
+ * bornes inversees = erreur, la fenetre auto reste affichee.
+ */
+export function readRange(lo: number | null, hi: number | null, loEmpty: boolean, hiEmpty: boolean):
+  { range?: [number, number]; error?: string } {
+  if (loEmpty && hiEmpty) return {};
+  if (lo === null || hi === null) return { error: "ymin et ymax : deux nombres, ou les deux vides (auto)" };
+  if (!(lo < hi)) return { error: "ymin doit être plus petit que ymax" };
+  return { range: [lo, hi] };
 }
 
 /** Graduations rondes (1, 2 ou 5 × 10^n) entre min et max. */

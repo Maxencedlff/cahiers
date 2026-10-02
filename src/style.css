@@ -360,6 +360,12 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .calc-lu { min-height: 0; padding: 4px 10px; font-size: 13px; }
 .calc-body .warn { color: #9a5b00; }
 .calc-send { align-self: flex-end; }
+/* Bloc de la page rouvert : « Envoyer » devient « Mettre à jour ». */
+.calc-editing {
+  display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 10px; border-radius: 8px;
+  background: #fff7e6; border: 1px solid #f0c36d; color: #7a4b00; font-size: 13px;
+}
+.calc-angle { min-width: 52px; font-weight: 600; }
 
 .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
 /* Touches de 46 px, utilisables au doigt (section 7). */
@@ -689,6 +695,25 @@ kbd {
   min-width: 44px; min-height: 44px; padding: 0; border-radius: 6px; font-size: 18px; cursor: pointer;
 }
 .text-doc .doc-img-bar button:last-child { color: #b42318; }
+/* Blocs vivants dans le texte (calcul, courbe) : comme une photo, un appui
+   les rouvre dans la calculatrice. Le calcul suit la largeur de sa formule. */
+.text-doc .doc-img.live { cursor: pointer; }
+.text-doc .doc-img.live-fit { width: max-content; max-width: 100%; }
+.text-doc .doc-img.live:hover { outline-color: #b9c9ee; }
+/* Calcul : la mini-barre passe dessous, elle cachait le resultat. */
+.text-doc .doc-img.live-fit .doc-img-bar { top: calc(100% + 4px); right: auto; left: 0; z-index: 3; }
+.live-calc {
+  display: inline-flex; align-items: center; gap: .5em;
+  padding: .15em .5em; border-left: 3px solid #93a8d8; background: #f6f8fd; border-radius: 4px;
+}
+.live-graph { display: block; border: 1px solid #dbe2ee; border-radius: 6px; background: #fff; padding: .2em .3em; }
+.live-graph canvas { display: block; width: 100%; height: auto; }
+.live-graph-title { font-size: .85em; padding: 0 .2em; display: flex; align-items: center; gap: .5em; }
+.live-tag {
+  font: 600 calc(11px * var(--k, 1)) / 1.4 system-ui, sans-serif; color: #6b7487;
+  border: 1px solid #d5dbe6; border-radius: 4px; padding: 0 .4em;
+}
+.block-box .live-graph { width: 100%; }
 /* Endroit ou la photo deplacee va se poser. */
 .doc-img-drop {
   position: fixed; width: 3px; border-radius: 2px; background: var(--accent);

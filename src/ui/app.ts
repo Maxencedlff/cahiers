@@ -9,6 +9,7 @@ import type { Calculator } from "./calculator/index";
 import { PALETTE, NEUTRAL_INK, labelOf, shortcutOf } from "../core/palette";
 import type { ColorKey, InkColor, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
+import { calcSpecOf, graphSpecOf, type CalcSpec, type GraphSpec } from "../core/liveblock";
 import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
 import { Positions } from "../core/position";
 import { NavHistory, dayLabel, moveItem, pickSplitDivider, type NavSpot } from "../core/nav";
@@ -279,20 +280,19 @@ export class App {
             this.main.querySelector(".side-calc")
               ?.classList.toggle("closed", !visible || !this.calculator?.isDocked);
           },
-          insertGraph: (fn, domain) => {
-            const view = this.focusedTab()?.view;
-            view?.addBlock({
-              id: uuid(), type: "graph", fn, domain,
-              rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 200 },
-            });
+          // Blocs vivants poses dans le texte de la page en vue du panneau
+          // vise : au curseur du texte, sinon sous le dernier contenu.
+          insertGraph: (g) => {
+            const block = { id: uuid(), type: "graph" as const, fn: g.fn, domain: g.domain };
+            this.focusedTab()?.view?.insertLive(Object.assign(block,
+              g.range ? { range: g.range } : {}, g.angle === "DEG" ? { angle: "DEG" as const } : {}));
           },
-          insertCalc: (expr, result) => {
-            const view = this.focusedTab()?.view;
-            view?.addBlock({
-              id: uuid(), type: "calc", expr, result,
-              rect: { x: 80, y: view.nextFreeY(560), w: 420, h: 46 },
-            });
+          insertCalc: (c) => {
+            const block = { id: uuid(), type: "calc" as const, expr: c.expr, result: c.result };
+            this.focusedTab()?.view?.insertLive(Object.assign(block, c.angle === "DEG" ? { angle: "DEG" as const } : {}));
           },
+          // Matrices, Résoudre, Littéral : une formule du texte, éditable.
+          onSend: (_expr, _result, latex) => { this.focusedTab()?.view?.insertFormula(latex); },
         });
         return this.calculator;
       });
@@ -632,6 +632,12 @@ export class App {
       rememberPage: (nb, d, n) => this.positions.record(nb, d, n),
       onConflictsChanged: () => this.paintConflictBadges(),
       ...(this.ocr ? { ocr: this.ocr } : {}),
+      // Appui sur un calcul ou une courbe de la page : la calculatrice le rouvre.
+      editLive: (block, update) => void this.loadCalculator().then((calc) => {
+        this.placeCalculator(calc);
+        if (block.type === "calc") calc.editCalc(calcSpecOf(block), (c: CalcSpec) => update(c));
+        else calc.editGraph(graphSpecOf(block), (g: GraphSpec) => update(g));
+      }),
     }, tab.notebook, tab.divider);
     await view.setNotice(this.noticeFor(tab.notebook));
     // Une vue quittee en echec sur ce meme intercalaire : la nouvelle reprend
@@ -1848,6 +1854,10 @@ export class App {
       case "menu": void (this.screen === "menu" ? this.backToWork() : this.showMenu()); return true;
       case "search": void this.showSearch(); return true;
       case "calc": void this.toggleCalculator(); return true;
+      case "sendCalc":
+        if (!this.calculator) toast("Rien à envoyer : ouvre la calculatrice (Ctrl+L)", "warn");
+        else this.calculator.sendLast();
+        return true;
       // Dans le texte, Ctrl+Z appartient au texte (son propre historique).
       case "undo": if (ctx.typing) return false; view?.undo(); return true;
       // Copier/coller de l'encre : seulement hors du texte (le texte garde

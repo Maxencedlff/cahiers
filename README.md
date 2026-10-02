@@ -270,6 +270,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+M` | menu, et retour au meme endroit |
 | `Ctrl+K` | recherche globale |
 | `Ctrl+L` | calculatrice |
+| `Ctrl+Maj+L` | envoyer le dernier resultat de la calculatrice dans la page (au curseur du texte, sinon sous le dernier contenu) |
 | `Alt+Maj+P` | photos du tableau (`Alt+P` seul = modele Puissance) |
 | `Ctrl+R` | conversion de l'ecriture : au fil de la plume ou sur zone |
 | `Ctrl+D` | doigt : ecrire ou naviguer (avec un stylet : l'oublier) |
@@ -328,4 +329,15 @@ Calculatrice, conventions de saisie (clavier francais) :
 - un resultat douteux n'est jamais affiche comme exact : integrale a travers
   un pole refusee, poles de `tan` exclus des racines, `tan(90°)` en erreur,
   residus `sin(pi)` et `0.1+0.2-0.3` ramenes a 0 (seuil relatif, jamais
-  absolu : 3 fF reste 3e-15).
+  absolu : 3 fF reste 3e-15) ;
+- « Envoyer dans la page » (ou `Ctrl+Maj+L`) : le resultat se pose dans la
+  page en vue du panneau vise, au curseur du texte tape s'il y en a un, sinon
+  sous le dernier contenu (texte et encre). Calcul et Courbes donnent des
+  blocs vivants poses dans le texte comme une photo (deplacer, monter,
+  descendre, ✕ avec Annuler) : un appui rouvre la calculatrice preremplie,
+  « Mettre a jour » recalcule et redessine sur place. Le bloc garde
+  l'expression, le mode DEG/RAD et, pour une courbe, la fenetre ymin/ymax
+  (vide = auto). Matrices, Resoudre et Litteral donnent une formule du texte,
+  editable comme les autres ;
+- l'onglet Courbes suit le mode d'angle (bouton RAD/DEG a cote de la
+  fonction) : en DEG, `sin(x)` sur [0 ; 360] fait une periode.

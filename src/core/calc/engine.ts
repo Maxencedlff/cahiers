@@ -127,6 +127,17 @@ function trigScope(m: MathJsInstance, mode: AngleMode): Record<string, unknown> 
   };
 }
 
+/**
+ * Fonctions trigonometriques d'un mode d'angle, a passer dans le scope d'une
+ * expression compilee hors de CalcEngine (courbes, racines). RAD : rien,
+ * mathjs travaille deja en radians.
+ */
+export function angleScope(mode: AngleMode | undefined): Record<string, unknown> {
+  if (mode !== "DEG") return {};
+  const { __add: _a, __sub: _s, ...trig } = trigScope(math, "DEG");
+  return trig;
+}
+
 /** Remplace les + et - binaires par les versions qui detectent l'annulation. */
 function guardSums(node: MathNode): MathNode {
   const mapped = node.map((child: MathNode) => guardSums(child));

@@ -15,7 +15,7 @@ export type Command =
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
-  | "copy" | "cut" | "paste";
+  | "copy" | "cut" | "paste" | "sendCalc";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -63,6 +63,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("y", false, "redo", "Rétablir", "Pendant le cours"),
   ctrl("z", true, "redo", "Rétablir", "Pendant le cours"),
   ctrl("l", false, "calc", "Calculatrice", "Pendant le cours"),
+  ctrl("l", true, "sendCalc", "Envoyer le dernier résultat de la calculatrice dans la page (au curseur du texte, sinon en bas)", "Pendant le cours"),
   ctrl("k", false, "search", "Recherche dans tous les cahiers", "Pendant le cours"),
   { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),

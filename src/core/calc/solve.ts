@@ -380,15 +380,18 @@ export function fmt(v: number): string {
  * n'est pas polynomiale. Un changement de signe n'est une racine que si f
  * s'y annule vraiment : sinon c'est un pole (tan en pi/2), rejete.
  */
-export function numericRoots(expr: string, v = "x", from = -100, to = 100, steps = 4000): number[] {
-  return numericSolve(expr, v, from, to, steps).roots;
+/** `scope` : fonctions ajoutees (trigonometrie en degres, voir angleScope). */
+export function numericRoots(
+  expr: string, v = "x", from = -100, to = 100, steps = 4000, scope: Record<string, unknown> = {},
+): number[] {
+  return numericSolve(expr, v, from, to, steps, scope).roots;
 }
 
 export function numericSolve(
-  expr: string, v = "x", from = -100, to = 100, steps = 4000,
+  expr: string, v = "x", from = -100, to = 100, steps = 4000, scope: Record<string, unknown> = {},
 ): { roots: number[]; identity: boolean } {
   const f = math.compile(normalizeInput(expr));
-  const at = (x: number) => Number(f.evaluate({ [v]: x }));
+  const at = (x: number) => Number(f.evaluate({ ...scope, [v]: x }));
   const roots: number[] = [];
   const h = (to - from) / steps;
   let prevX = from;

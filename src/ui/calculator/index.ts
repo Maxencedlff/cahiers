@@ -6,8 +6,10 @@ import { antiderivative, definiteIntegral } from "../../core/calc/integrate";
 import { solveEquation, solveSystem, type Root } from "../../core/calc/solve";
 import { applyMatrixOp, multiply, addMatrices, readMatrix, toLatex, type MatrixOutcome } from "../../core/calc/matrix";
 import {
-  samplePlot, valueTable, rootsInWindow, extremaInWindow, stripY, autoWindow, niceTicks, tickLabel,
+  samplePlot, valueTable, rootsInWindow, extremaInWindow, stripY, plotWindow, readRange,
 } from "../../core/calc/plot";
+import type { CalcSpec, GraphSpec } from "../../core/liveblock";
+import { drawPlot } from "../plotdraw";
 import {
   insertText, deleteBack, deleteForward, moveCaret, HistoryRecall, type EditState,
 } from "../../core/calc/screen";
@@ -33,10 +35,10 @@ export interface CalcSendMeta {
 }
 
 export interface CalculatorHost {
-  /** Insere un bloc graph vivant dans la page courante. */
-  insertGraph: (fn: string, domain: [number, number]) => void;
-  /** Insere un bloc calc vivant dans la page courante. */
-  insertCalc: (expr: string, result: string) => void;
+  /** Insere un bloc graph vivant dans la page courante (au curseur du texte, sinon en bas). */
+  insertGraph: (g: GraphSpec) => void;
+  /** Insere un bloc calc vivant dans la page courante (au curseur du texte, sinon en bas). */
+  insertCalc: (c: CalcSpec) => void;
   canInsert: () => boolean;
   /** Ouverture ou fermeture, pour replier la colonne qui l'accueille. */
   onVisibility?: (visible: boolean) => void;
@@ -52,7 +54,7 @@ export interface CalculatorHost {
 
 /** Saisies conservees par onglet : changer d'onglet ne perd rien. */
 interface TabState {
-  courbes: { fn: string; from: string; to: string };
+  courbes: { fn: string; from: string; to: string; ymin: string; ymax: string };
   matrices: { a: string; b: string };
   resoudre: { eq: string; sys: string };
   litteral: { expr: string; v: string; subst: string; a: string; b: string };
@@ -69,8 +71,19 @@ export class Calculator {
   private deadPending = false;
   private body: HTMLElement;
   private visible = false;
+  /**
+   * Bloc de la page rouvert par un appui (section 2, blocs vivants) :
+   * « Envoyer » devient « Mettre à jour », qui le recalcule sur place.
+   * `update` rend false si le bloc n'existe plus.
+   */
+  private editing:
+    | { kind: "calc"; update: (c: CalcSpec) => boolean }
+    | { kind: "graph"; update: (g: GraphSpec) => boolean }
+    | null = null;
+  /** Envoi du dernier resultat de l'onglet affiche (Ctrl+Maj+L), s'il y en a un. */
+  private lastSend: (() => void) | null = null;
   private state: TabState = {
-    courbes: { fn: "", from: "-8", to: "8" },
+    courbes: { fn: "", from: "-8", to: "8", ymin: "", ymax: "" },
     matrices: { a: "", b: "" },
     resoudre: { eq: "", sys: "" },
     litteral: { expr: "", v: "x", subst: "", a: "0", b: "1" },
@@ -249,6 +262,8 @@ export class Calculator {
     if (this.root.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     this.visible = false;
     this.armed = false;
+    // Fermee : le bloc rouvert n'est plus en cours de modification.
+    if (this.editing) { this.editing = null; this.render(); }
     this.root.style.display = "none";
     this.host.onVisibility?.(false);
   }
@@ -324,6 +339,7 @@ export class Calculator {
   private render() {
     this.body.replaceChildren();
     this.repaint = () => {};
+    this.lastSend = null;
     switch (this.tab) {
       case "calcul":   this.renderCalcul(); break;
       case "courbes":  this.renderCourbes(); break;
@@ -337,13 +353,120 @@ export class Calculator {
   private sendButton(kind: string, expr: string, result: string, latex: string): HTMLElement | null {
     const send = this.host.onSend;
     if (!send) return null;
-    return el("button", {
-      class: "calc-send",
-      onclick: () => {
-        if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
-        send(expr, result, latex, { tab: this.tab, kind, angle: this.engine.angleMode });
-      },
-    }, "Envoyer dans la page");
+    const tab = this.tab;
+    const run = () => {
+      if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
+      send(expr, result, latex, { tab, kind, angle: this.engine.angleMode });
+    };
+    this.lastSend = run;
+    return el("button", { class: "calc-send", title: "Envoyer dans la page (Ctrl+Maj+L)", onclick: run }, "Envoyer dans la page");
+  }
+
+  /* ---------------- blocs vivants de la page ---------------- */
+
+  /**
+   * Appui sur un bloc calcul de la page : la calculatrice s'ouvre sur
+   * l'onglet Calcul, saisie preremplie, dans le mode d'angle du bloc.
+   */
+  editCalc(spec: CalcSpec, update: (c: CalcSpec) => boolean): void {
+    this.editing = { kind: "calc", update };
+    this.engine.angleMode = spec.angle;
+    this.edit = { input: spec.expr, caret: spec.expr.length };
+    this.lastError = null;
+    this.recall.reset();
+    this.second = false;
+    this.show(true);
+    this.selectTab("calcul");
+  }
+
+  /** Appui sur un bloc courbe : onglet Courbes prerempli (fonction, bornes, fenetre, angle). */
+  editGraph(spec: GraphSpec, update: (g: GraphSpec) => boolean): void {
+    this.editing = { kind: "graph", update };
+    this.engine.angleMode = spec.angle;
+    const n = (v: number) => String(round4(v)).replace(".", ",");
+    this.state.courbes = {
+      fn: spec.fn, from: n(spec.domain[0]), to: n(spec.domain[1]),
+      ymin: spec.range ? n(spec.range[0]) : "", ymax: spec.range ? n(spec.range[1]) : "",
+    };
+    this.show();
+    this.selectTab("courbes");
+  }
+
+  /** Bandeau du bloc en cours de modification, avec « Annuler ». */
+  private editBar(kind: "calc" | "graph"): HTMLElement | null {
+    if (this.editing?.kind !== kind) return null;
+    return el("div", { class: "calc-editing" },
+      el("span", {}, kind === "calc" ? "Modification du calcul de la page" : "Modification de la courbe de la page"),
+      el("div", { class: "spacer" }),
+      el("button", { title: "Garder le bloc tel quel", onclick: () => { this.editing = null; this.render(); } }, "Annuler"),
+    );
+  }
+
+  /** Ctrl+Maj+L : envoie le dernier resultat de l'onglet affiche. */
+  sendLast(): void {
+    if (this.tab === "calcul") { this.sendCalc(); return; }
+    if (this.tab === "courbes") { this.sendGraph(); return; }
+    if (this.lastSend) { this.lastSend(); return; }
+    toast("Rien à envoyer : calcule d'abord un résultat", "warn");
+  }
+
+  /** Onglet Calcul : bloc calc vivant (ou mise a jour du bloc rouvert). */
+  private sendCalc(): void {
+    if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
+    // Saisie pas encore calculee : elle l'est d'abord.
+    if (this.edit.input.trim()) this.compute();
+    if (this.lastError) { toast(this.lastError, "warn"); return; }
+    const last = this.engine.history.at(-1);
+    if (!last) { toast("Rien à envoyer : calcule d'abord", "warn"); return; }
+    const spec: CalcSpec = { expr: last.expr, result: last.text, angle: this.engine.angleMode };
+    const ed = this.editing;
+    if (ed?.kind === "calc") {
+      this.editing = null;
+      if (ed.update(spec)) toast("Calcul mis à jour dans la page");
+      this.render();
+      return;
+    }
+    this.host.insertCalc(spec);
+  }
+
+  /** Onglet Courbes : bloc graph vivant (ou mise a jour du bloc rouvert). */
+  private sendGraph(): void {
+    if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
+    const spec = this.graphSpec();
+    if (!spec) return;
+    const ed = this.editing;
+    if (ed?.kind === "graph") {
+      this.editing = null;
+      if (ed.update(spec)) toast("Courbe mise à jour dans la page");
+      this.render();
+      return;
+    }
+    this.host.insertGraph(spec);
+  }
+
+  /** Bornes de l'onglet Courbes, lues dans les champs gardes. */
+  private courbesDomain(): [number, number] {
+    const st = this.state.courbes;
+    const a = this.readNumber(st.from), b = this.readNumber(st.to);
+    return a !== null && b !== null && a < b ? [a, b] : [-8, 8];
+  }
+
+  /** Fenetre ymin / ymax saisie : undefined = auto, null = saisie fautive. */
+  private courbesRange(): { range?: [number, number]; error?: string } {
+    const st = this.state.courbes;
+    return readRange(this.readNumber(st.ymin), this.readNumber(st.ymax), !st.ymin.trim(), !st.ymax.trim());
+  }
+
+  private graphSpec(): GraphSpec | null {
+    const fn = stripY(this.state.courbes.fn.trim());
+    if (!fn) { toast("Tape une fonction d'abord", "warn"); return null; }
+    const plot = samplePlot(fn, ...this.courbesDomain(), 50, "x", this.engine.angleMode);
+    if (!plot.ok) { toast(plot.message ?? "Expression invalide", "warn"); return null; }
+    const r = this.courbesRange();
+    if (r.error) { toast(r.error, "warn"); return null; }
+    const spec: GraphSpec = { fn, domain: this.courbesDomain(), angle: this.engine.angleMode };
+    if (r.range) spec.range = r.range;
+    return spec;
   }
 
   /** Ligne « Lu par le moteur » sous un champ, mise a jour a la frappe. */
@@ -452,17 +575,16 @@ export class Calculator {
       }
     };
 
+    const bar = this.editBar("calc");
+    if (bar) this.body.append(bar);
     this.body.append(screen, read, keys);
-    if (this.host.canInsert()) {
-      this.body.append(el("button", {
-        onclick: () => {
-          const last = this.engine.history.at(-1);
-          if (!last) { toast("Rien à insérer", "warn"); return; }
-          this.host.insertCalc(last.expr, last.text);
-          toast("Bloc calcul inséré dans la page");
-        },
-      }, "Envoyer dans la page"));
-    }
+    // Toujours present : sans page ouverte, l'appui le dit (toast).
+    const updating = this.editing?.kind === "calc";
+    this.body.append(el("button", {
+      class: updating ? "primary calc-send" : "calc-send",
+      title: updating ? "Recalcule le bloc de la page avec cette saisie" : "Le dernier résultat, au curseur du texte (Ctrl+Maj+L)",
+      onclick: () => this.sendCalc(),
+    }, updating ? "Mettre à jour" : "Envoyer dans la page"));
 
     this.compute = () => {
       const r = this.engine.evaluate(this.edit.input);
@@ -575,26 +697,36 @@ export class Calculator {
     const st = this.state.courbes;
     const fnInput = el("input", { type: "text", placeholder: "y = sin(x) * x / 2" });
     fnInput.value = st.fn;
-    const fromInput = el("input", { type: "text", inputmode: "decimal", style: { width: "88px" } });
-    const toInput = el("input", { type: "text", inputmode: "decimal", style: { width: "88px" } });
+    const small = (title: string, placeholder = "") =>
+      el("input", { type: "text", inputmode: "decimal", title, placeholder, style: { width: "72px" } });
+    const fromInput = small("x minimum"), toInput = small("x maximum");
+    const yminInput = small("y minimum (vide = auto)", "auto"), ymaxInput = small("y maximum (vide = auto)", "auto");
     fromInput.value = st.from;
     toInput.value = st.to;
+    yminInput.value = st.ymin;
+    ymaxInput.value = st.ymax;
     const canvas = el("canvas", { title: "Touche la courbe pour lire un point" });
     const info = el("div", { class: "small muted" });
     const box = el("div", { class: "plot-box" }, canvas);
     const table = el("div", { class: "small" });
+    // sin(x) en degres ou en radians : le meme mode que l'onglet Calcul.
+    const angleBtn = el("button", {
+      class: "calc-angle", title: "Mode d'angle de sin, cos, tan (le même que l'onglet Calcul)",
+      onclick: () => {
+        this.engine.angleMode = this.engine.angleMode === "RAD" ? "DEG" : "RAD";
+        angleBtn.textContent = this.engine.angleMode;
+        draw();
+      },
+    }, this.engine.angleMode);
     let readX: number | null = null;
-    let view: { from: number; to: number; yMin: number; yMax: number; w: number; h: number } | null = null;
+    let view: { from: number; to: number } | null = null;
 
-    const domain = (): [number, number] => {
-      const a = this.readNumber(fromInput.value), b = this.readNumber(toInput.value);
-      return a !== null && b !== null && a < b ? [a, b] : [-8, 8];
-    };
     const fnText = () => fnInput.value.trim() || "";
 
     const draw = () => {
-      const [from, to] = domain();
+      const [from, to] = this.courbesDomain();
       const fn = fnText();
+      const angle = this.engine.angleMode;
       const ctx = canvas.getContext("2d")!;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = box.clientWidth || 400, h = 220;
@@ -605,68 +737,27 @@ export class Calculator {
       view = null;
       if (!fn) { info.textContent = "Tape une fonction de x."; return; }
 
-      const plot = samplePlot(fn, from, to, 700);
+      const plot = samplePlot(fn, from, to, 700, "x", angle);
       if (!plot.ok || !plot.samples) {
         info.textContent = plot.message ?? "Expression invalide";
         return;
       }
-      // Fenetre calee sur les quantiles : une asymptote n'ecrase pas la
-      // courbe, une courbe decalee (x + 100) reste a l'ecran.
-      const { yMin, yMax } = autoWindow(plot.samples);
-      view = { from, to, yMin, yMax, w, h };
-      const X = (x: number) => ((x - from) / (to - from)) * w;
-      const Y = (y: number) => h - ((y - yMin) / (yMax - yMin)) * h;
+      // Fenetre fixee (ymin / ymax) ou calee sur les quantiles : une
+      // asymptote n'ecrase pas la courbe, x + 100 reste a l'ecran.
+      const range = this.courbesRange();
+      const win = plotWindow(plot.samples, range.range);
+      const frame = drawPlot(ctx, w, h, plot.samples, { from, to, ...win });
+      view = { from, to };
+      const { X, Y, axisY } = frame;
 
-      // Grille et graduations rondes, etiquetees.
-      const xt = niceTicks(from, to, Math.max(4, Math.floor(w / 50)));
-      const yt = niceTicks(yMin, yMax, Math.max(3, Math.floor(h / 40)));
-      ctx.strokeStyle = "#eceff4"; ctx.lineWidth = 1;
-      for (const t of xt.ticks) { const gx = X(t); ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke(); }
-      for (const t of yt.ticks) { const gy = Y(t); ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke(); }
-      ctx.strokeStyle = "#9aa3b2"; ctx.lineWidth = 1.2;
-      const axisY = 0 >= yMin && 0 <= yMax ? Y(0) : null;
-      const axisX = 0 >= from && 0 <= to ? X(0) : null;
-      if (axisY !== null) { ctx.beginPath(); ctx.moveTo(0, axisY); ctx.lineTo(w, axisY); ctx.stroke(); }
-      if (axisX !== null) { ctx.beginPath(); ctx.moveTo(axisX, 0); ctx.lineTo(axisX, h); ctx.stroke(); }
-      ctx.fillStyle = "#6b7487"; ctx.font = "10px system-ui, sans-serif";
-      const labelY = Math.min(h - 3, Math.max(11, (axisY ?? h) + 11));
-      ctx.textAlign = "center";
-      for (const t of xt.ticks) {
-        if (t === 0 && axisX !== null) continue;
-        const gx = X(t);
-        if (gx < 10 || gx > w - 10) continue;
-        ctx.fillText(tickLabel(t, xt.step), gx, labelY);
-      }
-      ctx.textAlign = "left";
-      const labelX = Math.min(w - 40, Math.max(3, (axisX ?? 0) + 3));
-      for (const t of yt.ticks) {
-        const gy = Y(t);
-        if (gy < 8 || gy > h - 4) continue;
-        ctx.fillText(tickLabel(t, yt.step), labelX, gy - 2);
-      }
-
-      // Courbe : le trait est coupe sur une asymptote (saut hors fenetre).
-      ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 2;
-      ctx.beginPath();
-      let prev: { py: number; out: boolean } | null = null;
-      for (const s of plot.samples) {
-        if (s.y === null) { prev = null; continue; }
-        const px = X(s.x), py = Y(s.y);
-        const out = py < -h || py > 2 * h;
-        const cy = Math.max(-h, Math.min(2 * h, py));
-        if (!prev || ((out || prev.out) && Math.abs(cy - prev.py) > h)) ctx.moveTo(px, cy);
-        else ctx.lineTo(px, cy);
-        prev = { py: cy, out };
-      }
-      ctx.stroke();
-
-      const roots = rootsInWindow(fn, from, to);
+      const roots = rootsInWindow(fn, from, to, "x", angle);
       ctx.fillStyle = "#dc2626";
       if (axisY !== null) {
         for (const r of roots) { ctx.beginPath(); ctx.arc(X(r), axisY, 3.5, 0, Math.PI * 2); ctx.fill(); }
       }
-      const ext = extremaInWindow(fn, from, to);
+      const ext = extremaInWindow(fn, from, to, "x", 800, angle);
       const parts: string[] = [];
+      if (range.error) parts.push(`${range.error}.`);
       parts.push(roots.length
         ? `Racines : ${roots.slice(0, 8).map((r) => fr(round4(r))).join(" ; ")}${roots.length > 8 ? ` … et ${roots.length - 8} autres` : ""}.`
         : "Aucune racine visible.");
@@ -677,7 +768,7 @@ export class Calculator {
 
       // Lecture d'un point au toucher.
       if (readX !== null && readX >= from && readX <= to) {
-        const row = valueTable(fn, readX, readX, 1)[0];
+        const row = valueTable(fn, readX, readX, 1, "x", angle)[0];
         const y = row ? Number(row.y) : NaN;
         if (Number.isFinite(y)) {
           ctx.fillStyle = "#0f172a";
@@ -696,9 +787,9 @@ export class Calculator {
     });
 
     const showTable = () => {
-      const [from, to] = domain();
+      const [from, to] = this.courbesDomain();
       const step = (to - from) / 10;
-      const rows = valueTable(fnText(), from, to, step);
+      const rows = valueTable(fnText(), from, to, step, "x", this.engine.angleMode);
       table.replaceChildren(el("table", { class: "tbl" },
         el("tr", {}, el("th", {}, "x"), el("th", {}, "y")),
         ...rows.map((r) => el("tr", {}, el("td", {}, fr(r.x)), el("td", {}, r.y.replace(".", ",")))),
@@ -706,30 +797,43 @@ export class Calculator {
     };
 
     const lu = this.readLine(() => stripY(fnInput.value), (s) => this.engine.toLatex(s));
-    const sync = () => { st.fn = fnInput.value; st.from = fromInput.value; st.to = toInput.value; };
+    const sync = () => {
+      st.fn = fnInput.value; st.from = fromInput.value; st.to = toInput.value;
+      st.ymin = yminInput.value; st.ymax = ymaxInput.value;
+    };
     // Le trace se redessine pendant la frappe (section 7).
     fnInput.addEventListener("input", () => { sync(); lu.update(); draw(); });
-    fromInput.addEventListener("input", () => { sync(); draw(); });
-    toInput.addEventListener("input", () => { sync(); draw(); });
+    for (const input of [fromInput, toInput, yminInput, ymaxInput]) input.addEventListener("input", () => { sync(); draw(); });
     onEnter(fnInput, showTable);
 
     const zoom = (factor: number) => {
-      const [from, to] = domain();
+      const [from, to] = this.courbesDomain();
       const mid = (from + to) / 2, half = ((to - from) / 2) * factor;
-      fromInput.value = String(round4(mid - half));
-      toInput.value = String(round4(mid + half));
+      fromInput.value = String(round4(mid - half)).replace(".", ",");
+      toInput.value = String(round4(mid + half)).replace(".", ",");
       sync();
       draw();
     };
 
+    const updating = this.editing?.kind === "graph";
+    const bar = this.editBar("graph");
+    if (bar) this.body.append(bar);
     this.body.append(
-      el("div", { class: "row" }, el("span", { class: "muted" }, "y ="), fnInput),
+      el("div", { class: "row" }, el("span", { class: "muted" }, "y ="), fnInput, angleBtn),
       lu.node,
       el("div", { class: "row" },
-        el("span", { class: "muted small" }, "de"), fromInput,
+        el("span", { class: "muted small" }, "x de"), fromInput,
         el("span", { class: "muted small" }, "à"), toInput,
         el("button", { title: "Zoom avant", onclick: () => zoom(0.5) }, "+"),
         el("button", { title: "Zoom arrière", onclick: () => zoom(2) }, "−"),
+      ),
+      el("div", { class: "row" },
+        el("span", { class: "muted small" }, "y de"), yminInput,
+        el("span", { class: "muted small" }, "à"), ymaxInput,
+        el("button", {
+          title: "Fenêtre verticale automatique",
+          onclick: () => { yminInput.value = ""; ymaxInput.value = ""; sync(); draw(); },
+        }, "Auto"),
       ),
       box, info,
       el("div", { class: "row" },
@@ -737,13 +841,9 @@ export class Calculator {
         el("div", { class: "spacer" }),
         el("button", {
           class: "primary",
-          onclick: () => {
-            if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
-            if (!fnText()) { toast("Tape une fonction d'abord", "warn"); return; }
-            this.host.insertGraph(stripY(fnText()), domain());
-            toast("Bloc courbe inséré dans la page");
-          },
-        }, "Envoyer dans la page"),
+          title: updating ? "Redessine la courbe de la page" : "Courbe vivante, au curseur du texte (Ctrl+Maj+L)",
+          onclick: () => this.sendGraph(),
+        }, updating ? "Mettre à jour" : "Envoyer dans la page"),
       ),
       table,
     );
