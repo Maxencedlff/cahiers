@@ -103,7 +103,7 @@ input:focus, textarea:focus, button:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 40px;
+  height: var(--touch);
   padding: 0 10px 0 12px;
   border-radius: 8px;
   border: 1px solid transparent;
@@ -114,14 +114,13 @@ input:focus, textarea:focus, button:focus-visible {
 .tab.active { background: var(--accent-soft); border-color: #bcd0ff; }
 .tab .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Croix de 40 px collee au bord de l'onglet, zone d'appui portee a 44 px :
-   au doigt, on ferme l'onglet au lieu de l'activer. */
+/* Croix de 44 px collee au bord de l'onglet : au doigt, on ferme l'onglet
+   au lieu de l'activer. */
 .tab .close {
-  position: relative; min-width: 40px; min-height: 40px; width: 40px; height: 40px;
-  margin-right: -8px; border-radius: 8px; border: none; background: transparent;
+  position: relative; min-width: var(--touch); min-height: var(--touch); width: var(--touch); height: var(--touch);
+  margin-right: -10px; border-radius: 8px; border: none; background: transparent;
   font-size: 16px; line-height: 1; padding: 0;
 }
-.tab .close::after { content: ""; position: absolute; inset: -2px; }
 .tab .close:hover { background: rgba(0,0,0,.1); }
 
 /* ---------------- menu d'accueil ---------------- */
@@ -179,6 +178,13 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   justify-content: center;
 }
 .divider-tab.active { background: var(--panel); font-weight: 600; box-shadow: inset 0 3px 0 var(--accent); }
+/* Glisser un intercalaire : le doigt et le stylet sont geres par l'appli
+   (appui long puis glisser ; avant, le doigt fait defiler la bande). */
+.divider-tab[data-divider] { touch-action: none; }
+.divider-tab.lifted { box-shadow: 0 4px 14px rgba(16, 20, 30, .18); }
+.divider-tab.dragging { position: relative; z-index: 2; opacity: .9; cursor: grabbing; box-shadow: 0 6px 18px rgba(16, 20, 30, .22); }
+.divider-tab.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+.divider-tab.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
 
 .toolbar {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
@@ -194,12 +200,28 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .swatch.on { border-color: var(--ink); }
 /* Sens de la couleur active, lisible sans infobulle (au doigt). */
 .swatch-legend { flex-basis: 100%; text-align: center; line-height: 1.2; margin-top: -2px; }
+/* Colonne d'outils : pastilles en grille de 4, 44 px dans les deux sens ;
+   la legende occupe les deux dernieres cases. */
+.swatches { flex: 1 1 100%; display: grid; grid-template-columns: repeat(4, minmax(44px, 1fr)); gap: 4px; }
+.swatches .swatch { width: auto; min-width: var(--touch); }
+.swatches .swatch-legend {
+  grid-column: span 2; margin: 0; display: flex; flex-direction: column; justify-content: center;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.swatches .swatch-legend > span { overflow: hidden; text-overflow: ellipsis; }
 /* Outil de zone verrouille : on enchaine plusieurs zones. */
 .toolbar button.on.locked { box-shadow: inset 0 0 0 2px var(--accent); }
 
 .panes { flex: 1; display: flex; min-height: 0; }
 .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .pane + .pane { border-left: 3px solid var(--line); }
+/* Portrait (portable tourne) : split empile haut/bas, chaque feuille garde
+   la largeur de l'ecran ; cote a cote, le texte tombait a 6-7 px. */
+@media (orientation: portrait) {
+  .panes { flex-direction: column; }
+  .pane { min-height: 0; }
+  .pane + .pane { border-left: none; border-top: 3px solid var(--line); }
+}
 .pane-head {
   display: flex; align-items: center; gap: 8px; padding: 4px 8px;
   background: #fafbfc; border-bottom: 1px solid var(--line); font-size: 13px; min-height: 36px;
@@ -306,7 +328,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .calc-head.dragging { cursor: grabbing; }
 .calc-tabs { display: flex; gap: 4px; padding: 8px 8px 0; overflow-x: auto; scrollbar-width: none; }
 .calc-tabs button {
-  height: 38px; min-height: 38px; border-radius: 8px 8px 0 0; flex: 1 1 auto; padding: 0 6px;
+  height: var(--touch); min-height: var(--touch); border-radius: 8px 8px 0 0; flex: 1 1 auto; padding: 0 6px;
   white-space: nowrap; font-size: 14px; min-width: 0;
 }
 /* Colonne de 340 px : les cinq onglets tiennent sur une ligne. */
@@ -366,6 +388,30 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   background: #fff7e6; border: 1px solid #f0c36d; color: #7a4b00; font-size: 13px;
 }
 .calc-angle { min-width: 52px; font-weight: 600; }
+/* Hauteur bornee a l'ecran : le corps defile, jamais le pave (1366x768). */
+.calc:not(.docked) { max-height: calc(100vh - 16px); }
+.calc:not(.docked) .calc-body { max-height: none; }
+.calc-body { flex: 1 1 auto; min-height: 0; }
+.calc-body > * { flex-shrink: 0; }
+/* Onglet Calcul : seul l'ecran se tasse, son historique defile ; le pave reste entier. */
+.calc-body.is-calcul > .calc-screen { flex: 1 1 auto; min-height: 92px; overflow-y: auto; justify-content: flex-start; }
+.calc-body.is-calcul > .calc-screen > :first-child { margin-top: auto; }
+.calc-body.is-calcul > .calc-screen > * { flex-shrink: 0; }
+.calc-body.is-calcul > .calc-screen .hist { line-height: 16px; }
+/* Lecture du moteur sur une ligne : la place va a l'historique. */
+.calc-body.is-calcul > .calc-read { min-height: 0; padding: 5px 10px; white-space: nowrap; }
+.calc-body.is-calcul > .calc-read .lbl { display: inline; margin: 0 8px 0 0; }
+.calc-body.is-calcul > .keys { gap: 5px; }
+.calc-screen .polar { color: #9fb3d9; font-size: 12px; text-align: right; }
+.calc-screen .expr.failed { color: #ffc4c4; }
+.calc-screen .err-hint { color: #8b97ad; font-size: 11px; }
+.calc-fn-row .calc-fn { flex: 1 1 auto; min-width: 0; width: 100%; }
+.calc-fn-row > span { white-space: nowrap; flex: none; }
+.calc-check { display: inline-flex; align-items: center; gap: 6px; min-height: var(--touch); padding: 0 6px; font-size: 14px; cursor: pointer; }
+.calc-check input { min-height: 0; width: 18px; height: 18px; margin: 0; }
+/* Tableau de valeurs dans sa propre zone defilante. */
+.calc-table { max-height: 220px; overflow: auto; }
+.calc-table:empty { display: none; }
 
 .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
 /* Touches de 46 px, utilisables au doigt (section 7). */
@@ -455,10 +501,21 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   background: transparent; color: #9cc0ff; border-color: transparent; font-weight: 600; min-height: 44px;
 }
 .toast-action:hover { background: rgba(255,255,255,.1); }
+.toast-note { opacity: .75; font-size: 13px; margin-left: 10px; }
 
 .status {
-  display: flex; align-items: center; gap: 14px; padding: 5px 12px; min-height: 32px;
+  display: flex; align-items: center; gap: 14px; padding: 3px 12px; min-height: 32px;
   background: var(--panel); border-top: 1px solid var(--line); font-size: 12px; color: var(--muted);
+  white-space: nowrap; min-width: 0;
+}
+.status > * { flex: none; }
+.status .root-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Une seule ligne sur un ecran etroit (portrait) : textes abreges. */
+.status .sh { display: none; }
+@media (max-width: 1100px) {
+  .status { gap: 10px; padding: 3px 8px; }
+  .status .lg { display: none; }
+  .status .sh { display: inline; }
 }
 .pill { display: inline-flex; align-items: center; gap: 5px; }
 .pill .led { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
@@ -466,9 +523,9 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .pill .led.wait { background: #f0b429; }
 .pill .led.err { background: #dc2626; }
 .pill.unsaved { color: #a51b1b; font-weight: 600; }
-/* Bouton discret de la barre d'etat, zone d'appui de 44 px quand meme. */
-.status .keys-btn { position: relative; min-height: 26px; min-width: 0; padding: 0 8px; }
-.status .keys-btn::after { content: ""; position: absolute; inset: -9px -2px; }
+/* Bouton discret de la barre d'etat : 44 px de haut quand meme, sans
+   epaissir la barre (il deborde de 6 px dessus et dessous, sur du vide). */
+.status .keys-btn { min-height: var(--touch); min-width: var(--touch); margin: -6px 0; padding: 0 8px; }
 .status .reco-blocked { color: #a51b1b; border-color: #e7a3a3; background: #fff5f5; }
 .status .pill.usage-high { color: #8a5a00; font-weight: 600; }
 .tabbar .help-btn { font-weight: 700; color: var(--muted); }
@@ -500,10 +557,16 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 /* --k : echelle de la page (largeur affichee / 900), posee par PageView. */
 .text-doc {
   position: absolute; left: 0; top: 0; right: 0; min-height: 100%;
-  padding: calc(56px * var(--k, 1)) calc(64px * var(--k, 1));
+  /* Interligne = 8 mm a l'echelle de la feuille, le pas du fond Ligne et
+     Seyes ; marge haute : la premiere ligne de base tombe sur la 2e ligne
+     du fond. Valeurs tirees de src/core/textlayout.ts (LINE, TEXT_TOP),
+     verifiees par src/tests/textlayout.test.ts. */
+  --line: calc(34.2857px * var(--k, 1));
+  padding: calc(43.42px * var(--k, 1)) calc(64px * var(--k, 1)) calc(56px * var(--k, 1));
   /* Meme police que les formules (Computer Modern de KaTeX) : la page se
      lit d'un seul tenant, comme un document LaTeX. */
   font: calc(21px * var(--k, 1)) / 1.5 KaTeX_Main, "Latin Modern Roman", "Times New Roman", serif;
+  line-height: var(--line);
   color: #16181d; white-space: pre-wrap; overflow-wrap: anywhere;
   outline: none; cursor: text; caret-color: var(--accent);
   -webkit-user-select: text; user-select: text;
@@ -518,7 +581,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   --contains-highlight-background-color: transparent;
   --primary: var(--accent);
 }
-.text-doc math-field:focus-within { background: #eef3ff; outline: 1px solid #c7d6f5; }
+.text-doc math-field:focus-within { background: rgba(59, 110, 230, .08); outline: 1px solid #c7d6f5; }
 .text-doc math-field::part(menu-toggle),
 .text-doc math-field::part(virtual-keyboard-toggle) { display: none; }
 .text-doc math-field::part(content) { padding: 1px 0; }
@@ -539,16 +602,22 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .mathbar .mathkey .katex { font-size: 1em; }
 /* Pas de marge autour des formules : pas de blanc avant la virgule ou le
    point qui suit. Le survol se montre par une ombre, hors du flux. */
+/* Marges haute et basse posees par src/ui/linesnap.ts : une formule haute
+   occupe un nombre entier de lignes. Survol translucide : l'encre dessous
+   reste visible. */
 .text-doc .eq { display: inline-block; padding: 0; border-radius: 4px; cursor: pointer; user-select: none; }
-.text-doc .eq:hover { background: #f1f5ff; box-shadow: 0 0 0 2px #f1f5ff; }
+.text-doc .eq:hover { background: rgba(59, 110, 230, .07); box-shadow: 0 0 0 2px rgba(59, 110, 230, .07); }
 .text-doc .eq .katex { font-size: 1.08em; }
 
 /* Titres et listes du texte tape (D11) : un bloc par ligne, dans la police
    de la page. Les lignes de texte normal restent a plat entre les blocs. */
-.text-doc .dl { position: relative; min-height: 1.5em; }
-.text-doc .dl-h1 { font-size: 1.6em; font-weight: 700; line-height: 1.25; margin: .6em 0 .25em; }
-.text-doc .dl-h2 { font-size: 1.3em; font-weight: 700; line-height: 1.3; margin: .5em 0 .2em; }
-.text-doc .dl-h3 { font-size: 1.1em; font-weight: 700; line-height: 1.4; margin: .35em 0 .1em; }
+/* Titres sur un nombre entier de lignes (h1, h2 : deux ; h3 : une), ligne de
+   base calee sur la grille par `top` (textlayout.ts, headingShift) : la
+   suite du texte retombe sur les lignes du fond. */
+.text-doc .dl { position: relative; min-height: var(--line); }
+.text-doc .dl-h1 { font-size: 1.6em; font-weight: 700; line-height: calc(2 * var(--line)); margin: 0; top: calc(13.24px * var(--k, 1)); }
+.text-doc .dl-h2 { font-size: 1.3em; font-weight: 700; line-height: calc(2 * var(--line)); margin: 0; top: calc(15.19px * var(--k, 1)); }
+.text-doc .dl-h3 { font-size: 1.1em; font-weight: 700; line-height: var(--line); margin: 0; top: calc(-0.65px * var(--k, 1)); }
 .text-doc > .dl-h1:first-child, .text-doc > .dl-h2:first-child, .text-doc > .dl-h3:first-child { margin-top: 0; }
 .text-doc .dl-li { padding-left: calc(1.5em * (var(--lvl, 0) + 1)); }
 /* Puce ou numero dans la marge, sur la ligne de base de la premiere ligne
@@ -568,7 +637,8 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .work .panes { min-width: 0; }
 
 .side-tools {
-  flex: none; width: 262px; overflow-y: auto; overflow-x: hidden;
+  --tools-w: 262px;
+  flex: none; width: var(--tools-w); overflow-y: auto; overflow-x: hidden;
   background: var(--panel); border-right: 1px solid var(--line);
   scrollbar-width: thin;
 }
@@ -616,10 +686,17 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 
 /* Menu « ⋯ » : fond transparent, un appui a cote le ferme. */
 .backdrop.more-backdrop { background: transparent; display: block; padding: 0; }
+/* Deux colonnes (actions, reglages) : le menu tient en 1366x768. */
 .more-menu {
-  position: fixed; width: 320px; max-height: calc(100vh - 16px); overflow-y: auto;
+  position: fixed; width: 632px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-  box-shadow: 0 18px 50px rgba(10,14,25,.22); padding: 8px; display: flex; flex-direction: column; gap: 4px;
+  box-shadow: 0 18px 50px rgba(10,14,25,.22); padding: 8px; display: flex; gap: 12px; align-items: flex-start;
+}
+.more-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.more-col + .more-col { border-left: 1px solid var(--line); padding-left: 12px; }
+@media (max-width: 880px) {
+  .more-menu { width: 320px; flex-direction: column; }
+  .more-col + .more-col { border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }
 }
 .more-menu .more-item { justify-content: flex-start; border-color: transparent; background: transparent; width: 100%; }
 .more-menu .more-item:hover { background: #f3f5f8; }
@@ -661,7 +738,29 @@ kbd {
 .side-tools .toolbar + .toolbar { border-top: 1px solid var(--line); }
 .side-tools .page-nav { flex-basis: 100%; display: flex; align-items: center; gap: 6px; }
 .side-tools .page-nav button { flex: 1; }
-@media (max-width: 1500px) { .side-calc { width: 340px; } .side-tools { width: 236px; } }
+@media (max-width: 1500px) { .side-calc { width: 340px; } .side-tools { --tools-w: 236px; } }
+
+/* Ruban Maths a cote des outils (App.mathLayout « side ») : rien a faire
+   defiler en 1366x768, et la feuille garde sa largeur de lecture. */
+.side-tools.two-cols { display: flex; width: auto; overflow: hidden; }
+.side-tools.two-cols > .toolbar { flex: none; width: var(--tools-w); overflow-y: auto; align-content: flex-start; }
+.side-tools.two-cols > .math-section {
+  flex: none; width: 216px; overflow-y: auto; border-top: none; border-left: 1px solid var(--line);
+  scrollbar-width: thin;
+}
+/* Ruban en volet (« fly ») : split ou ecran bas, par-dessus la page, a
+   droite de la colonne ; Echap ou un appui a cote le ferme. */
+.math-section.fly.open > .mathbar {
+  position: fixed; z-index: 55; left: calc(var(--tools-w) + 6px); bottom: 48px;
+  width: min(392px, calc(100vw - var(--tools-w) - 16px)); max-height: calc(100vh - 170px); overflow-y: auto;
+  padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  box-shadow: 0 18px 50px rgba(10,14,25,.22);
+}
+.math-section.fly.open > .section-toggle { background: var(--accent-soft); color: #1b3fa8; }
+/* Sous-colonne et volet : « Equation » sur deux cases, les modeles a sa
+   suite (une rangee de gagnee, le ruban tient en 768 px de haut). */
+.side-tools.two-cols .mathbar .mathkey.eq, .math-section.fly .mathbar .mathkey.eq { grid-column: span 2; }
+.side-tools.two-cols .mathbar > .mathkey.eq + .sep, .math-section.fly .mathbar > .mathkey.eq + .sep { display: none; }
 .side-tools .mathbar .mathkey { font-size: 17px; }
 
 /* Photo posee dans le texte : sa propre ligne, largeur en unites de page. */

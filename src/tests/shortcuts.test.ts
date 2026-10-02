@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
-  SHORTCUTS, GROUPS, ctrlCommand, isReloadKey, keysOf, titleOf, pageLabel, parsePageInput, type KeyLike,
+  SHORTCUTS, GROUPS, ctrlCommand, escapeAction, isReloadKey, keysOf, titleOf, pageLabel, parsePageInput,
+  type EscapeState, type KeyLike,
 } from "../core/shortcuts";
 import { MATH_TEMPLATES } from "../core/templates";
 import { SYMBOLS, symbolName } from "../core/symbols";
@@ -193,5 +194,52 @@ describe("touches qui rechargeraient le WebView2", () => {
   it("Ctrl+Maj+R n'est pas une commande : seul le blocage la retient", () => {
     expect(ctrlCommand(ctrl("r", true))).toBeNull();
     expect(ctrlCommand(ctrl("r"))).toBe("convert");
+  });
+});
+
+describe("nouvel intercalaire au clavier", () => {
+  it("Ctrl+T, libre jusqu'ici, et dans la fiche F1", () => {
+    expect(ctrlCommand(ctrl("t"))).toBe("newDivider");
+    expect(keysOf("newDivider")).toBe("Ctrl+T");
+    // Alt+T reste la zone texte : Ctrl+T ne la remplace pas.
+    expect(ctrlCommand(press("t", { altKey: true }))).toBeNull();
+  });
+});
+
+describe("Echap sur l'ecran cahier (deux fois pour le menu)", () => {
+  const st = (over: Partial<EscapeState> = {}): EscapeState => ({
+    again: false, handled: false, dialog: false, popover: false, calc: false,
+    field: false, selection: false, inText: false, ...over,
+  });
+
+  it("un seul Echap depuis un bouton (colonne d'outils) revient au texte, pas au menu", () => {
+    expect(escapeAction(st())).toBe("to-text");
+    expect(escapeAction(st({ again: true }))).toBe("menu");
+  });
+
+  it("dans le texte : le premier le quitte, le second de suite va au menu", () => {
+    expect(escapeAction(st({ inText: true }))).toBe("leave-text");
+    expect(escapeAction(st({ again: true }))).toBe("menu");
+  });
+
+  it("calculatrice qui a le clavier : il revient a la page, elle reste ouverte", () => {
+    expect(escapeAction(st({ calc: true }))).toBe("release-calc");
+    expect(escapeAction(st({ calc: true, again: true }))).toBe("release-calc");
+  });
+
+  it("ferme d'abord ce qui est ouvert : volet, selection du lasso", () => {
+    expect(escapeAction(st({ popover: true, again: true }))).toBe("close-popover");
+    expect(escapeAction(st({ selection: true, again: true }))).toBe("clear-selection");
+  });
+
+  it("jamais au menu quand une saisie se termine (champ, formule, composition) ni sous un dialogue", () => {
+    expect(escapeAction(st({ field: true, again: true }))).toBe("leave-field");
+    expect(escapeAction(st({ handled: true, again: true }))).toBe("ignore");
+    expect(escapeAction(st({ dialog: true, again: true }))).toBe("ignore");
+  });
+
+  it("la fiche F1 dit « second Échap »", () => {
+    const esc = SHORTCUTS.find((s) => s.keys === "Échap");
+    expect(esc?.label).toMatch(/second Échap/);
   });
 });

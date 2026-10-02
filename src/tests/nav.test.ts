@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NavHistory, dayLabel, filterByTitle, gridStep, moveItem, pickSplitDivider } from "../core/nav";
+import { NavHistory, dayLabel, dropIndex, filterByTitle, gridStep, moveItem, moveTo, pickSplitDivider } from "../core/nav";
 import { firstLineOf, indexPage } from "../core/storage/search";
 import type { Page } from "../core/types";
 
@@ -153,5 +153,33 @@ describe("liste des pages (manque-nav-pages)", () => {
     page.blocks[0] = { id: "t", type: "text", content: "- premiere puce\nsuite" };
     expect(indexPage(page).title).toBeUndefined();
     expect(indexPage(page).firstLine).toBe("premiere puce");
+  });
+});
+
+describe("intercalaire glisse dans la bande", () => {
+  // Centres des onglets Cours, Exos, TD, TP.
+  const centers = [50, 150, 250, 350];
+
+  it("reste a sa place tant qu'il ne depasse aucun centre", () => {
+    expect(dropIndex(centers, 1, 120)).toBe(1);
+    expect(dropIndex(centers, 1, 240)).toBe(1);
+  });
+
+  it("vers la droite : la place du dernier centre depasse", () => {
+    expect(dropIndex(centers, 0, 260)).toBe(2);
+    expect(dropIndex(centers, 0, 999)).toBe(3);
+  });
+
+  it("vers la gauche : la place du premier centre depasse", () => {
+    expect(dropIndex(centers, 3, 140)).toBe(1);
+    expect(dropIndex(centers, 3, -20)).toBe(0);
+  });
+
+  it("moveTo garde l'ordre du reste et borne l'index", () => {
+    const list = ["Cours", "Exos", "TD", "TP"];
+    expect(moveTo(list, "TP", 1)).toEqual(["Cours", "TP", "Exos", "TD"]);
+    expect(moveTo(list, "Cours", 3)).toEqual(["Exos", "TD", "TP", "Cours"]);
+    expect(moveTo(list, "Exos", 99)).toEqual(["Cours", "TD", "TP", "Exos"]);
+    expect(moveTo(list, "Absent", 0)).toEqual(list);
   });
 });

@@ -121,6 +121,36 @@ export function dismissToast(key: string): void {
   for (const t of [...(toastHost?.children ?? [])] as HTMLElement[]) if (t.dataset.key === key) t.remove();
 }
 
+/**
+ * Ajoute une ligne discrete au message pose avec cette cle (rappel d'un
+ * raccourci, par exemple). Rien si le message est deja parti.
+ */
+export function appendToToast(key: string, text: string): void {
+  for (const t of [...(toastHost?.children ?? [])] as HTMLElement[]) {
+    if (t.dataset.key !== key || t.querySelector(".toast-note")) continue;
+    const note = el("span", { class: "toast-note" }, text);
+    const btn = t.querySelector(".toast-action");
+    if (btn) t.insertBefore(note, btn); else t.append(note);
+  }
+}
+
+/**
+ * Prefixe de cle d'un message qui ne depend d'aucune page (matiere ou
+ * intercalaire mis a la corbeille) : il survit au retour au menu.
+ */
+export const APP_TOAST = "app:";
+
+/**
+ * On quitte la page (menu, recherche, autre intercalaire) : ses messages a
+ * bouton (« Annuler » d'un repere, d'une photo retiree) partent avec elle,
+ * leur action n'aurait plus de sens a l'ecran suivant.
+ */
+export function dismissPageToasts(): void {
+  for (const t of [...(toastHost?.children ?? [])] as HTMLElement[]) {
+    if (t.classList.contains("with-action") && !(t.dataset.key ?? "").startsWith(APP_TOAST)) t.remove();
+  }
+}
+
 /* ---------------- dialogues ---------------- */
 
 export interface DialogField {

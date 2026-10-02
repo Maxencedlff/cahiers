@@ -3,6 +3,8 @@
  * raccourcis (shortcuts.ts) les lit aussi, sans dependre de l'interface.
  * #@ = mot pris avant le curseur, #? = case a remplir.
  * `key` : raccourci Alt+touche, choisi pour tomber sous les doigts en AZERTY.
+ * Bornes (integrale, somme) : MathLive parcourt la case du haut avant celle
+ * du bas ; textdoc.ts (lowerBoundFirst, switchBound) remet la basse d'abord.
  */
 export interface MathTemplate {
   label: string;      // apercu KaTeX sur le bouton
@@ -17,8 +19,8 @@ export const MATH_TEMPLATES: MathTemplate[] = [
   { label: "x_{i}", insert: "#@_{#?}", title: "Indice", key: "i" },
   { label: "\\sqrt{x}", insert: "\\sqrt{#?}", title: "Racine", key: "r" },
   { label: "\\sqrt[n]{x}", insert: "\\sqrt[#?]{#?}", title: "Racine n-ième" },
-  { label: "\\int_a^b", insert: "\\int_{#?}^{#?}#?\\,\\mathrm{d}\\,#?", title: "Intégrale : borne haute, Tab, borne basse, Tab, fonction", key: "n" },
-  { label: "\\sum", insert: "\\sum_{#?}^{#?}#?", title: "Somme : borne haute, Tab, borne basse", key: "s" },
+  { label: "\\int_a^b", insert: "\\int_{#?}^{#?}#?\\,\\mathrm{d}\\,#?", title: "Intégrale : borne basse, Tab, borne haute, Tab, fonction, Tab, variable", key: "n" },
+  { label: "\\sum", insert: "\\sum_{#?}^{#?}#?", title: "Somme : borne basse, Tab, borne haute, Tab, terme", key: "s" },
   { label: "\\lim", insert: "\\lim_{#?\\to#?}#?", title: "Limite", key: "l" },
   { label: "\\frac{\\mathrm{d}}{\\mathrm{d}x}", insert: "\\frac{\\mathrm{d}#?}{\\mathrm{d}#?}", title: "Dérivée", key: "d" },
   { label: "\\vec{u}", insert: "\\vec{#?}", title: "Vecteur", key: "v" },

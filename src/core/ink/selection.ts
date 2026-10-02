@@ -314,6 +314,34 @@ export function clampSpace(blocks: readonly Block[], ids: ReadonlySet<string>, y
   return Math.max(dy, Math.min(0, y - top));
 }
 
+/**
+ * Le texte tape s'est allonge (ou raccourci) de `dy` sous la ligne y :
+ * l'encre et les reperes situes sous cette ligne suivent le texte, comme
+ * un dessin ancre dans un traitement de texte. Les traits gardent leur id
+ * (fusion OneDrive par id). Les annotations d'un PDF restent sur leur PDF.
+ * En remontant, rien ne passe au-dessus de y + dy (la ligne qui reste).
+ * Rend le deplacement applique.
+ */
+export function shiftBelow(blocks: Block[], y: number, dy: number): number {
+  if (!dy) return 0;
+  const ids = strokesBelow(blocks.filter((b) => b.type !== "pdf"), y);
+  let d = dy;
+  if (dy < 0) {
+    let top = Infinity;
+    for (const s of strokesById(blocks, ids)) top = Math.min(top, cachedBounds(s).y);
+    if (top !== Infinity) d = Math.max(dy, Math.min(0, y + dy - top));
+  }
+  if (!d) return 0;
+  transformBlocks(blocks, ids, translation(0, d));
+  let flags = 0;
+  for (const b of blocks) {
+    if (b.type !== "flag" || !b.rect || b.rect.y + b.rect.h / 2 < y) continue;
+    b.rect = { ...b.rect, y: Math.max(0, b.rect.y + d) };
+    flags++;
+  }
+  return ids.size || flags ? d : 0;
+}
+
 /* ---------------- gomme precise ---------------- */
 
 /** Morceau plus court que ca (unites de page) : poussiere, jete. */

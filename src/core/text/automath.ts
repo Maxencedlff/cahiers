@@ -58,12 +58,17 @@ const GREEK_CHARS: Record<string, string> = {
   "Σ": "\\Sigma", "Φ": "\\Phi", "Ω": "\\Omega",
 };
 
+/** Lettre grecque en toutes lettres + chiffres : omega0, tau1. */
+const GREEK_NAME_SUB = new RegExp(`^(${Object.keys(GREEK_NAMES).join("|")})(\\d{1,2})$`);
+
 /** Lettre grecque + indice : ω0, ωc, τ1. */
 const GREEK_SUB = new RegExp(`^[${Object.keys(GREEK_CHARS).join("")}](?:[0-9]{1,2}|[a-z]{1,2})$`);
 
 const FUNCS: Record<string, string> = {
   sin: "\\sin", cos: "\\cos", tan: "\\tan", ln: "\\ln", log: "\\log",
   exp: "\\exp", sqrt: "\\sqrt",
+  arctan: "\\arctan", arcsin: "\\arcsin", arccos: "\\arccos",
+  sinh: "\\sinh", cosh: "\\cosh", tanh: "\\tanh",
 };
 
 /**
@@ -72,8 +77,37 @@ const FUNCS: Record<string, string> = {
  */
 const OPNAMES: Record<string, string> = {
   Re: "\\operatorname{Re}", Im: "\\operatorname{Im}", arg: "\\arg",
-  max: "\\max", min: "\\min",
+  max: "\\max", min: "\\min", det: "\\det",
 };
+
+/**
+ * Grands operateurs a bornes, tapes comme en LaTeX sans barre oblique :
+ * "lim_(x->0) sin(x)/x", "sum_(k=0)^n k", "int_0^1 x^2 dx". Seulement
+ * colles a un "_" (une integrale sans bornes doit finir par "dx") : "int x"
+ * d'un programme C reste du texte.
+ */
+const BIGOPS: Record<string, string> = {
+  lim: "\\lim", sum: "\\sum", prod: "\\prod", int: "\\int",
+};
+
+/** Ensembles de nombres deja tapes en symbole (ℝ) ou en double lettre (RR). */
+const SET_CHARS: Record<string, string> = {
+  "ℝ": "\\mathbb{R}", "ℕ": "\\mathbb{N}", "ℤ": "\\mathbb{Z}", "ℚ": "\\mathbb{Q}", "ℂ": "\\mathbb{C}",
+};
+
+/**
+ * j devant des grandeurs, ou pulsation w collee a R, L, C : produit, pas
+ * indice. "jLw" = j·L·ω, "jRCw" = j·R·C·ω, "RCw" = R·C·ω, "jω" = j·ω.
+ * "RC" seul (sans j ni w) garde la lecture d'avant.
+ */
+const IMAG = /^(?:j[RLC]{1,3}[wω]?|j[wω]|[RLC]*[LC][RLC]*[wω])$/;
+
+function imagTex(s: string): string {
+  const parts = [...s].map((c) => (c === "w" || c === "ω" ? "\\omega" : c));
+  // "jw" s'ecrit j\omega, comme avant ; sinon un petit espace entre facteurs.
+  if (parts.length === 2 && parts[0] === "j" && parts[1] === "\\omega") return "j\\omega";
+  return parts.join("\\,");
+}
 
 /** Mots du francais courant qui ne sont jamais des variables. */
 const STOP = new Set([
@@ -123,12 +157,13 @@ const REL: Record<string, string> = {
   "<<": "\\ll", "≪": "\\ll", ">>": "\\gg", "≫": "\\gg", "->": "\\to",
   "→": "\\to", "=>": "\\Rightarrow", "⇒": "\\Rightarrow", "<=>": "\\Leftrightarrow",
   "⇔": "\\Leftrightarrow",
+  "∈": "\\in", "∉": "\\notin", "⊂": "\\subset", "⊆": "\\subseteq",
 };
 const PRODUCT = new Set(["·", "*", "×", "."]);
 const SUMOP = new Set(["+", "-", "−"]);
 
 const MULTI_OPS = ["<=>", "<=", ">=", "!=", "~=", "->", "=>", "<<", ">>"];
-const SINGLE_OPS = "=<>≈≤≥≠≪≫→⇒⇔+-−*·×/^()|²³.";
+const SINGLE_OPS = "=<>≈≤≥≠≪≫→⇒⇔∈∉⊂⊆∀∃+-−*·×/^()|²³._'";
 
 function tokenize(line: string): Tok[] {
   const out: Tok[] = [];
@@ -147,6 +182,10 @@ function tokenize(line: string): Tok[] {
     if ((m = rest.match(/^[A-Za-zÀ-ÖØ-öø-ÿœŒµͰ-Ͽ][A-Za-z0-9À-ÖØ-öø-ÿœŒͰ-Ͽ]*/))) {
       out.push({ t: "id", s: m[0], a: i, b: i + m[0].length }); i += m[0].length; continue;
     }
+    // Ensembles et infini tapes en symbole : des grandeurs.
+    if (c in SET_CHARS || c === "∞") {
+      out.push({ t: "id", s: c, a: i, b: i + 1 }); i++; continue;
+    }
     const multi = MULTI_OPS.find((o) => rest.startsWith(o));
     if (multi) { out.push({ t: "op", s: multi, a: i, b: i + multi.length }); i += multi.length; continue; }
     if (SINGLE_OPS.includes(c) || c === "%") {
@@ -162,6 +201,9 @@ function isGreek(s: string): boolean {
 }
 
 const LOWER_VAR = /^[viu](?:batt|bat|ce|be|cb|cc|ee|dd|ss|in|out|ref|max|min|ch|eff|moy|pp|th)$/;
+
+/** Differentielle d'une integrale : dx, dt, dθ. */
+const DIFF = /^d(?:[a-zA-Z]|[α-ω])$/;
 
 /** Pulsation tapee en "w" : wt, jw, jwt (omega t). */
 const OMEGA_WORD = /^(?:jw|wt|jwt)$/;
@@ -193,6 +235,8 @@ const LONE_NAMES = new Set([
 /** Le mot peut-il etre une variable ? */
 function validIdent(s: string): boolean {
   if (isGreek(s) || s in FUNCS || GREEK_SUB.test(s) || FORMULA_ONLY.has(s)) return true;
+  if (GREEK_NAME_SUB.test(s)) return true;
+  if (s in SET_CHARS || s === "∞" || IMAG.test(s)) return true;
   if (/[^A-Za-z0-9]/.test(s)) return false; // accents, lettres grecques collees
   if (STOP.has(s.toLowerCase())) return false;
   if (s.length > 6) return false;
@@ -209,6 +253,11 @@ function validIdent(s: string): boolean {
 
 function identTex(s: string): string {
   if (s in GREEK_NAMES) return GREEK_NAMES[s];
+  if (s in SET_CHARS) return SET_CHARS[s];
+  const gs = GREEK_NAME_SUB.exec(s);
+  if (gs) return `${GREEK_NAMES[gs[1]]}_${gs[2].length === 1 ? gs[2] : `{${gs[2]}}`}`;
+  if (s === "∞" || s === "inf" || s === "infty") return "\\infty";
+  if (IMAG.test(s)) return imagTex(s);
   if (s.length === 1 && s in GREEK_CHARS) return GREEK_CHARS[s];
   if (OMEGA_WORD.test(s)) return s === "wt" ? "\\omega t" : s === "jw" ? "j\\omega" : "j\\omega t";
   // fc, fe : indice ; w0, ω0 : omega indice.
@@ -233,6 +282,8 @@ class Parser {
   private i = 0;
   /** Un operateur a deja ete lu : on est dans une formule. */
   private seenOp = false;
+  /** Corps d'integrale en cours de lecture : "dx" le termine. */
+  private inIntegral = 0;
   constructor(private toks: Tok[], start: number) { this.i = start; }
 
   get pos(): number { return this.i; }
@@ -327,6 +378,8 @@ class Parser {
       // fonction ("Vm sin(wt)") ou une parenthese qui calcule ("Vz (1 + x)").
       const startsAtom = t && ((t.t === "op" && t.s === "(") || t.t === "id" || t.t === "num");
       if (!startsAtom) break;
+      // "dx" d'une integrale : la fin du corps, pas un facteur.
+      if (this.inIntegral > 0 && t.t === "id" && DIFF.test(t.s)) break;
       const spacedOk = !sp || this.lastWasNumOrGreek(save)
         || (this.seenOp && t.t === "id" && (t.s in FUNCS || this.strongVar(save, t.s)));
       const parenTry = sp && !spacedOk && this.seenOp && t.t === "op";
@@ -363,12 +416,46 @@ class Parser {
       if (!inner) { this.i = save; return null; }
       return { tex: `-${inner.tex}`, ops: inner.ops + 1, vars: inner.vars };
     }
+    // "+inf", "x -> +∞" : un plus devant, seulement derriere une relation
+    // ou une parenthese (sinon "a + b" se lit deja comme une somme).
+    if (t?.t === "op" && t.s === "+") {
+      const prev = this.before(this.i);
+      if (!prev || (prev.t === "op" && (prev.s in REL || prev.s === "(" || prev.s === "^" || prev.s === "_"))) {
+        this.skipSp(); this.i++;
+        const inner = this.unary();
+        if (!inner) { this.i = save; return null; }
+        return { tex: `+${inner.tex}`, ops: inner.ops, vars: inner.vars };
+      }
+    }
     return this.power();
   }
 
   private power(): Node | null {
-    const base = this.atom();
+    const at = this.toks[this.i]?.t === "sp" ? this.i + 1 : this.i;
+    let base = this.atom();
     if (!base) return null;
+    const head = this.toks[at];
+    // Une seule lettre (ou grecque) avant "'" ou "_" colles.
+    const letter = this.i === at + 1 && head?.t === "id" && (/^[A-Za-z]$/.test(head.s) || isGreek(head.s));
+    // Primes : f'(x), y'', F'. Jamais devant une lettre (l'Ohm, d'un, c'est).
+    if (letter && this.toks[this.i]?.s === "'") {
+      let j = this.i;
+      while (this.toks[j]?.s === "'") j++;
+      const n = this.toks[j];
+      if (j - this.i <= 3 && !(n && (n.t === "id" || n.t === "num"))) {
+        base = { ...base, tex: base.tex + "'".repeat(j - this.i) };
+        delete base.group;
+        this.i = j;
+      }
+    }
+    // Indice tape : u_n, x_max, u_(n+1).
+    if (letter && this.toks[this.i]?.s === "_") {
+      const save = this.i, seen = this.seenOp;
+      this.i++;
+      const sub = this.script();
+      if (sub === null) { this.i = save; this.seenOp = seen; }
+      else base = { tex: `${base.tex}_${sub.length === 1 ? sub : `{${sub}}`}`, ops: base.ops + 1, vars: base.vars };
+    }
     const t = this.toks[this.i];
     // Entrees d'AOP : "V+", "V-" colles et suivis d'un blanc, d'une
     // relation ou de la fin s'ecrivent en exposant (V^+, V^-).
@@ -415,10 +502,122 @@ class Parser {
     return tex;
   }
 
+  /**
+   * Borne ou indice colle derriere "_" ou "^" : un nombre, une lettre ou
+   * un mot court, un signe et un de ceux-la, ou un groupe entre
+   * parentheses (sans les parentheses). null si rien de lisible.
+   */
+  private script(): string | null {
+    const t = this.toks[this.i];
+    if (!t) return null;
+    if (t.t === "num") { this.i++; return t.s.replace(",", "{,}"); }
+    if (t.t === "id") {
+      if (t.s in SET_CHARS || t.s === "∞" || t.s === "inf" || t.s === "infty" || isGreek(t.s)) { this.i++; return identTex(t.s); }
+      if (/^[A-Za-z][A-Za-z0-9]{0,3}$/.test(t.s)) { this.i++; return t.s; }
+      return null;
+    }
+    if (t.t === "op" && (t.s === "-" || t.s === "−" || t.s === "+")) {
+      this.i++;
+      const inner = this.script();
+      return inner === null ? null : `${t.s === "+" ? "+" : "-"}${inner}`;
+    }
+    if (t.t === "op" && t.s === "(") {
+      const save = this.i;
+      const g = this.atom();
+      if (!g || g.group === undefined) { this.i = save; return null; }
+      return g.group;
+    }
+    return null;
+  }
+
+  /** lim, sum, prod, int avec leurs bornes et leur corps (voir BIGOPS). */
+  private bigOp(t: Tok): Node | null {
+    const save = this.i, seen = this.seenOp;
+    const fail = () => { this.i = save; this.seenOp = seen; return null; };
+    this.i++;
+    let tex = BIGOPS[t.s];
+    let bounded = false;
+    if (this.toks[this.i]?.s === "_") {
+      this.i++;
+      const lo = this.script();
+      if (lo === null) return fail();
+      tex += `_{${lo}}`;
+      bounded = true;
+      if (t.s !== "lim" && this.toks[this.i]?.s === "^") {
+        this.i++;
+        const hi = this.script();
+        if (hi === null) return fail();
+        tex += `^{${hi}}`;
+      }
+    }
+    // Colle a autre chose qu'un blanc ou une parenthese : un mot ("intro").
+    const next = this.toks[this.i];
+    if (next && next.t !== "sp" && !(next.t === "op" && next.s === "(")) {
+      if (!bounded || next.t === "id" || next.t === "num") return fail();
+    }
+    this.seenOp = true;
+    if (t.s === "int") this.inIntegral++;
+    let body: Node | null;
+    try { body = this.product(); } finally { if (t.s === "int") this.inIntegral--; }
+    let diff = "";
+    if (t.s === "int") {
+      const save2 = this.i;
+      this.skipSp();
+      const d = this.toks[this.i];
+      if (d?.t === "id" && DIFF.test(d.s)) {
+        this.i++;
+        diff = `\\,\\mathrm{d}${identTex(d.s.slice(1))}`;
+      } else this.i = save2;
+      // Sans bornes, seule une integrale qui finit par "dx" en est une.
+      if (!bounded && (!diff || !body)) return fail();
+    } else if (!bounded) return fail();
+    const vars = 1 + (body?.vars ?? 0);
+    return { tex: `${tex}${body ? ` ${body.tex}` : ""}${diff}`, ops: 1 + (body?.ops ?? 0), vars };
+  }
+
+  /**
+   * Matrice tapee entre parentheses, lignes separees par ";" : "(a b; c d)",
+   * "(1, 2; 3, 4)". Toutes les lignes ont le meme nombre (2 ou plus) de
+   * coefficients simples (nombre, lettre, grandeur), sinon rien.
+   */
+  private matrix(): Node | null {
+    const rows: string[][] = [[]];
+    let j = this.i + 1, vars = 0;
+    for (;; j++) {
+      const t = this.toks[j];
+      if (!t) return null;
+      if (t.t === "sp" || (t.t === "other" && t.s === ",")) continue;
+      if (t.t === "other" && t.s === ";") { rows.push([]); continue; }
+      if (t.t === "op" && t.s === ")") break;
+      let sign = "";
+      let u: Tok = t;
+      if (t.t === "op" && (t.s === "-" || t.s === "−")) { sign = "-"; u = this.toks[++j]; if (!u) return null; }
+      if (u.t === "num") rows[rows.length - 1].push(sign + u.s.replace(",", "{,}"));
+      else if (u.t === "id" && (/^[A-Za-z]$/.test(u.s) || (validIdent(u.s) && !(u.s in FUNCS)))) {
+        rows[rows.length - 1].push(sign + identTex(u.s));
+        vars++;
+      } else return null;
+    }
+    const n = rows[0].length;
+    if (rows.length < 2 || n < 2 || rows.some((r) => r.length !== n)) return null;
+    this.i = j + 1;
+    const body = rows.map((r) => r.join(" & ")).join(" \\\\ ");
+    return { tex: `\\begin{pmatrix} ${body} \\end{pmatrix}`, ops: 1, vars };
+  }
+
   private atom(): Node | null {
     this.skipSp();
     const t = this.toks[this.i];
     if (!t) return null;
+    // Quantificateurs : "∀ x", "∃ n". Pas un operateur a eux seuls : "∀ x"
+    // attend la suite ("x in RR" a l'Espace suivant), "∀ x ∈ ℝ" en est une.
+    if (t.t === "op" && (t.s === "∀" || t.s === "∃")) {
+      const save = this.i;
+      this.i++;
+      const v = this.atom();
+      if (!v || v.vars < 1) { this.i = save; return null; }
+      return { tex: `${t.s === "∀" ? "\\forall" : "\\exists"} ${v.tex}`, ops: v.ops, vars: v.vars };
+    }
     if (t.t === "num") {
       this.i++;
       let tex = t.s.replace(",", "{,}");
@@ -431,6 +630,19 @@ class Parser {
       return { tex, ops: 0, vars: 0 };
     }
     if (t.t === "id") {
+      if (t.s in BIGOPS) {
+        const op = this.bigOp(t);
+        if (op) return op;
+      }
+      // "inf" (ou "infty") : l'infini, seulement derriere un signe ou une
+      // relation ("x -> +inf") ; "borne inf" reste du texte.
+      if (t.s === "inf" || t.s === "infty") {
+        const prev = this.before(this.i);
+        if (!(prev?.t === "op" && prev.s !== ")" && prev.s !== ".")) return null;
+        this.i++;
+        return { tex: "\\infty", ops: 0, vars: 0 };
+      }
+      if (t.s === "∞") { this.i++; return { tex: "\\infty", ops: 0, vars: 0 }; }
       // Re(Z), Im(Z), arg(z), max(a, b) : colle a la parenthese seulement.
       if (t.s in OPNAMES && this.toks[this.i + 1]?.t === "op" && this.toks[this.i + 1].s === "(") {
         const save = this.i;
@@ -451,6 +663,10 @@ class Parser {
       this.i++;
       return { tex: identTex(t.s), ops: 0, vars: 1 };
     }
+    if (t.t === "op" && t.s === "(") {
+      const m = this.matrix();
+      if (m) return m;
+    }
     if (t.t === "op" && (t.s === "(" || t.s === "|")) {
       const save = this.i;
       this.i++;
@@ -467,12 +683,12 @@ class Parser {
   }
 
   /**
-   * "a" est un mot outil ("il y a"), sauf en maths : colle a un nombre
+   * "a" (et "A", "à" tape sans accent) est un mot outil ("il y a"), sauf en maths : colle a un nombre
    * ("2a"), derriere un operateur ou une parenthese ("= a", "(a"), ou
    * devant une relation ("a != b").
    */
   private letterA(t: Tok): boolean {
-    if (t.s !== "a") return false;
+    if (t.s !== "a" && t.s !== "A") return false;
     const prevRaw = this.toks[this.i - 1];
     if (prevRaw?.t === "num") return true;
     const prev = this.before(this.i);
@@ -546,7 +762,7 @@ function slashWord(src: string): boolean {
 function continues(toks: Tok[], j: number): boolean {
   const n = toks[j];
   if (!n || n.t !== "op") return false;
-  if (n.s === ")" || n.s === "|") return false;
+  if (n.s === ")" || n.s === "|" || n.s === "'") return false;
   if (n.s === ".") {
     const after = toks[j + 1];
     return !!after && after.t !== "sp";
@@ -671,8 +887,15 @@ export function subscriptVars(latex: string): string {
   const protectedRe = /\\(?:mathrm|text|operatorname|mathbb)\{[^}]*\}|\\[A-Za-z]+/g;
   let out = "", last = 0, m: RegExpExecArray | null;
   const fix = (part: string) => part
+    // j et pulsation : jLw = j L omega, jRCw, RCw, jw (voir IMAG).
     .replace(
-      /(^|[^A-Za-z_^])(?<![_^]\{)([A-Z])([a-z]{1,5})(?![A-Za-z])/g,
+      /(?<![A-Za-z_^{])(j[RLC]{1,3}w?|jw|[RLC]*[LC][RLC]*w)(?![A-Za-z0-9_])/g,
+      (_all, word: string) => imagTex(word),
+    )
+    // Pas devant "_" : "Cu_{c}" est C fois u_c, et C_{u}_{c} serait un
+    // double indice (formule en rouge).
+    .replace(
+      /(^|[^A-Za-z_^])(?<![_^]\{)([A-Z])([a-z]{1,5})(?![A-Za-z_])/g,
       (all, pre: string, head: string, rest: string) => {
         const word = head + rest;
         if (ROMAN_UNITS.has(word)) return `${pre}${UNITS[word]}`;
@@ -680,7 +903,7 @@ export function subscriptVars(latex: string): string {
       },
     )
     .replace(
-      /(^|[^A-Za-z_^])(?<![_^]\{)([A-Z])(\d{1,2})(?![\d])/g,
+      /(^|[^A-Za-z_^])(?<![_^]\{)([A-Z])(\d{1,2})(?![\d_])/g,
       (_all, pre: string, head: string, digits: string) => `${pre}${head}_{${digits}}`,
     );
   while ((m = protectedRe.exec(latex))) {
@@ -752,4 +975,136 @@ export function symbolAtEnd(text: string): string | null {
   if (!(two in SYMBOL_PAIRS)) return null;
   if (CODE_PAIRS.has(two) && /[A-Za-z0-9_\])]$/.test(text.slice(0, -2))) return null;
   return text.slice(0, -2) + SYMBOL_PAIRS[two];
+}
+
+/** Ensembles tapes en double majuscule. */
+const SET_WORDS: Record<string, string> = { RR: "ℝ", NN: "ℕ", ZZ: "ℤ", QQ: "ℚ", CC: "ℂ" };
+
+/**
+ * Mots de maths tapes dans le texte, remplaces par leur symbole quand le
+ * mot vient d'etre fini (Espace, Entree). Seulement en contexte formule :
+ * "forall" et "infty" toujours (ce ne sont pas des mots) ; "exists" si la
+ * ligne a deja un symbole de maths (ou une formule, `mathBefore`), ou
+ * derriere une virgule ; RR, NN... derriere ∈, ⊂, →, ":" ;
+ * "in" et "sub" entre une lettre et un ensemble ("x in RR", "A sub B") ;
+ * "inf" derriere un signe ou une relation ("x -> +inf"). « le CC de
+ * maths », « logged in », « borne inf » restent du texte. null : rien.
+ */
+export function mathWordsAtEnd(text: string, mathBefore = false): string | null {
+  const m = /(^|[^\p{L}\p{N}_])([\p{L}\p{N}]+)([,;.)]*)$/u.exec(text);
+  if (!m) return null;
+  const word = m[2], tail = m[3];
+  const head = text.slice(0, m.index + m[1].length);
+  const line = head.slice(head.lastIndexOf("\n") + 1);
+  const done = (sym: string, h = head) => h + sym + tail;
+  if (word === "forall") return done("∀");
+  if (word === "infty") return done("∞");
+  if (word === "inf") return /(?:[+\-−→=<>≤≥]|->)\s*$/.test(head) ? done("∞") : null;
+  if (word === "exists") return mathBefore || /,\s*$/.test(head) || /[∀∃∈∉⊂⊆ℝℕℤℚℂ⇒⇔]/.test(line) ? done("∃") : null;
+  const set = SET_WORDS[word];
+  const target = set ?? (/^[A-Z]$|^[ℝℕℤℚℂ]$/u.test(word) ? word : null);
+  if (target) {
+    // "x in RR", "A sub B" : la relation et l'ensemble ensemble.
+    const rel = /(^|[\s(,;:∀∃])([A-Za-zα-ωΑ-Ω]\d{0,2})\s+(in|sub)\s+$/.exec(head);
+    if (rel) {
+      const at = head.search(/(?:in|sub)\s+$/);
+      const sym = rel[3] === "in" ? "∈" : "⊂";
+      const h = head.slice(0, at) + sym + head.slice(at + rel[3].length);
+      return done(target, h);
+    }
+    if (set && /(?:[∈∉⊂⊆×→:]|\(|->)\s*$/.test(head)) return done(set);
+  }
+  return null;
+}
+
+/** Relations (LaTeX) autour desquelles un espace tape ne sert a rien. */
+const REL_CMDS = "in|notin|subset|subseteq|supset|to|Rightarrow|Leftarrow|iff|Leftrightarrow|le|ge|leq|geq|ne|neq|approx|equiv|forall|exists";
+
+/**
+ * Sortie de MathLive relue pour KaTeX : commandes propres a MathLive
+ * (\differentialD, \exponentialE, \imaginaryI, \mleft), cases vides
+ * retirees (une integrale aux bornes vides devient une integrale sans
+ * bornes), "in" tape entre deux espaces = appartient, espaces inutiles
+ * autour des relations. Le contenu de \text{} et \mathrm{} n'est pas touche.
+ */
+export function cleanMathLive(latex: string): string {
+  const keep: string[] = [];
+  let s = latex.replace(/\\(?:text|mathrm|operatorname\*?)\{[^{}]*\}/g, (g) => `\u0000${keep.push(g) - 1}\u0000`);
+  s = s
+    .replace(/\\differentialD\s*/g, "\\mathrm{d}")
+    .replace(/\\exponentialE\s*/g, "\\mathrm{e}")
+    .replace(/\\imaginaryI\s*/g, "\\mathrm{i}")
+    .replace(/\\imaginaryJ\s*/g, "\\mathrm{j}")
+    .replace(/\\mleft/g, "\\left").replace(/\\mright/g, "\\right")
+    .replace(/\^\{\\doubleprime\}/g, "''").replace(/\^\{\\prime\}/g, "'")
+    .replace(/\\doubleprime/g, "''").replace(/\\prime(?![A-Za-z])/g, "'")
+    .replace(/\\placeholder(?:\[[^\]]*\])?\{\}/g, "");
+  // Parentheses tapees autour de tout le contenu d'une racine, d'une borne
+  // ou d'un terme de fraction : \sqrt{(x)}, \sum_{(k=0)}, \frac{1}{(2x)}.
+  s = unwrapGroups(s);
+  // Indices et exposants vides (bornes non remplies), jusqu'a ce qu'il n'en reste plus.
+  for (let k = 0; k < 5; k++) {
+    const next = s.replace(/[_^]\{\s*\}/g, "");
+    if (next === s) break;
+    s = next;
+  }
+  const SP = "(?:\\\\[;:, ]|\\\\quad|\\s)";
+  // "x in R" : les lettres i, n entre deux espaces (pas V_{in}, ni "min").
+  s = s.replace(new RegExp(`(^|${SP})in(?=${SP}|$)`, "g"), "$1\\in");
+  // Espaces tapes autour d'une relation : KaTeX espace deja.
+  s = s
+    .replace(new RegExp(`${SP}+(?=\\\\(?:${REL_CMDS})(?![A-Za-z])|[=<>])`, "g"), "")
+    .replace(new RegExp(`(\\\\(?:${REL_CMDS})(?![A-Za-z])|[=<>])${SP}+(?=([A-Za-z])?)`, "g"),
+      (_a, rel: string, letter?: string) => (letter && rel.startsWith("\\") ? `${rel} ` : rel));
+  return s.replace(/\u0000(\d+)\u0000/g, (_a, i: string) => keep[Number(i)]).trim();
+}
+
+/** Contenu entre parentheses qui l'englobent en entier : "(a+b)" -> "a+b", "(a)(b)" -> null. */
+function outerParens(x: string): string | null {
+  const t = x.trim();
+  let open = "", close = "";
+  if (t.startsWith("\\left(") && t.endsWith("\\right)")) { open = "\\left("; close = "\\right)"; }
+  else if (t.startsWith("(") && t.endsWith(")")) { open = "("; close = ")"; }
+  else return null;
+  const inner = t.slice(open.length, t.length - close.length);
+  let depth = 0;
+  for (const c of inner) {
+    if (c === "(") depth++;
+    else if (c === ")" && --depth < 0) return null;
+  }
+  return depth === 0 ? inner : null;
+}
+
+/** Groupes {..} de \sqrt, \frac, _ et ^ dont le contenu est tout entier entre parentheses. */
+function unwrapGroups(s: string): string {
+  // Groupe {..} qui commence a `start` (juste apres "{") : fin exclue, ou -1.
+  const groupEnd = (start: number) => {
+    let depth = 1, j = start;
+    for (; j < s.length && depth > 0; j++) {
+      if (s[j] === "\\") { j++; continue; }
+      if (s[j] === "{") depth++;
+      else if (s[j] === "}") depth--;
+    }
+    return depth === 0 ? j : -1;
+  };
+  const unwrap = (body: string) => unwrapGroups(outerParens(body) ?? body);
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const m = /^(?:\\sqrt|\\frac|_|\^)\{/.exec(s.slice(i));
+    if (!m) { out += s[i]; continue; }
+    const start = i + m[0].length;
+    const end = groupEnd(start);
+    if (end < 0) { out += s[i]; continue; }
+    out += m[0] + unwrap(s.slice(start, end - 1)) + "}";
+    i = end - 1;
+    // Denominateur d'une fraction : le groupe qui suit.
+    if (m[0] === "\\frac{" && s[end] === "{") {
+      const end2 = groupEnd(end + 1);
+      if (end2 > 0) {
+        out += "{" + unwrap(s.slice(end + 1, end2 - 1)) + "}";
+        i = end2 - 1;
+      }
+    }
+  }
+  return out;
 }

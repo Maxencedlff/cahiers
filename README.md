@@ -100,8 +100,10 @@ l'application s'ouvre en lecture seule.
   (le dossier aussi), couleur, supprimer vers la corbeille.
 - Un onglet = un cahier et un intercalaire : Cours a gauche, Exos a droite
   dans le meme cahier. Appui long (ou clic droit) sur un intercalaire : ouvrir
-  a droite, renommer, deplacer, supprimer. En split, outils et clavier visent
-  le panneau touche en dernier.
+  a droite, renommer, deplacer, supprimer ; le glisser (a la souris, ou appui
+  long puis glisser au doigt ou au stylet) le change de place. `Ctrl+T` : nouvel
+  intercalaire. En split, outils et clavier visent le panneau touche en
+  dernier ; portable tourne (portrait), les deux panneaux s'empilent.
 - Un appui sur « p. 4 / 12 » (ou `Ctrl+G`) : liste des pages avec date et
   premiere ligne. `Alt+←` (ou le bouton retour de la souris) revient d'avant un
   saut : recherche, repere, lien, liste des pages.
@@ -262,6 +264,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+Pg↓` / `Ctrl+Pg↑` | page suivante, precedente (`Pg↓` `Pg↑` seuls hors du texte) |
 | `Ctrl+Maj+Pg↓` / `Ctrl+Maj+Pg↑` | intercalaire suivant, precedent |
 | `Ctrl+N` / `Ctrl+Maj+N` | nouvelle page a la fin, inserer apres la page courante |
+| `Ctrl+T` | nouvel intercalaire dans le cahier en vue |
 | `Ctrl+G` | liste des pages, taper un numero y va (ou un appui sur « p. 4 / 12 ») |
 | `Alt+←` | revenir d'avant un saut (aussi le bouton retour de la souris) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | zoom avant, arrière (50 à 300 %), retour à 100 % ; aussi Ctrl+molette et pinch à deux doigts, chaque panneau le sien |
@@ -284,7 +287,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Alt+Z` `Alt+T` | zone math, zone texte (deux fois : verrou) |
 | `Alt+0` a `Alt+5` | noir, puis les 5 couleurs de la palette (avec une sélection au lasso : la recolore) |
 | `Alt+=` | nouvelle formule ; `Alt+F P I R N S L D V M` : modeles du ruban Maths |
-| `Echap` | lâcher la sélection du lasso ; quitter le texte ; une seconde fois, retour au menu |
+| `Echap` | fermer ce qui est ouvert (ruban en volet, sélection du lasso), rendre le clavier de la calculatrice à la page (elle reste ouverte), quitter le texte ou y revenir depuis un bouton ; un second `Echap` de suite : retour au menu (jamais celui qui termine une saisie) |
 | `#` `##` `###` puis Espace | en debut de ligne : titre, sous-titre, niveau 3 ; `-` ou `*` : puce ; `1.` ou `1)` : liste numerotee (Entree continue, Entree sur un element vide en sort, Tab / Maj+Tab : retrait, Retour arriere au debut : texte normal, Ctrl+Z juste apres : le marqueur revient) |
 | `F1` | fiche des raccourcis |
 

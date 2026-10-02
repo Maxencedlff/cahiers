@@ -26,10 +26,12 @@ import { askLatex } from "./mathdialog";
 import { colorOf, labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
 import {
   PASTE_STEP, clampMove, clampSpace, copySelection, pasteClip, recolorStrokes, replaceStrokes,
-  selectInLasso, selectionBounds, strokesBelow, strokesById, transformBlocks,
+  selectInLasso, selectionBounds, shiftBelow, strokesBelow, strokesById, transformBlocks,
   type InkClip, type Pt as InkPt, type Transform,
 } from "../core/ink/selection";
 import { TextDoc } from "./textdoc";
+import { snapLines } from "./linesnap";
+import { LINE, TEXT_TOP, clearOfInk, rowAt, rowBottom, type InkBox } from "../core/textlayout";
 import { absorbTextBoxes } from "../core/text/doc";
 import { flagContext, fold, parseQuery } from "../core/text/find";
 import { DEFAULT_FLAG_NOTE } from "../core/storage/search";
@@ -43,6 +45,12 @@ import {
   scrollToAnchor, stepZoom, wheelFactor, zoomLabel, type Pt,
 } from "../core/zoom";
 import { titleOf } from "../core/shortcuts";
+
+/**
+ * Largeur de feuille minimale hors zoom : le texte (21 px a 900 de large)
+ * y garde 13 px. En dessous on defile de cote (split etroit).
+ */
+const READABLE_W = 558;
 
 export type ViewMode = "pages" | "scroll";
 export type RenderMode = "ink" | "clean";
@@ -158,7 +166,19 @@ interface LoadedPage {
   copy?: string;
   /** Bandeaux de la page (version future, copies de conflit). */
   notes: HTMLElement;
+  /** Hauteur du texte a la derniere mise a l'echelle (unites de page). */
+  textH?: number;
+  /**
+   * Bas de la ligne du curseur juste avant la derniere frappe (unites de
+   * page) : si le texte grandit, l'encre situee dessous le suit (followText).
+   */
+  preEdit?: { y: number; t: number };
+  /** Lignes ajoutees par l'appli (clic sous le texte, saut de l'encre) : l'encre ne bouge pas. */
+  noPush?: boolean;
 }
+
+/** Une frappe plus ancienne ne decide plus de ce que l'encre suit (ms). */
+const PRE_EDIT_MS = 2000;
 
 /**
  * Vue d'un intercalaire. La page reste l'unite de base dans les deux modes
@@ -854,6 +874,10 @@ export class PageView {
     // Une photo qui finit de charger allonge le texte : la feuille suit.
     loaded.ro = new ResizeObserver(() => this.fitSheet(loaded));
     loaded.ro.observe(doc.root);
+    // Polices KaTeX arrivees apres le premier affichage : formules recalees.
+    void document.fonts?.ready.then(() => {
+      if (!loaded.dead && snapLines(doc.root, true)) this.fitSheet(loaded);
+    });
     this.paintStrokes(loaded);
     this.watchWordTaps(loaded);
     this.paintOverlay(loaded);
@@ -905,8 +929,67 @@ export class PageView {
     body.content = content;
     loaded.lastEdit = "text";
     this.lastGestureId = loaded.page.id;
+    const before = loaded.textH;
     this.fitSheet(loaded);
+    if (before !== undefined && loaded.textH !== undefined && !loaded.noPush) this.followText(loaded, loaded.textH - before);
     this.queueSave(loaded);
+  }
+
+  /**
+   * Le texte a grandi (ou raccourci) de dy sous la ligne de la derniere
+   * frappe : l'encre et les reperes situes dessous suivent, comme un dessin
+   * ancre dans un traitement de texte. Le texte ne recouvre jamais un
+   * schema pose plus bas, et un schema glisse entre deux paragraphes reste
+   * entre eux. Pas d'entree d'annulation : Ctrl+Z du texte la defait.
+   */
+  private followText(loaded: LoadedPage, dy: number): void {
+    const pre = loaded.preEdit;
+    if (Math.abs(dy) < 2 || !pre || performance.now() - pre.t > PRE_EDIT_MS || loaded.readOnly) return;
+    const d = shiftBelow(loaded.page.blocks, pre.y, dy);
+    if (!d) return;
+    this.fitSheet(loaded);
+    this.paintStrokes(loaded);
+    this.paintOverlay(loaded);
+  }
+
+  /** Note la ligne du curseur avant une frappe (followText). */
+  private notePreEdit(loaded: LoadedPage): void {
+    const row = loaded.doc.caretRow();
+    if (!row) return;
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    const top = loaded.sheet.getBoundingClientRect().top;
+    loaded.preEdit = { y: rowBottom(((row.top + row.bottom) / 2 - top) / k), t: performance.now() };
+  }
+
+  /**
+   * Frappe sur une ligne vide posee sur de l'encre (schema dessine sous la
+   * derniere ligne, puis on tape) : la ligne descend d'abord sous l'encre,
+   * par lignes entieres. Le texte ne se pose jamais sur un dessin.
+   */
+  private skipInk(loaded: LoadedPage): void {
+    if (loaded.readOnly || !loaded.doc.caretLineEmpty()) return;
+    const row = loaded.doc.caretRow();
+    if (!row) return;
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    const sheetTop = loaded.sheet.getBoundingClientRect().top;
+    const top = TEXT_TOP + rowAt(((row.top + row.bottom) / 2 - sheetTop) / k) * LINE;
+    const boxes: InkBox[] = [];
+    for (const b of loaded.page.blocks) {
+      if (b.type !== "ink" && b.type !== "math") continue;
+      for (const st of b.strokes) {
+        // Le surligneur se pose sur le texte : il n'est pas un obstacle.
+        if (st.tool !== "pen" || !st.points.length) continue;
+        boxes.push(cachedBounds(st));
+      }
+    }
+    const clear = clearOfInk(boxes, top);
+    if (clear <= top + 0.5) return;
+    loaded.noPush = true;
+    try {
+      loaded.doc.padBeforeCaret(sheetTop + (clear + LINE / 2) * k - 1);
+    } finally {
+      loaded.noPush = false;
+    }
   }
 
   /**
@@ -932,10 +1015,41 @@ export class PageView {
       const tool = this.host.getTool();
       const toInk = e.pointerType === "pen" || e.pointerType === "touch"
         || (e.pointerType === "mouse" && e.button === 0 && tool !== "pen");
-      if (!toInk) { loaded.lastEdit = "text"; this.lastGestureId = loaded.page.id; return; }
+      if (!toInk) {
+        loaded.lastEdit = "text";
+        this.lastGestureId = loaded.page.id;
+        // Clic sous la fin du texte : le curseur se pose a cette hauteur
+        // (lignes vides ajoutees), comme dans OneNote, au lieu de repartir
+        // a la fin du texte.
+        if (e.button === 0 && !e.shiftKey && e.target === loaded.doc.root && !loaded.readOnly) {
+          const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+          loaded.noPush = true;
+          try {
+            if (loaded.doc.caretBelowEnd(e.clientY, LINE * k)) e.preventDefault();
+          } finally {
+            loaded.noPush = false;
+          }
+        }
+        return;
+      }
       e.preventDefault();
       loaded.surface?.forwardDown(e);
     });
+    // Avant une frappe : une ligne vide posee sur de l'encre descend sous
+    // elle, puis la ligne du curseur est notee (l'encre dessous suivra le
+    // texte s'il grandit). En capture : avant TextDoc.
+    const typing = (e: KeyboardEvent) =>
+      e.key.length === 1 && !e.metaKey && (e.ctrlKey === e.altKey); // AltGr = Ctrl+Alt
+    loaded.doc.root.addEventListener("keydown", (e) => {
+      if (loaded.readOnly || e.isComposing) return;
+      if (e.target === loaded.doc.root && typing(e)) this.skipInk(loaded);
+      this.notePreEdit(loaded);
+    }, { capture: true });
+    loaded.doc.root.addEventListener("paste", (e) => {
+      if (loaded.readOnly || e.target !== loaded.doc.root) return;
+      this.skipInk(loaded);
+      this.notePreEdit(loaded);
+    }, { capture: true });
     // Survol relaye au canvas (apercu de la gomme) : la couche texte le couvre.
     loaded.sheet.addEventListener("pointermove", (e) => loaded.surface?.hover(e));
     loaded.sheet.addEventListener("pointerleave", () => loaded.surface?.hover(null));
@@ -985,10 +1099,13 @@ export class PageView {
     // redescendait jamais (texte efface, trait annule). On mesure donc le
     // contenu seul, le temps d'une lecture, sans peinture entre les deux.
     const root = loaded.doc.root;
+    // Formules et blocs cales sur la grille des lignes avant la mesure.
+    snapLines(root);
     const minH = root.style.minHeight;
     root.style.minHeight = "0px";
     const textPx = root.scrollHeight;
     root.style.minHeight = minH;
+    if (textPx) loaded.textH = textPx / k;
     const h = sheetHeight(loaded.page, textPx / k);
     loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
     const d = density ?? this.densityOf(loaded, width, h * k);
@@ -1155,14 +1272,17 @@ export class PageView {
   }
 
   private relayout(): void {
-    const base = Math.min(900, Math.max(280, this.root.clientWidth - 36));
+    // Jamais sous READABLE_W (texte a 13 px) : un panneau de split etroit
+    // fait defiler la feuille de cote plutot que de la rendre illisible.
+    const avail = this.root.clientWidth - 36;
+    const base = Math.min(900, Math.max(READABLE_W, avail));
     // Zoom : la feuille est simplement plus large (ou plus etroite). Texte,
     // blocs et canvas suivent --k ; au-dela de la vue, on defile de cote.
     const z = this.effectiveZoom;
     const width = Math.round(base * z);
     for (const p of this.list) {
       p.wrap.style.maxWidth = `${width}px`;
-      p.wrap.style.width = z > 1 ? `${width}px` : "";
+      p.wrap.style.width = z > 1 || width > avail ? `${width}px` : "";
       p.sheet.style.height = "";
       p.sheet.style.setProperty("--k", String(width / PAGE_W));
       this.fitSheet(p, true);
@@ -1979,7 +2099,7 @@ export class PageView {
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
         ctx.setTransform(2, 0, 0, 2, 0, 0);
-        const p = plot.samplePlot(b.fn, b.domain[0], b.domain[1], 500, "x", b.angle);
+        const p = plot.samplePlot(b.fn, b.domain[0], b.domain[1], 500, "x", b.angle, !!b.logX);
         if (!p.ok || !p.samples) {
           ctx.fillStyle = "#a51b1b";
           ctx.font = "16px system-ui, sans-serif";
@@ -1987,7 +2107,7 @@ export class PageView {
           return;
         }
         const win = plot.plotWindow(p.samples, b.range);
-        draw.drawPlot(ctx, W, H, p.samples, { from: b.domain[0], to: b.domain[1], ...win }, { font: 14, line: 2.2 });
+        draw.drawPlot(ctx, W, H, p.samples, { from: b.domain[0], to: b.domain[1], ...win }, { font: 14, line: 2.2, logX: !!b.logX });
       }).catch(() => undefined);
     return { node, ready };
   }
@@ -2037,8 +2157,17 @@ export class PageView {
     if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
     loaded.page.blocks.push(block);
     const atCaret = loaded.doc.hasCaret();
-    const fig = loaded.doc.insertLive(block.id, atCaret);
-    if (!atCaret) this.belowInk(loaded, fig);
+    // Au curseur : l'encre sous sa ligne suit le texte ; en fin de texte,
+    // belowInk descend le bloc sous l'encre, qui ne bouge pas.
+    if (atCaret) this.notePreEdit(loaded);
+    loaded.noPush = !atCaret;
+    let fig: HTMLElement;
+    try {
+      fig = loaded.doc.insertLive(block.id, atCaret);
+      if (!atCaret) this.belowInk(loaded, fig);
+    } finally {
+      loaded.noPush = false;
+    }
     this.fitSheet(loaded);
     fig.scrollIntoView({ block: "nearest" });
     toast(block.type === "graph" ? "Courbe posée dans la page : un appui la rouvre" : "Calcul posé dans la page : un appui le rouvre");
@@ -2054,8 +2183,15 @@ export class PageView {
     if (!loaded) return false;
     if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
     const atCaret = loaded.doc.hasCaret();
-    const eq = loaded.doc.insertFormula(latex, atCaret);
-    if (!atCaret) this.belowInk(loaded, eq);
+    if (atCaret) this.notePreEdit(loaded);
+    loaded.noPush = !atCaret;
+    let eq: HTMLElement;
+    try {
+      eq = loaded.doc.insertFormula(latex, atCaret);
+      if (!atCaret) this.belowInk(loaded, eq);
+    } finally {
+      loaded.noPush = false;
+    }
     this.fitSheet(loaded);
     eq.scrollIntoView({ block: "nearest" });
     toast("Résultat posé dans la page");

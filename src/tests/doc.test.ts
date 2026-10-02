@@ -153,5 +153,15 @@ describe("presse-papiers et recherche", () => {
     expect(texToPlain("0{,}6\\,\\mathrm{V}")).toBe("0,6 V");
     expect(texToPlain("\\sqrt{L\\,C}")).toBe("sqrt(L C)");
     expect(texToPlain("x \\leq \\varepsilon")).toBe("x <= epsilon");
+    // Signe en tete : pas de parentheses ; numerateur produit : pas de parentheses.
+    expect(texToPlain("\\frac{-R_2}{R_1} \\cdot V_e")).toBe("-R2/R1 · Ve");
+    expect(texToPlain("\\frac{V_e \\cdot R_2}{R_1 + R_2}")).toBe("Ve · R2/(R1 + R2)");
+    expect(texToPlain("\\frac{1}{2\\,\\pi\\,R\\,C}")).toBe("1/(2 pi R C)");
+    // Fractions abregees de MathLive, indices composes, bornes.
+    expect(texToPlain("E=\\frac12C")).toBe("E=1/2C");
+    expect(texToPlain("\\frac{R_{2}}{R_{1}}")).toBe("R2/R1");
+    expect(texToPlain("u_{n + 1} = 2\\,u_n")).toBe("u_(n + 1) = 2 un");
+    expect(texToPlain("\\int_{0}^{1} x^{2}\\,\\mathrm{d}x")).toBe("int_0^1 x^2 dx");
+    expect(texToPlain("\\sum_{k = 0}^{n} k")).toBe("sum_(k = 0)^n k");
   });
 });

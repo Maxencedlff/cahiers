@@ -1,4 +1,7 @@
-import { el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick, onLongPress } from "./dom";
+import {
+  el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick,
+  appendToToast, dismissPageToasts, APP_TOAST,
+} from "./dom";
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { pageListDialog } from "./pagelist";
 import { buildProbe } from "./probe";
@@ -12,7 +15,7 @@ import { uuid } from "../core/id";
 import { calcSpecOf, graphSpecOf, type CalcSpec, type GraphSpec } from "../core/liveblock";
 import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
 import { Positions } from "../core/position";
-import { NavHistory, dayLabel, moveItem, pickSplitDivider, type NavSpot } from "../core/nav";
+import { NavHistory, dayLabel, dropIndex, moveItem, moveTo, pickSplitDivider, type NavSpot } from "../core/nav";
 import { searchAll, type FlagHit } from "../core/storage/search";
 import type { FsAdapter } from "../core/storage/fs";
 import {
@@ -30,7 +33,9 @@ import type { Block, NotebookMeta, Stroke } from "../core/types";
 import { isPhotoImportKey, PHOTO_IMPORT_KEYS } from "../core/image/photo";
 import { PAPERS } from "../core/paper";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
-import { ctrlCommand, isReloadKey, pageLabel, parsePageInput, titleOf, type Command } from "../core/shortcuts";
+import {
+  ctrlCommand, escapeAction, isReloadKey, pageLabel, parsePageInput, titleOf, type Command,
+} from "../core/shortcuts";
 import { showShortcuts } from "./help";
 import type { Presence } from "../platform";
 import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
@@ -120,6 +125,13 @@ export class App {
   private auxFrom: "menu" | "notebook" = "menu";
   /** Derniere recherche tapee, reproposee au Ctrl+K suivant. */
   private lastQuery = "";
+  /**
+   * La touche d'avant etait un Echap, sans appui ni autre touche entre les
+   * deux : le suivant va au menu (escapeAction).
+   */
+  private lastEsc = false;
+  /** Ruban Maths ouvert en volet (colonne trop basse pour l'avoir en dessous). */
+  private mathFly = false;
 
   private tool: Tool = "pen";
   /**
@@ -218,6 +230,8 @@ export class App {
       });
     }
     document.addEventListener("keydown", (e) => this.onKey(e));
+    // Un appui entre deux Echap : le second ne va plus au menu.
+    window.addEventListener("pointerdown", () => { this.lastEsc = false; }, true);
     // Fenetre retaillee (moitie d'ecran, portable tourne) : la calculatrice
     // passe de la colonne a la fenetre flottante, ou l'inverse.
     let resizing: ReturnType<typeof setTimeout> | undefined;
@@ -225,6 +239,8 @@ export class App {
       clearTimeout(resizing);
       resizing = setTimeout(() => {
         if (this.calculator) this.placeCalculator(this.calculator);
+        // Colonne d'outils : une ou deux sous-colonnes selon la place.
+        if (this.screen === "notebook") this.paintToolbar();
       }, 200);
     });
     // Le premier stylet vu bascule l'application en separation stylet/doigt.
@@ -285,7 +301,8 @@ export class App {
           insertGraph: (g) => {
             const block = { id: uuid(), type: "graph" as const, fn: g.fn, domain: g.domain };
             this.focusedTab()?.view?.insertLive(Object.assign(block,
-              g.range ? { range: g.range } : {}, g.angle === "DEG" ? { angle: "DEG" as const } : {}));
+              g.range ? { range: g.range } : {}, g.angle === "DEG" ? { angle: "DEG" as const } : {},
+              g.logX ? { logX: true } : {}));
           },
           insertCalc: (c) => {
             const block = { id: uuid(), type: "calc" as const, expr: c.expr, result: c.result };
@@ -335,6 +352,8 @@ export class App {
 
   private async showMenu(): Promise<void> {
     this.screen = "menu";
+    dismissPageToasts();
+    this.mathFly = false;
     await this.flushAll();
     const menu = await buildMenu(this.menuHost());
     // Un autre ecran a pu s'ouvrir pendant la lecture du disque.
@@ -384,6 +403,7 @@ export class App {
     // peut l'elargir d'un appui).
     const tab = this.auxFrom === "notebook" ? this.focusedTab() : undefined;
     this.screen = "search";
+    dismissPageToasts();
     await this.flushAll();
     clear(this.main);
     this.paintTabs();
@@ -402,6 +422,7 @@ export class App {
   private async showFlags(notebook?: string): Promise<void> {
     this.noteAuxFrom();
     this.screen = "flags";
+    dismissPageToasts();
     // Les reperes poses a l'instant doivent etre sur le disque pour etre listes.
     await this.flushAll();
     clear(this.main);
@@ -477,6 +498,7 @@ export class App {
   private showProbe(): void {
     this.noteAuxFrom();
     this.screen = "probe";
+    dismissPageToasts();
     clear(this.main);
     this.paintTabs();
     this.main.append(buildProbe(() => this.leaveAux()));
@@ -656,6 +678,7 @@ export class App {
 
   /** L'onglet passe a un autre intercalaire, a la page qu'on y avait laissee. */
   private async switchDivider(tab: Tab, divider: string, page?: number): Promise<void> {
+    dismissPageToasts();
     await tab.view?.flush();
     // La page quittee est retenue : on y revient en recliquant l'intercalaire.
     this.rememberTab(tab);
@@ -680,6 +703,7 @@ export class App {
       if (!close) return;
     }
     await view?.dispose();
+    dismissPageToasts();
     // Fermer quand meme : la page continue d'etre retentee et reste signalee.
     if (view?.hasUnsaved) this.orphans.add(view);
     this.dropTab(id);
@@ -886,28 +910,152 @@ export class App {
       const node = el("button", {
         class: `divider-tab${d === tab.divider ? " active" : ""}`,
         dataset: { divider: d },
-        title: "Appui long ou clic droit : ouvrir à droite, renommer, déplacer, supprimer",
+        title: "Glisser pour déplacer (au doigt ou au stylet : appui long puis glisser). "
+          + "Appui long ou clic droit : ouvrir à droite, renommer, déplacer, supprimer",
         onclick: () => void this.switchDividerAndRender(tab, d),
       }, d);
-      // Appui long (stylet, doigt) ou clic droit : le menu de l'intercalaire.
-      onLongPress(node, () => void this.dividerMenu(tab, d, dividers));
+      this.wireDividerDrag(bar, node, tab, d, dividers);
       bar.append(node);
     }
     bar.append(el("button", {
       class: "divider-tab",
-      title: "Nouvel intercalaire",
+      title: titleOf("Nouvel intercalaire", "newDivider"),
       "aria-label": "Nouvel intercalaire",
-      onclick: async () => {
-        if (this.refuseLocked(tab.notebook)) return;
-        const name = await askText("Nouvel intercalaire", "Nom", "");
-        if (!name) return;
-        const d = await this.repo.createDivider(tab.notebook, name);
-        await this.switchDividerAndRender(tab, d);
-      },
+      onclick: () => void this.newDivider(tab),
     }, "+"));
     // Pastilles des copies de conflit, une fois la bande a l'ecran.
     queueMicrotask(() => { if (bar.isConnected) this.paintConflictBadges(); });
     return bar;
+  }
+
+  /** « + » de la bande ou Ctrl+T : un intercalaire de plus, ouvert aussitot. */
+  private async newDivider(tab: Tab): Promise<void> {
+    if (this.refuseLocked(tab.notebook) || document.querySelector(".backdrop")) return;
+    const name = await askText("Nouvel intercalaire", "Nom", "");
+    if (!name) return;
+    const d = await this.repo.createDivider(tab.notebook, name);
+    await this.switchDividerAndRender(tab, d);
+  }
+
+  /**
+   * Intercalaire glisse dans la bande pour le changer de place : a la souris
+   * des qu'on bouge, au doigt et au stylet apres un appui long (sinon le
+   * doigt fait defiler la bande). Appui long sans bouger, ou clic droit : le
+   * menu de l'intercalaire, comme avant.
+   */
+  private wireDividerDrag(bar: HTMLElement, node: HTMLElement, tab: Tab, d: string, dividers: string[]): void {
+    const HOLD_MS = 450, SLOP = 8;
+    let st: {
+      id: number; type: string; x: number; y: number; scroll: number;
+      armed: boolean; dragging: boolean; timer: ReturnType<typeof setTimeout> | null;
+    } | null = null;
+    /** Le clic qui suit un glisser ou un menu ne change pas d'intercalaire. */
+    let swallow = false;
+    const tabs = () => [...bar.querySelectorAll<HTMLElement>(".divider-tab[data-divider]")];
+    const from = () => dividers.indexOf(d);
+    const target = (x: number) => {
+      const centers = tabs().map((t) => { const r = t.getBoundingClientRect(); return r.left + r.width / 2; });
+      return dropIndex(centers, from(), x);
+    };
+    const paintDrop = (x: number) => {
+      const to = target(x);
+      tabs().forEach((t, i) => {
+        t.classList.toggle("drop-before", i === to && to < from());
+        t.classList.toggle("drop-after", i === to && to > from());
+      });
+    };
+    const end = () => {
+      if (st?.timer) clearTimeout(st.timer);
+      st = null;
+      node.classList.remove("lifted", "dragging");
+      node.style.transform = "";
+      for (const t of tabs()) t.classList.remove("drop-before", "drop-after");
+    };
+    const startDrag = () => {
+      if (!st) return;
+      st.dragging = true;
+      node.classList.add("dragging");
+    };
+
+    node.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      swallow = false;
+      st = {
+        id: e.pointerId, type: e.pointerType, x: e.clientX, y: e.clientY, scroll: bar.scrollLeft,
+        armed: false, dragging: false, timer: null,
+      };
+      // Le geste reste a l'onglet meme s'il en sort (glisser, defiler la bande).
+      try { node.setPointerCapture(e.pointerId); } catch { /* pointeur deja parti */ }
+      const mine = st;
+      st.timer = setTimeout(() => {
+        if (st !== mine) return;
+        mine.timer = null;
+        mine.armed = true;
+        node.classList.add("lifted");
+      }, HOLD_MS);
+    });
+    node.addEventListener("pointermove", (e) => {
+      if (!st || e.pointerId !== st.id) return;
+      const dx = e.clientX - st.x;
+      if (!st.dragging) {
+        if (Math.hypot(dx, e.clientY - st.y) <= SLOP) return;
+        if (st.type === "mouse" || st.armed) startDrag();
+        else {
+          // Doigt ou stylet qui bouge avant l'appui long : il fait defiler la bande.
+          if (st.timer) clearTimeout(st.timer);
+          st.timer = null;
+          bar.scrollLeft = st.scroll - dx;
+          swallow = true;
+          return;
+        }
+      }
+      if (!st.dragging) return;
+      node.style.transform = `translateX(${dx + (bar.scrollLeft - st.scroll)}px)`;
+      paintDrop(e.clientX);
+    });
+    node.addEventListener("pointerup", (e) => {
+      if (!st || e.pointerId !== st.id) return;
+      const { dragging, armed } = st;
+      const x = e.clientX;
+      const to = dragging ? target(x) : from();
+      end();
+      if (dragging) {
+        swallow = true;
+        if (to !== from()) void this.reorderDivider(tab, d, to);
+      } else if (armed) {
+        // Appui long sans glisser : le menu de l'intercalaire.
+        swallow = true;
+        void this.dividerMenu(tab, d, dividers);
+      }
+    });
+    node.addEventListener("pointercancel", () => end());
+    node.addEventListener("click", (e) => {
+      if (!swallow) return;
+      swallow = false;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    }, true);
+    // Clic droit (souris) : le menu. Le doigt maintenu declenche aussi
+    // contextmenu sous Windows : le relachement s'en occupe deja.
+    node.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (st && st.type !== "mouse") return;
+      end();
+      void this.dividerMenu(tab, d, dividers);
+    });
+  }
+
+  /** Intercalaire glisse a une autre place ; l'ordre est ecrit dans cahier.json. */
+  private async reorderDivider(tab: Tab, d: string, index: number): Promise<void> {
+    if (this.refuseLocked(tab.notebook)) return;
+    const order = moveTo(await this.repo.listDividers(tab.notebook), d, index);
+    try {
+      await this.repo.reorderDividers(tab.notebook, order);
+    } catch (e) {
+      toast(`Déplacement impossible : ${(e as Error).message}`, "err", 6000);
+      return;
+    }
+    await this.renderNotebookScreen();
   }
 
   /** Menu d'un intercalaire : a droite, renommer, deplacer, supprimer. */
@@ -1061,7 +1209,9 @@ export class App {
       : entry.page != null
         ? `Page ${entry.page} de ${entry.divider} mise à la corbeille`
         : `Intercalaire ${entry.divider} mis à la corbeille`;
-    toast(what, "info", 8000, { label: "Annuler", run: () => void this.restore(entry) });
+    // Restaurer passe par le disque, depuis n'importe quel ecran : le
+    // message survit au retour au menu.
+    toast(what, "info", 8000, { label: "Annuler", run: () => void this.restore(entry) }, `${APP_TOAST}trash-${Date.now()}`);
   }
 
   private async restore(entry: TrashEntry): Promise<void> {
@@ -1335,14 +1485,17 @@ export class App {
     // Palette fermee a 5 couleurs a semantique fixe (section 8), plus
     // l'encre neutre noire. La couleur choisie vaut pour l'encre ET pour le
     // texte tape : une seule pastille active, sa legende en dessous.
-    bar.append(keep(el("button", {
+    // Grille de 4 : chaque pastille fait 44 px dans les deux sens (six sur
+    // une ligne n'y tenaient qu'a 32 px), la legende finit la seconde ligne.
+    const swatches = el("div", { class: "swatches" });
+    swatches.append(keep(el("button", {
       class: `swatch${this.color === "normal" ? " on" : ""}`,
       title: "Normal, en noir (Alt+0) : encre et texte tapé",
       "aria-label": "Normal, en noir",
       onclick: () => this.pickColor(null),
     }, el("i", { style: { background: NEUTRAL_INK.ink } }))));
     for (const p of PALETTE) {
-      bar.append(keep(el("button", {
+      swatches.append(keep(el("button", {
         class: `swatch${this.color === p.key ? " on" : ""}`,
         title: `${p.label} (Alt+${p.shortcut}) : encre et texte tapé`,
         "aria-label": p.label,
@@ -1350,8 +1503,9 @@ export class App {
       }, el("i", { style: { background: p.ink } }))));
     }
     // Le sens de la couleur, a l'ecran : au doigt, aucune infobulle.
-    bar.append(el("div", { class: "swatch-legend small muted" },
-      `${labelOf(this.color)} · Alt+${shortcutOf(this.color)}`));
+    swatches.append(el("div", { class: "swatch-legend small muted" },
+      el("span", {}, labelOf(this.color)), el("span", {}, `Alt+${shortcutOf(this.color)}`)));
+    bar.append(swatches);
 
     // Trois epaisseurs sur une seule ligne.
     const widths: [string, number, string][] = [
@@ -1400,24 +1554,61 @@ export class App {
       }, "⋯"),
     );
 
-    // Ruban Maths, repliable ; l'etat est retenu sur cette machine.
-    const mathOpen = this.settings.mathOpen;
-    const maths = el("div", { class: "math-section" },
+    // Ruban Maths, repliable ; l'etat est retenu sur cette machine. Ou il
+    // va (mathLayout) : sous les outils, a cote (seconde sous-colonne), ou
+    // en volet par-dessus la page quand la colonne est trop basse.
+    const layout = this.mathLayout();
+    const fly = layout === "fly";
+    const mathOpen = fly ? this.mathFly : this.settings.mathOpen;
+    const maths = el("div", { class: `math-section${fly ? " fly" : ""}${mathOpen ? " open" : ""}` },
       el("button", {
         class: "section-toggle",
         "aria-expanded": String(mathOpen),
         title: mathOpen ? "Replier le ruban Maths" : "Déplier le ruban Maths",
         onclick: () => {
+          if (fly) { this.setMathFly(!this.mathFly); return; }
           this.settings.mathOpen = !this.settings.mathOpen;
           saveSettings(this.settings);
           this.paintToolbar();
         },
-      }, el("span", {}, "Maths"), el("span", { class: "chevron" }, mathOpen ? "▾" : "▸")),
+      }, el("span", {}, "Maths"), el("span", { class: "chevron" }, fly ? (mathOpen ? "◂" : "▸") : mathOpen ? "▾" : "▸")),
       mathOpen ? buildMathBar(() => this.focusedTab()?.view?.activeDoc) : null,
     );
 
     // Outils a gauche : la hauteur de l'ecran reste a la feuille.
-    return el("aside", { class: "side-tools" }, bar, maths);
+    const twoCols = layout === "side" && mathOpen;
+    return el("aside", { class: `side-tools${twoCols ? " two-cols" : ""}` }, bar, maths);
+  }
+
+  /**
+   * Place du ruban Maths. Sous les outils, il obligeait a faire defiler la
+   * colonne en 1366x768. A cote (seconde sous-colonne) quand la feuille
+   * garde sa largeur de lecture ; sinon (split, ecran etroit) sous les
+   * outils si la hauteur le permet, ou en volet par-dessus la page.
+   */
+  private mathLayout(): "side" | "below" | "fly" {
+    const w = window.innerWidth, h = window.innerHeight;
+    if (!this.splitId && w >= 1240 && w > h) return "side";
+    return h >= 1000 ? "below" : "fly";
+  }
+
+  /**
+   * Ruban Maths en volet : ouvert ou ferme (pas retenu, c'est un volet).
+   * Echap, le bouton « Maths » ou un appui hors du volet le ferme ; les
+   * touches du ruban le laissent ouvert (plusieurs symboles de suite).
+   */
+  private setMathFly(open: boolean): void {
+    if (this.mathFly === open) return;
+    this.mathFly = open;
+    this.paintToolbar();
+    if (!open) return;
+    const outside = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest(".math-section")) return;
+      document.removeEventListener("pointerdown", outside, true);
+      if (this.mathFly) this.setMathFly(false);
+    };
+    document.addEventListener("pointerdown", outside, true);
   }
 
   /**
@@ -1429,18 +1620,25 @@ export class App {
     const panel = el("div", { class: "more-menu", role: "menu" });
     const backdrop = el("div", { class: "backdrop more-backdrop" }, panel);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); backToPage(); }
     };
     const close = () => {
       backdrop.remove();
       document.removeEventListener("keydown", onKey, true);
     };
     const view = () => this.focusedTab()?.view;
+    /** Le clavier revient a la page : ce qu'on tape ensuite n'est pas perdu. */
+    const backToPage = () => {
+      if (this.screen !== "notebook" || document.querySelector(".backdrop")) return;
+      if (!isEditingDoc(document.activeElement)) view()?.focusText();
+    };
 
     // Une action ferme le menu avant de s'executer : un dialogue qui suit
     // ne s'ouvre pas sous lui.
     const action = (label: string, title: string, run: () => void, cls = "") =>
       el("button", { class: `more-item ${cls}`.trim(), title, role: "menuitem", onclick: () => { close(); run(); } }, label);
+    // Un reglage aussi : choisi, il s'applique, le menu se ferme et la page
+    // reprend le clavier (on choisit un fond, on continue d'ecrire).
     const segment = (name: string, title: string, options: [string, boolean, () => unknown][], titles?: string[]) =>
       el("div", { class: "more-seg", title },
         el("span", { class: "small muted" }, name),
@@ -1449,9 +1647,9 @@ export class App {
           title: titles?.[i],
           "aria-pressed": String(on),
           onclick: async () => {
-            if (on) return;
-            await run();
-            paint();
+            close();
+            if (!on) await run();
+            backToPage();
           },
         }, label))),
       );
@@ -1459,7 +1657,12 @@ export class App {
     const paint = () => {
       const mode = view()?.mode ?? "pages";
       const calcShown = !!this.calculator?.isVisible;
-      panel.replaceChildren(
+      // Deux colonnes : les actions, les reglages. Le menu tient dans un
+      // ecran de 768 px de haut sans defiler.
+      const actions = el("div", { class: "more-col" });
+      const settings = el("div", { class: "more-col" });
+      panel.replaceChildren(actions, settings);
+      actions.append(
         action("Photo du tableau", `Photos redressées et lues, posées dans le texte (${PHOTO_IMPORT_KEYS})`, () => void this.importImage()),
         action(calcShown ? "Fermer la calculatrice" : "Calculatrice", titleOf("Calculatrice", "calc"),
           () => void this.toggleCalculator()),
@@ -1472,6 +1675,16 @@ export class App {
         action("Exporter l'intercalaire (PDF)", titleOf("Toutes les pages de l'intercalaire", "exportAll"),
           () => void view()?.exportPdf("all")),
         el("div", { class: "sep" }),
+        action("Raccourcis clavier", "Fiche des raccourcis (F1)", () => showShortcuts()),
+        action("Sonde stylet (diagnostic)", "Ce que renvoie l'écran : type de pointeur, pression, points",
+          () => this.showProbe()),
+        // En bas, loin des autres actions : un appui de travers au stylet
+        // ne doit pas tomber dessus.
+        el("div", { class: "sep" }),
+        action("Supprimer la page", "La page part à la corbeille (ESEO/.corbeille), « Annuler » la remet en place",
+          () => void view()?.deleteCurrentPage(), "danger"),
+      );
+      settings.append(
         segment("Affichage", "Une page à la fois, ou toutes les pages à la suite", [
           ["Pages", mode === "pages", () => this.setViewMode("pages")],
           ["Défilement", mode === "scroll", () => this.setViewMode("scroll")],
@@ -1496,23 +1709,15 @@ export class App {
           ["Oui", this.settings.spellcheck, () => this.setSpelling(true)],
           ["Non", !this.settings.spellcheck, () => this.setSpelling(false)],
         ]),
-        el("div", { class: "sep" }),
-        action("Raccourcis clavier", "Fiche des raccourcis (F1)", () => showShortcuts()),
-        action("Sonde stylet (diagnostic)", "Ce que renvoie l'écran : type de pointeur, pression, points",
-          () => this.showProbe()),
-        // En bas, loin des autres actions : un appui de travers au stylet
-        // ne doit pas tomber dessus.
-        el("div", { class: "sep" }),
-        action("Supprimer la page", "La page part à la corbeille (ESEO/.corbeille), « Annuler » la remet en place",
-          () => void view()?.deleteCurrentPage(), "danger"),
       );
       place();
     };
-    // A droite du bouton, sans sortir de l'ecran.
+    // A droite de la colonne, sans sortir de l'ecran (ni a droite ni en bas).
     const place = () => {
       const r = anchor.getBoundingClientRect();
       const col = anchor.closest(".side-tools")?.getBoundingClientRect();
-      panel.style.left = `${Math.round((col?.right ?? r.right) + 6)}px`;
+      const left = (col?.right ?? r.right) + 6;
+      panel.style.left = `${Math.round(Math.max(8, Math.min(left, window.innerWidth - panel.offsetWidth - 8)))}px`;
       const h = panel.offsetHeight;
       panel.style.top = `${Math.round(Math.max(8, Math.min(r.top, window.innerHeight - h - 8)))}px`;
     };
@@ -1757,7 +1962,35 @@ export class App {
   /* ---------------- raccourcis ---------------- */
 
   private onKey(e: KeyboardEvent): void {
-    if (this.calculator?.handleKey(e)) { e.preventDefault(); return; }
+    // Echap au menu seulement s'il suit directement un autre Echap.
+    const again = this.lastEsc;
+    if (!(e.key === "Escape" && e.repeat)) this.lastEsc = false;
+    // La calculatrice avait le clavier : son Echap (saisie videe, clavier
+    // rendu) ne va jamais au menu, meme sans curseur de page a retrouver.
+    const calcKeys = e.key === "Escape" && !!this.calculator?.isVisible
+      && !!(document.activeElement as HTMLElement | null)?.closest(".calc");
+    if (this.calculator?.handleKey(e)) {
+      e.preventDefault();
+      // Saisie videe ou clavier rendu a la page : le suivant peut aller au menu.
+      if (e.key === "Escape") {
+        this.lastEsc = true;
+        if (calcKeys && isEditingDoc(document.activeElement)) this.backToCaret();
+      }
+      return;
+    }
+    if (calcKeys && this.screen === "notebook" && !document.querySelector(".backdrop")) {
+      e.preventDefault();
+      this.calculator?.releaseKeys();
+      this.backToCaret();
+      this.lastEsc = true;
+      return;
+    }
+    if (e.key === "Escape" && this.screen === "notebook" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      // Touche maintenue : un seul Echap, jamais une rafale jusqu'au menu.
+      if (e.repeat) { e.preventDefault(); return; }
+      this.onNotebookEscape(e, again);
+      return;
+    }
     const inDoc = isEditingDoc(e.target);
     const tag = (e.target as HTMLElement)?.tagName;
     const inField = tag === "INPUT" || tag === "TEXTAREA";
@@ -1805,9 +2038,8 @@ export class App {
     // ne doit pas en plus renvoyer au menu.
     if (dialog) return;
 
-    // Selection au lasso : Echap la lache, Suppr l'efface.
+    // Selection au lasso : Suppr l'efface (Echap la lache, onNotebookEscape).
     if (this.screen === "notebook" && view?.hasSelection) {
-      if (e.key === "Escape") { e.preventDefault(); view.clearSelection(); return; }
       if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); view.deleteSelection(); return; }
     }
 
@@ -1831,6 +2063,54 @@ export class App {
       view?.focusText();
       if (e.key === "Enter") { e.preventDefault(); document.execCommand("insertLineBreak"); }
     }
+  }
+
+  /**
+   * Echap sur l'ecran cahier (fiche F1 : « deux fois » pour le menu). Il
+   * ferme d'abord ce qui est ouvert, rend le clavier de la calculatrice a la
+   * page, quitte le texte ou y revient depuis un bouton ; le menu seulement
+   * au second Echap de suite. La calculatrice reste ouverte.
+   */
+  private onNotebookEscape(e: KeyboardEvent, again: boolean): void {
+    const active = document.activeElement as HTMLElement | null;
+    const tag = active?.tagName;
+    const view = this.focusedTab()?.view;
+    const action = escapeAction({
+      again,
+      // Formule MathLive figee, photo deselectionnee, composition IME : la
+      // touche a deja servi, elle ne compte pas pour aller au menu.
+      handled: e.defaultPrevented || e.isComposing,
+      dialog: !!document.querySelector(".backdrop"),
+      popover: this.mathFly,
+      calc: !!this.calculator?.isVisible && !!active?.closest(".calc"),
+      field: (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") && !active?.closest(".text-doc"),
+      selection: !!view?.hasSelection,
+      inText: isEditingDoc(active),
+    });
+    if (action === "ignore") return;
+    e.preventDefault();
+    switch (action) {
+      case "close-popover": this.setMathFly(false); break;
+      case "release-calc":
+        this.calculator?.releaseKeys();
+        this.backToCaret();
+        break;
+      case "leave-field": active?.blur(); view?.focusText(); break;
+      case "clear-selection": view?.clearSelection(); break;
+      case "menu": void this.showMenu(); return;
+      case "leave-text": active?.blur(); break;
+      case "to-text": active?.blur(); view?.focusText(); break;
+    }
+    this.lastEsc = true;
+  }
+
+  /**
+   * Le clavier rendu par la calculatrice va au curseur que le texte a garde :
+   * apres « Envoyer dans la page », derriere le bloc pose (TextDoc.caretAfter),
+   * pas la ou il etait a l'ouverture de la calculatrice.
+   */
+  private backToCaret(): void {
+    if (this.screen === "notebook") this.focusedTab()?.view?.focusText();
   }
 
   /**
@@ -1872,7 +2152,19 @@ export class App {
       case "redo": if (ctx.typing) return false; view?.redo(); return true;
       // Toujours pris, meme en pleine frappe : le repere ne touche pas au
       // texte, et le curseur reste ou il etait (D3).
-      case "flag": if (notebook) view?.addFlag(); return true;
+      case "flag":
+        if (notebook) {
+          view?.addFlag();
+          // Ctrl+F reste « Pas compris » (D3) ; qui cherchait la recherche
+          // apprend ou elle est.
+          appendToToast("flag", "Recherche : Ctrl+K");
+        }
+        return true;
+      case "newDivider": {
+        const tab = this.focusedTab();
+        if (notebook && tab) void this.newDivider(tab);
+        return true;
+      }
       case "convert": this.setAutoConvert(!this.autoConvert); return true;
       case "finger": this.toggleFinger(); return true;
       case "newPage": if (notebook) void view?.newPage(); return true;
@@ -2198,6 +2490,18 @@ export class App {
     const q = this.queueState;
     const unsaved = this.hasUnsaved;
     const failed = this.unsavedError;
+    // Texte complet, et sa forme courte pour un ecran etroit (portrait) :
+    // la barre reste sur une ligne. La forme complete reste en infobulle.
+    const say = (long: string, short: string) => [
+      el("span", { class: "lg" }, long), el("span", { class: "sh", title: long }, short),
+    ];
+    const reco = !q.backendReady
+      ? (q.pending
+          ? [`${q.pending} en attente, reconnaissance non configurée`, `${q.pending} en attente`]
+          : ["reconnaissance non configurée", "reco. off"])
+      : q.pending
+        ? [`${q.pending} conversion${q.pending > 1 ? "s" : ""} en attente`, `${q.pending} en attente`]
+        : ["aucune conversion en attente", "reco. à jour"];
     this.statusbar.replaceChildren(
       el("span", { class: "pill" },
         el("span", { class: `led ${q.online ? "" : "off"}` }),
@@ -2207,13 +2511,7 @@ export class App {
         el("span", { class: `led ${!q.backendReady && q.pending ? "off" : q.pending ? "wait" : ""}` }),
         // Une file qui n'ira nulle part doit le dire, sinon l'attente est
         // indistinguable d'une conversion qui prend son temps.
-        !q.backendReady
-          ? (q.pending
-              ? `${q.pending} en attente, reconnaissance non configurée`
-              : "reconnaissance non configurée")
-          : q.pending
-            ? `${q.pending} conversion${q.pending > 1 ? "s" : ""} en attente`
-            : "aucune conversion en attente",
+        ...say(reco[0], reco[1]),
       ),
       // Une ecriture en echec reste affichee en rouge tant qu'elle n'a pas
       // abouti : on ne doit pas fermer l'appli en la croyant enregistree.
@@ -2225,11 +2523,11 @@ export class App {
         ),
       el("span", { class: "pill" },
         el("span", { class: `led ${this.sawPen ? "" : "off"}` }),
-        this.sawPen
-          ? "stylet actif, le doigt navigue"
+        ...(this.sawPen
+          ? say("stylet actif, le doigt navigue", "stylet")
           : this.touchWrites
-            ? "pas de stylet, le doigt écrit"
-            : "pas de stylet, le doigt navigue",
+            ? say("pas de stylet, le doigt écrit", "doigt écrit")
+            : say("pas de stylet, le doigt navigue", "doigt navigue")),
       ),
       el("div", { class: "spacer" }),
       ...(q.blocked === "keys"
@@ -2245,12 +2543,12 @@ export class App {
             title: "Envois à MyScript ce mois-ci, sur cette machine (quota mensuel du compte)",
           }, usageLabel(this.usage))]
         : []),
-      el("span", { class: "pill" }, this.rootLabel),
+      el("span", { class: "pill root-label", title: this.rootLabel }, this.rootLabel),
       el("button", {
         class: "ghost small keys-btn",
         title: "Clés de la reconnaissance manuscrite",
         onclick: () => void this.editKeys(),
-      }, "Clés MyScript"),
+      }, ...say("Clés MyScript", "Clés")),
     );
   }
 

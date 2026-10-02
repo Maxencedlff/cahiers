@@ -8,12 +8,13 @@ import {
   docClipboardText, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
   texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
-import { foldChar, occurrences } from "../core/text/find";
+import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  findFormulas, greekWordAtEnd, latexToSource, planLine, slashOpensFraction, subscriptVars, symbolAtEnd,
-  type FoundFormula, type LinePart, type ScanMode,
+  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, mathWordsAtEnd, planLine, slashOpensFraction,
+  subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
+import { linesToReach } from "../core/textlayout";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
 // fonctionne hors ligne et en amphi.
@@ -159,6 +160,19 @@ const AUTO_SHORTCUTS: Record<string, string> = {
 };
 
 /**
+ * Raccourcis ajoutes a ceux de MathLive dans Alt+=. "in" : jamais colle a
+ * une lettre ("Vin" reste V_{in}, "min" un mot) ; entre deux espaces, il
+ * devient ∈ a la fermeture (cleanMathLive), MathLive ne voyant pas l'espace.
+ * "inf" : l'infini, comme "infty".
+ */
+const FIELD_SHORTCUTS = {
+  eps: "\\varepsilon", pi: "\\pi", inf: "\\infty",
+  // Une seule case sous lim (MathLive en met deux, "_ -> _") : "lim_(x->0)" s'y tape.
+  lim: "\\lim_{#?}",
+  in: { after: "nothing+closefence", value: "\\in" },
+};
+
+/**
  * Morceau de la ligne relue pour les formules : un texte, une formule
  * convertie automatiquement (sa source tapee), ou le texte courant jusqu'au
  * curseur. `a`, `b` : position dans la ligne reconstituee ; `head` : texte
@@ -184,6 +198,10 @@ export class TextDoc {
   private fieldOrigin: { latex: string; src?: string; value: string } | null = null;
   /** Fraction ouverte automatiquement par "/", s'il y en a une. */
   private autoFrac: AutoFrac | null = null;
+  /** Fractions de la formule ouvertes par "/" tape (pas par un modele). */
+  private slashFracs = new WeakSet<object>();
+  /** "/" vient d'etre tape : la fraction creee est relevee au prochain input. */
+  private pendingSlash = false;
   /**
    * Formules que la derniere frappe vient de mettre en forme : Ctrl+Z ou
    * Retour arriere juste apres rend le texte tape, comme dans Word.
@@ -1119,6 +1137,134 @@ export class TextDoc {
     if (n) this.emit();
   }
 
+  /* ---------------- curseur et encre (mise en page, textlayout.ts) ---------------- */
+
+  /** Curseur de ce texte : la selection si elle y est, sinon le curseur garde. */
+  private caretRange(end = true): Range | null {
+    const sel = document.getSelection();
+    const live = sel?.rangeCount ? sel.getRangeAt(0) : null;
+    const r = live && this.root.contains(live.startContainer) ? live.cloneRange()
+      : this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange()
+      : null;
+    r?.collapse(!end);
+    return r;
+  }
+
+  /**
+   * Ligne du curseur a l'ecran (son centre est celui de la ligne). `end` :
+   * fin de la selection (ce qui suit bouge si le texte grandit).
+   */
+  caretRow(end = true): { top: number; bottom: number } | null {
+    if (this.field && this.root.contains(this.field)) {
+      const f = this.field.getBoundingClientRect();
+      return { top: f.top, bottom: f.bottom };
+    }
+    const r = this.caretRange(end);
+    const rect = r ? rowRect(r, this.root) : null;
+    return rect ? { top: rect.top, bottom: rect.bottom } : null;
+  }
+
+  /** La ligne du curseur est-elle vide (rien a gauche ni a droite) ? */
+  caretLineEmpty(): boolean {
+    if (this.field) return false;
+    const sel = document.getSelection();
+    if (sel?.rangeCount && !sel.isCollapsed && this.root.contains(sel.anchorNode)) return false;
+    const r = this.caretRange();
+    if (!r) return false;
+    const box: Node = closestLine(r.startContainer, this.root) ?? this.root;
+    if (!isEmptyRange(lineStart(box, r))) return false;
+    return isEmptyRange(restOfLine(box, r));
+  }
+
+  /**
+   * Ligne vide posee sur de l'encre : des sauts de ligne avant le curseur
+   * jusqu'a ce que sa ligne soit centree a `clientY` ou plus bas (sous
+   * l'encre). Rend le nombre de lignes ajoutees.
+   */
+  padBeforeCaret(clientY: number): number {
+    const r = this.caretRange();
+    if (!r) return 0;
+    const block = closestLine(r.startContainer, this.root);
+    let n = 0;
+    for (; n < 400; n++) {
+      const rect = rowRect(r, this.root);
+      if (!rect || (rect.top + rect.bottom) / 2 >= clientY) break;
+      const br = el("br");
+      if (block) block.before(br);
+      else {
+        r.insertNode(br);
+        r.setStartAfter(br);
+        r.collapse(true);
+      }
+    }
+    if (!n) return 0;
+    this.setCaret(r);
+    this.emit();
+    return n;
+  }
+
+  /**
+   * Clic sous la fin du texte (facon OneNote) : des lignes vides jusqu'a
+   * cette hauteur, le curseur sur la derniere. `line` : interligne en px.
+   * Rend false si le point n'est pas sous la derniere ligne.
+   */
+  caretBelowEnd(clientY: number, line: number): boolean {
+    if (this.field) return false;
+    let last = this.root.lastChild;
+    while (last && isBlank(last)) last = last.previousSibling;
+    let center: number | null = null;
+    const r = document.createRange();
+    if (!last) {
+      r.setStart(this.root, 0);
+      const rect = rowRect(r, this.root);
+      const box = this.root.getBoundingClientRect();
+      const pad = parseFloat(getComputedStyle(this.root).paddingTop) || 0;
+      center = rect ? (rect.top + rect.bottom) / 2 : box.top + pad + line / 2;
+    } else if (last.nodeName === "BR") {
+      r.setStartBefore(last);
+      const rect = rowRect(r, this.root);
+      if (rect) center = (rect.top + rect.bottom) / 2;
+    } else if (last.nodeType === Node.TEXT_NODE) {
+      r.setStart(last, last.textContent?.length ?? 0);
+      const rect = rowRect(r, this.root);
+      if (rect) center = (rect.top + rect.bottom) / 2;
+    } else if (last instanceof HTMLElement) {
+      center = last.getBoundingClientRect().bottom - line / 2;
+    }
+    if (center == null) return false;
+    const n = linesToReach(center, clientY, line);
+    if (n <= 0) return false;
+    // Derniere ligne : un <br> la finit, un dernier <br> garde la ligne vide visible.
+    const ends = last?.nodeName === "BR" ? last : null;
+    // Texte vide : la premiere ligne existe deja sans <br>, comme apres du texte.
+    const inline = !last || (!ends && !isLine(last) && !(last instanceof HTMLElement && last.classList.contains("doc-img")));
+    const count = ends ? n : inline ? n + 1 : n;
+    for (let i = 0; i < count; i++) {
+      const br = el("br");
+      if (ends) ends.before(br);
+      else this.root.append(br);
+    }
+    const tail = this.root.lastChild!;
+    const at = document.createRange();
+    at.setStartBefore(tail);
+    at.collapse(true);
+    this.root.focus({ preventScroll: true });
+    this.setCaret(at);
+    this.emit();
+    return true;
+  }
+
+  /** Curseur pose (selection et curseur garde), sans defilement. */
+  private setCaret(r: Range): void {
+    const sel = document.getSelection();
+    if (sel && (document.activeElement === this.root || this.root.contains(sel.anchorNode))) {
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    this.savedRange = r.cloneRange();
+    lastDoc = this;
+  }
+
   /** Bloc vivant modifie (« Mettre à jour ») : redessine sur place. */
   refreshLive(id: string): boolean {
     const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
@@ -1174,7 +1320,9 @@ export class TextDoc {
         const f = foldChar(ch);
         // Blancs resserres, comme fold() : sinon une phrase a cheval sur
         // deux espaces ne serait pas retrouvee.
-        if (f === " " && (folded === "" || folded.endsWith(" "))) continue;
+        if (f === " " && skipBlank(folded)) continue;
+        // Pas de blanc devant un operateur, comme fold() ("R1 + R2" = "R1+R2").
+        if (FOLD_OPS.has(f[0]) && folded.endsWith(" ")) { folded = folded.slice(0, -1); at.pop(); }
         for (const c of f) { folded += c; at.push(spot); }
       }
     };
@@ -1328,14 +1476,25 @@ export class TextDoc {
     // fraction ouverte par "/", grecs et fonctions seulement.
     mf.inlineShortcuts = numSrc !== undefined
       ? AUTO_SHORTCUTS
-      : { ...mf.inlineShortcuts, eps: "\\varepsilon", pi: "\\pi" };
+      : { ...mf.inlineShortcuts, ...FIELD_SHORTCUTS };
     this.field = mf;
     this.fieldOrigin = template ? null : { latex: eq.dataset.latex ?? "", src: eq.dataset.src, value: mf.getValue("latex").trim() };
     this.autoFrac = null;
     editingDoc = this;
     lastDoc = this;
 
-    mf.addEventListener("input", (e) => { e.stopPropagation(); this.emit(); });
+    this.pendingSlash = false;
+    mf.addEventListener("input", (e) => {
+      e.stopPropagation();
+      if (this.pendingSlash) {
+        this.pendingSlash = false;
+        const frac = slashFracAt(mf);
+        if (frac) this.slashFracs.add(frac);
+      }
+      // "int" tape : la borne basse d'abord, comme on lit « de 0 a t ».
+      lowerBoundFirst(mf);
+      this.emit();
+    });
     mf.addEventListener("keydown", (e) => this.onFieldKey(e, mf), { capture: true });
     // Fleche au bord de la formule : on ressort dans le texte.
     mf.addEventListener("move-out", (e) => {
@@ -1365,6 +1524,7 @@ export class TextDoc {
     this.root.contentEditable = "false";
     if (template) {
       mf.insert(template, { selectionMode: "placeholder", focus: true });
+      lowerBoundFirst(mf);
       if (numSrc !== undefined) {
         const parts = fracParts(mf.getValue("latex"));
         if (parts) this.autoFrac = { mf, numSrc, head: parts.head };
@@ -1419,11 +1579,14 @@ export class TextDoc {
       // Rouverte sans changement : elle garde sa source tapee et reste
       // prolongeable par la frappe qui suit.
       eq = makeEq(origin.latex, origin.src);
-    } else if (value) {
+    } else if (cleanMathLive(value)) {
       // Fraction ouverte par "/" et denominateur simple : relue comme le
       // texte ("Id = Vz/R1"), elle reste prolongeable elle aussi.
       const typed = auto ? autoSource(auto, value) : null;
-      eq = typed ? makeEq(typed.latex, typed.src) : makeEq(subscriptVars(value));
+      // Sortie MathLive relue pour KaTeX (\differentialD, cases vides),
+      // puis les indices ; si KaTeX refuse le resultat, la version sans.
+      const clean = cleanMathLive(value);
+      eq = typed ? makeEq(typed.latex, typed.src) : makeEq(firstRendered([subscriptVars(clean), clean]));
     }
     let mark: Node;
     if (eq) {
@@ -1452,6 +1615,34 @@ export class TextDoc {
   private fieldKey(key: string, shift: boolean, mf: MathfieldElement): boolean {
     const value = mf.getValue("latex");
     const auto = this.autoFrac?.mf === mf ? this.autoFrac : null;
+    // "sqrt(x)" puis ")" : la racine est finie, la parenthese ferme celle d'avant.
+    if (key === ")" && endOfBalancedSurd(mf)) mf.executeCommand("moveAfterParent");
+    // "_" ou "^" tapes a la LaTeX ("int_0^1") : deja dans la case ; "^"
+    // depuis un indice passe a l'exposant du meme terme (u_n^2, borne haute).
+    if (key === "_" || key === "^") {
+      const a = caretAtom(mf);
+      if (a?.type === "placeholder" && a.parentBranch === (key === "_" ? "subscript" : "superscript")) return true;
+      if (key === "^" && a?.parentBranch === "subscript" && atBranchEnd(a)) {
+        mf.executeCommand("moveToOpposite");
+        return true;
+      }
+    }
+    // Fleche droite au bout de la borne haute (remplie en dernier) : apres
+    // l'integrale, pas dans la borne basse (MathLive va du haut vers le bas).
+    if (key === "ArrowRight" && !shift) {
+      const a = caretAtom(mf);
+      if (a?.parentBranch === "superscript" && a.parent?.branch("subscript") && atBranchEnd(a)) {
+        mf.executeCommand("moveAfterParent");
+        return true;
+      }
+      // Au bout de la borne basse : la haute si elle est vide, sinon apres.
+      if (a?.parent && a.parentBranch === "subscript" && a.parent.branch("superscript") && atBranchEnd(a)) {
+        mf.executeCommand(blankBranch(a.parent, "superscript") ? "moveToOpposite" : "moveAfterParent");
+        return true;
+      }
+    }
+    // Espace a la fin d'un indice ou d'une borne remplis : on en sort ("int_0^1 x").
+    if (key === " " && !auto && endOfScript(mf)) mf.executeCommand("moveAfterParent");
     if (auto) {
       const parts = fracParts(value);
       const den = parts ? parts.den.replace(/\\placeholder\{\}/g, "").trim() : null;
@@ -1475,6 +1666,13 @@ export class TextDoc {
           return true;
         }
       }
+      // "1/2+1/3" : un operateur derriere un denominateur d'un seul terme
+      // ferme la fraction, la suite s'ecrit dans le texte (et se relit avec).
+      if (DEN_EXIT_TEXT.has(key) && den && balanced && endOfSlashDen(mf, null)) {
+        this.commit(true);
+        this.insertTextAtCaret(key);
+        return true;
+      }
       // Parenthese fermante sans ouvrante dans le denominateur : elle ferme
       // celle d'avant la fraction ("Vz (1 + R2/R1)").
       if (key === ")" && den && balanced) {
@@ -1489,6 +1687,12 @@ export class TextDoc {
         return true;
       }
     }
+    if (!auto) {
+      if (key === "/") this.pendingSlash = true;
+      // "1/2+1/3" : le denominateur d'une fraction tapee au "/" ne prend
+      // qu'un terme, comme dans le texte. Un operateur derriere en sort.
+      if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) mf.executeCommand("moveAfterParent");
+    }
     // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
     if (key === "Enter" && !shift) {
       this.commit(true);
@@ -1497,6 +1701,9 @@ export class TextDoc {
     }
     // Tab : case suivante tant qu'il en reste, sinon sortie de la formule.
     const done = !value.includes("\\placeholder");
+    // Bornes : la basse puis la haute, puis le corps (MathLive va de la
+    // haute a la basse).
+    if (key === "Tab" && !done && switchBound(mf, shift)) return true;
     if (key === "Escape" || (key === "Tab" && done)) {
       this.commit(!(key === "Tab" && shift));
       return true;
@@ -1683,6 +1890,13 @@ export class TextDoc {
    * Renvoie les formules creees.
    */
   private convertLine(mode: ScanMode = "final"): HTMLElement[] {
+    // Mots de maths finis en contexte formule ("x in RR" -> x ∈ ℝ, "forall"
+    // -> ∀) : le symbole, annulable par Ctrl+Z comme "->".
+    if (mode !== "pause") {
+      const r0 = document.getSelection()?.rangeCount ? document.getSelection()!.getRangeAt(0) : null;
+      const before = r0 ? eqBeforeOnLine(r0.startContainer) : false;
+      this.replaceBeforeCaret((t) => mathWordsAtEnd(t, before));
+    }
     // Mot grec fini ("pi", "eps") : la lettre, meme hors formule.
     this.greekDone = mode === "pause" ? null : this.greekBeforeCaret();
     if (this.greekDone) this.emit();
@@ -2317,16 +2531,36 @@ export class TextDoc {
 /** Formule figee dans le texte : un seul bloc pour le curseur et la gomme. */
 function makeEq(latex: string, src?: string): HTMLElement {
   const eq = el("span", { class: "eq", contenteditable: "false", dataset: src ? { latex, src } : { latex } });
-  try {
-    // \displaystyle : une fraction dans la phrase reste lisible, comme dans
-    // le champ d'edition, au lieu de tomber en corps 7.
-    // Une case laissee vide reste visible, en gris, pour qu'on la voie a remplir.
-    const shown = (latex || "\\placeholder{}").replace(/\\placeholder\{\}/g, "{\\color{#9aa3b2}\\square}");
-    eq.innerHTML = katex.renderToString(`\\displaystyle ${shown}`, { throwOnError: false });
-  } catch {
-    eq.textContent = latex;
+  // Jamais de LaTeX brut en rouge : la formule telle quelle, sinon relue
+  // pour KaTeX (page ancienne avec \differentialD), sinon son texte simple.
+  // Le LaTeX d'origine reste dans data-latex : rouverte, on la corrige.
+  const html = katexHtml(latex) ?? katexHtml(cleanMathLive(latex));
+  if (html !== null) eq.innerHTML = html;
+  else {
+    eq.classList.add("eq-raw");
+    eq.textContent = src ?? texToPlain(latex);
   }
   return eq;
+}
+
+/**
+ * Rendu KaTeX d'une formule du texte, ou null si KaTeX ne sait pas la lire.
+ * \displaystyle : une fraction dans la phrase reste lisible, comme dans le
+ * champ d'edition, au lieu de tomber en corps 7. Une case laissee vide reste
+ * visible, en gris, pour qu'on la voie a remplir.
+ */
+function katexHtml(latex: string): string | null {
+  const shown = (latex || "\\placeholder{}").replace(/\\placeholder\{\}/g, "{\\color{#9aa3b2}\\square}");
+  try {
+    return katex.renderToString(`\\displaystyle ${shown}`, { throwOnError: true });
+  } catch {
+    return null;
+  }
+}
+
+/** Premier LaTeX que KaTeX sait afficher (le dernier sinon). */
+function firstRendered(cands: string[]): string {
+  return cands.find((c) => katexHtml(c) !== null) ?? cands[cands.length - 1];
 }
 
 /**
@@ -2452,6 +2686,53 @@ function caretRect(r: Range, root: HTMLElement): DOMRect | null {
   return null;
 }
 
+/**
+ * Rectangle de la ligne d'un curseur. Devant un <br>, celui du <br> (sa
+ * ligne est celle du curseur) : un curseur replie dans un element n'a pas
+ * de rectangle, et le voisin de gauche serait la ligne d'avant.
+ */
+function rowRect(r: Range, root: HTMLElement): DOMRect | null {
+  const c = r.startContainer;
+  if (c.nodeType === Node.ELEMENT_NODE) {
+    const at = c.childNodes[r.startOffset];
+    if (at?.nodeName === "BR") {
+      const b = (at as Element).getBoundingClientRect();
+      if (b.height > 0) return b;
+    }
+  }
+  return caretRect(r, root);
+}
+
+/** Du curseur a la fin de sa ligne dans `box` (sans rien couper, a la difference de lineEnd). */
+function restOfLine(box: Node, r: Range): Range {
+  const out = document.createRange();
+  out.setStart(r.startContainer, r.startOffset);
+  const c = r.startContainer;
+  if (c.nodeType === Node.TEXT_NODE && c.parentNode === box) {
+    const i = (c.textContent ?? "").indexOf("\n", r.startOffset);
+    if (i >= 0) { out.setEnd(c, i); return out; }
+  }
+  let n: Node | null;
+  if (c === box) n = box.childNodes[r.startOffset] ?? null;
+  else {
+    let top: Node = c;
+    while (top.parentNode && top.parentNode !== box) top = top.parentNode;
+    n = top.nextSibling;
+  }
+  for (; n; n = n.nextSibling) {
+    if (n.nodeName === "BR" || isLine(n) || (n instanceof HTMLElement && n.classList.contains("doc-img"))) {
+      out.setEndBefore(n);
+      return out;
+    }
+    if (n.nodeType === Node.TEXT_NODE) {
+      const i = (n.textContent ?? "").indexOf("\n");
+      if (i >= 0) { out.setEnd(n, i); return out; }
+    }
+  }
+  out.setEnd(box, box.childNodes.length);
+  return out;
+}
+
 /** Fait defiler le conteneur de la page pour mettre un rectangle au centre. */
 function scrollToCenter(from: HTMLElement, rect: DOMRect): void {
   if (!rect.height && !rect.top) return;
@@ -2556,7 +2837,138 @@ function autoSource(auto: AutoFrac, value: string): { latex: string; src: string
 function insertInField(mf: MathfieldElement, template: string): void {
   // Dans une formule, #@ prend ce qui precede (MathLive le gere).
   mf.insert(template, { selectionMode: "placeholder", focus: true });
+  lowerBoundFirst(mf);
   mf.dispatchEvent(new Event("input"));
+}
+
+/**
+ * Atome de MathLive sous le curseur. API interne (le modele n'est pas
+ * public) : en cas de changement de version, null, et les reglages qui
+ * s'en servent (bornes, denominateur) ne font simplement rien.
+ */
+interface MlAtom {
+  type: string;
+  parent?: MlAtom;
+  parentBranch?: unknown;
+  branch(name: string): MlAtom[] | undefined;
+}
+function caretAtom(mf: MathfieldElement): MlAtom | null {
+  try {
+    const model = (mf as unknown as { _mathfield?: { model?: { position: number; at(p: number): MlAtom } } })._mathfield?.model;
+    return model ? model.at(model.position) ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Branche absente, vide ou reduite a une case a remplir. */
+function blankBranch(p: MlAtom, name: string): boolean {
+  const b = p.branch(name);
+  return !b || b.length === 1 || (b.length === 2 && b[1].type === "placeholder");
+}
+
+/**
+ * Integrale ou somme posee avec ses deux bornes vides : MathLive selectionne
+ * la case du haut. On passe a celle du bas, qu'on remplit d'abord.
+ */
+function lowerBoundFirst(mf: MathfieldElement): void {
+  const a = caretAtom(mf);
+  const p = a?.parent;
+  if (!a || !p || a.type !== "placeholder" || a.parentBranch !== "superscript") return;
+  if (!p.branch("subscript") || !blankBranch(p, "subscript")) return;
+  try { mf.executeCommand("moveToOpposite"); } catch { /* version de MathLive differente */ }
+}
+
+/**
+ * Tab dans la borne basse, la haute encore vide : on y va (Maj+Tab dans la
+ * borne haute : retour a la basse). Vrai si la touche est traitee.
+ */
+function switchBound(mf: MathfieldElement, back: boolean): boolean {
+  const a = caretAtom(mf);
+  const p = a?.parent;
+  if (!a || !p) return false;
+  const from = back ? "superscript" : "subscript";
+  const to = back ? "subscript" : "superscript";
+  if (a.parentBranch !== from || !p.branch(to) || !p.branch(from)) return false;
+  if (!back && !blankBranch(p, to)) return false;
+  try { return mf.executeCommand("moveToOpposite"); } catch { return false; }
+}
+
+/**
+ * Une formule precede-t-elle `node` sur la meme ligne ? (contexte maths
+ * pour "exists" apres "∀ x ∈ ℝ," deja mis en forme).
+ */
+function eqBeforeOnLine(node: Node): boolean {
+  let n: Node | null = node.previousSibling;
+  if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").includes("\n")) return false;
+  while (n) {
+    if (n instanceof HTMLElement && n.classList.contains("eq")) return true;
+    if ((n.textContent ?? "").includes("\n") || n.nodeName === "BR") return false;
+    n = n.previousSibling;
+  }
+  return false;
+}
+
+/** L'atome est-il le dernier de sa branche (curseur en fin de branche) ? */
+function atBranchEnd(a: MlAtom): boolean {
+  const br = a.parent && typeof a.parentBranch === "string" ? a.parent.branch(a.parentBranch) : undefined;
+  return !!br && br[br.length - 1] === a;
+}
+
+/** Curseur a la fin d'un indice ou d'un exposant deja rempli. */
+function endOfScript(mf: MathfieldElement): boolean {
+  const a = caretAtom(mf);
+  if (!a || (a.parentBranch !== "subscript" && a.parentBranch !== "superscript")) return false;
+  return a.type !== "placeholder" && a.type !== "first" && atBranchEnd(a);
+}
+
+/** Curseur a la fin d'une racine dont les parentheses tapees sont equilibrees. */
+function endOfBalancedSurd(mf: MathfieldElement): boolean {
+  const a = caretAtom(mf);
+  const p = a?.parent;
+  if (!a || !p || p.type !== "surd" || a.parentBranch !== "body" || !atBranchEnd(a)) return false;
+  const body = (p.branch("body") ?? []).slice(1);
+  if (!body.length) return false;
+  let depth = 0;
+  for (const x of body) {
+    if (x.type === "mopen") depth++;
+    else if (x.type === "mclose") depth--;
+  }
+  return depth === 0;
+}
+
+/** Fraction dont le curseur est au denominateur. */
+function slashFracAt(mf: MathfieldElement): MlAtom | null {
+  const a = caretAtom(mf);
+  return a?.parentBranch === "below" && a.parent?.type === "genfrac" ? a.parent : null;
+}
+
+/** Touches qui finissent un denominateur d'un seul terme. */
+const DEN_EXIT = new Set(["+", "-", "=", "<", ">", ",", ";", "*", " "]);
+/** Les memes, dans une fraction ouverte depuis le texte (l'Espace y est deja traitee). */
+const DEN_EXIT_TEXT = new Set(["+", "-", "=", "<", ">", ",", ";"]);
+
+/**
+ * Curseur a la fin du denominateur d'une fraction tapee au "/", et ce
+ * denominateur est un seul terme (chiffres, lettres, parenthese, racine).
+ * `slashFracs` null : n'importe quelle fraction (celle ouverte depuis le texte).
+ */
+function endOfSlashDen(mf: MathfieldElement, slashFracs: WeakSet<object> | null): boolean {
+  const a = caretAtom(mf);
+  const p = a?.parent;
+  if (!a || !p || a.parentBranch !== "below" || p.type !== "genfrac" || (slashFracs && !slashFracs.has(p))) return false;
+  const den = p.branch("below") ?? [];
+  const items = den.slice(1);
+  if (!items.length || den[den.length - 1] !== a) return false;
+  if (items.every((x) => x.type === "mord" || x.type === "leftright" || x.type === "surd" || x.type === "genfrac")) return true;
+  // "(a+b)" tape (parentheses separees, smartFence coupe) : un seul groupe.
+  let depth = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type === "mopen") depth++;
+    else if (items[i].type === "mclose") depth--;
+    if (depth <= 0 && i < items.length - 1) return false;
+  }
+  return items[0].type === "mopen" && depth === 0;
 }
 
 /** Noeud colle au curseur, en ignorant les ancres invisibles. */

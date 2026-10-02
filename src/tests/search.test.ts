@@ -38,6 +38,15 @@ describe("pliage du texte", () => {
     expect(normalize("Δ")).toBe("delta");
   });
 
+  it("formules : espaces autour des operateurs et produits ignores", () => {
+    expect(normalize("Vs = Ve · R2/(R1 + R2)")).toBe("vs=ve.r2/(r1+r2)");
+    expect(normalize("Vs=Ve*R2/(R1+R2)")).toBe("vs=ve.r2/(r1+r2)");
+    expect(normalize("a - b")).toBe("a-b");
+    const f = fold("x = 1");
+    expect(f.text).toBe("x=1");
+    expect(f.map.slice(0, 3)).toEqual([0, 2, 4]);
+  });
+
   it("garde l'indice d'origine de chaque caractere", () => {
     const f = fold("Été  π");
     expect(f.text).toBe("ete pi");
@@ -111,6 +120,16 @@ describe("recherche dans le texte tape", () => {
     await pageWith([text("$L_{oi}$ d'$O_{hm}$ $U = R_I$")]);
     expect(await searchAll(repo, "loi d'ohm")).toHaveLength(1);
     expect(await searchAll(repo, "ohm")).toHaveLength(1);
+  });
+
+  it("une formule convertie se retrouve telle qu'on l'a tapee", async () => {
+    await pageWith([text("Montage inverseur : $V_s = \\frac{-R_2}{R_1} \\cdot V_e$")]);
+    await pageWith([text("Diviseur : $V_s = \\frac{V_e \\cdot R_2}{R_1 + R_2}$ et $E=\\frac12C$")]);
+    expect(await searchAll(repo, "R2/R1")).toHaveLength(1);
+    expect(await searchAll(repo, "-R2/R1.Ve")).toHaveLength(1);
+    expect(await searchAll(repo, "Ve.R2/(R1+R2)")).toHaveLength(1);
+    expect(await searchAll(repo, "R2/(R1 + R2)")).toHaveLength(1);
+    expect(await searchAll(repo, "E=1/2C")).toHaveLength(1);
   });
 
   it("pi tape devient π, et se cherche encore « pi »", async () => {

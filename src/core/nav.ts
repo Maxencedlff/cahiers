@@ -119,6 +119,28 @@ export function moveItem<T>(list: readonly T[], item: T, delta: number): T[] {
   return out;
 }
 
+/**
+ * Intercalaire glisse dans la bande : sa place d'arrivee d'apres les centres
+ * des onglets (dans l'ordre, celui qu'on glisse compris) et l'abscisse du
+ * pointeur. L'onglet prend la place du premier dont il depasse le centre.
+ */
+export function dropIndex(centers: readonly number[], from: number, x: number): number {
+  let to = from;
+  for (let i = 0; i < centers.length; i++) {
+    if (i < from && x < centers[i]) { to = i; break; }
+    if (i > from && x > centers[i]) to = i;
+  }
+  return to;
+}
+
+/** La liste avec l'element deplace a l'index voulu (borne), le reste dans l'ordre. */
+export function moveTo<T>(list: readonly T[], item: T, index: number): T[] {
+  const out = list.filter((x) => x !== item);
+  if (out.length === list.length) return [...list];
+  out.splice(Math.max(0, Math.min(out.length, index)), 0, item);
+  return out;
+}
+
 /** Noms qui appellent naturellement le panneau de droite : les exercices. */
 const SPLIT_PREFERRED = ["exos", "exercices", "td", "tp"];
 

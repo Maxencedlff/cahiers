@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  findFormulas, greekWordAtEnd, latexToSource, planLine, slashOpensFraction, subscriptVars, symbolAtEnd, type LinePart,
+  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, mathWordsAtEnd, planLine, slashOpensFraction, subscriptVars,
+  symbolAtEnd, type LinePart,
 } from "../core/text/automath";
 
 const one = (line: string) => {
@@ -342,5 +343,152 @@ describe("noms usuels a deux lettres : indices, pas produits", () => {
       expect(findFormulas(`${w} la`, "space"), w).toEqual([]);
     }
     expect(findFormulas("Te souviens-tu de la loi d'Ohm ? Voici 50 Hz.")).toEqual([]);
+  });
+});
+
+describe("elec : j imaginaire et pulsation w", () => {
+  it("j devant plusieurs grandeurs : un produit, w devient omega", () => {
+    expect(one("Z = R + jLw").tex).toBe("Z = R + j\\,L\\,\\omega");
+    expect(one("1/(1+jRCw)").tex).toBe("\\frac{1}{1 + j\\,R\\,C\\,\\omega}");
+    expect(one("H(jω) = 1/(1+jRCω)").tex).toBe("H\\left(j\\omega\\right) = \\frac{1}{1 + j\\,R\\,C\\,\\omega}");
+    expect(one("H(jw) = 1/(1+jRCw)").tex).toBe("H\\left(j\\omega\\right) = \\frac{1}{1 + j\\,R\\,C\\,\\omega}");
+    expect(one("Zc = 1/(jCw)").tex).toBe("Z_c = \\frac{1}{j\\,C\\,\\omega}");
+    expect(one("|H| = 1/sqrt(1+(RCw)^2)").tex).toBe("\\left|H\\right| = \\frac{1}{\\sqrt{1 + \\left(R\\,C\\,\\omega\\right)^{2}}}");
+  });
+  it("ce qui ne bouge pas", () => {
+    expect(one("Z = R + jL omega").tex).toBe("Z = R + j\\,L\\,\\omega");
+    expect(one("u = e^(jwt)").tex).toBe("u = e^{j\\omega t}");
+    expect(one("Rw = 3").tex).toBe("R_w = 3");
+  });
+});
+
+describe("notations de maths tapees", () => {
+  it("fonctions et grecs indices en toutes lettres", () => {
+    expect(one("phi = -arctan(RCw)").tex).toBe("\\varphi = -\\arctan\\left(R\\,C\\,\\omega\\right)");
+    expect(one("omega0 = 1/tau").tex).toBe("\\omega_0 = \\frac{1}{\\tau}");
+    expect(findFormulas("la betaine")).toEqual([]);
+  });
+  it("primes", () => {
+    expect(one("f'(x) = 2x").tex).toBe("f'\\left(x\\right) = 2\\,x");
+    expect(one("y'' + 2y' + y = 0").tex).toBe("y'' + 2\\,y' + y = 0");
+    expect(one("F' = f").tex).toBe("F' = f");
+  });
+  it("les apostrophes du francais restent du texte", () => {
+    for (const line of ["Loi d'Ohm et loi des mailles", "c'est la tension", "qu'il faut", "l'entree est haute"]) {
+      expect(findFormulas(line), line).toEqual([]);
+    }
+    expect(findFormulas("d'ou x = 3").map((f) => f.latex)).toEqual(["x = 3"]);
+  });
+  it("indices tapes", () => {
+    expect(one("u_(n+1) = 2u_n").tex).toBe("u_{n + 1} = 2\\,u_n");
+    expect(one("x_max = 3").tex).toBe("x_{max} = 3");
+    expect(findFormulas("u_n = 1/n^2 et u_(n+1) = u_n + 1/(n+1)^2").map((f) => f.latex)).toEqual([
+      "u_n = \\frac{1}{n^{2}}", "u_{n + 1} = u_n + \\frac{1}{\\left(n + 1\\right)^{2}}",
+    ]);
+  });
+  it("noms de fichier et de code a tiret bas : du texte", () => {
+    expect(findFormulas("Fichier 1009_Q12.asc, directive .dc")).toEqual([]);
+    expect(findFormulas("la variable nb_elements")).toEqual([]);
+  });
+  it("limite", () => {
+    expect(one("lim_(x->0) sin(x)/x = 1").tex).toBe("\\lim_{x \\to 0} \\frac{\\sin\\left(x\\right)}{x} = 1");
+    expect(one("lim_(x->+inf) 1/x = 0").tex).toBe("\\lim_{x \\to +\\infty} \\frac{1}{x} = 0");
+  });
+  it("integrale et somme avec bornes", () => {
+    expect(one("I = int_0^1 x^2 dx = 1/3").tex).toBe("I = \\int_{0}^{1} x^{2}\\,\\mathrm{d}x = \\frac{1}{3}");
+    expect(one("int_0^t cos(u)du").tex).toBe("\\int_{0}^{t} \\cos\\left(u\\right)\\,\\mathrm{d}u");
+    expect(one("S = sum_(k=0)^n k = n(n+1)/2").tex).toBe("S = \\sum_{k = 0}^{n} k = \\frac{n\\left(n + 1\\right)}{2}");
+  });
+  it("int, sum et lim hors maths restent du texte", () => {
+    for (const line of ["int x = 3;", "la somme sum", "int main", "une intro", "la limite lim"]) {
+      expect(findFormulas(line).map((f) => f.latex).join(" "), line).not.toMatch(/\\int|\\sum|\\lim/);
+    }
+  });
+  it("matrice tapee", () => {
+    expect(findFormulas("A = (a b; c d) et det(A) = ad - bc").map((f) => f.latex)).toEqual([
+      "A = \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", "\\det\\left(A\\right) = a\\,d - b\\,c",
+    ]);
+    expect(one("M = (1, 2; 3, 4)").tex).toBe("M = \\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}");
+    expect(findFormulas("(voir p. 3; cf. TD)")).toEqual([]);
+  });
+  it("ensembles, quantificateurs, infini", () => {
+    expect(one("x ∈ ℝ").tex).toBe("x \\in \\mathbb{R}");
+    expect(findFormulas("∀ x ∈ ℝ, ∃ n ∈ ℕ, n > x").map((f) => f.latex))
+      .toEqual(["\\forall x \\in \\mathbb{R}", "\\exists n \\in \\mathbb{N}", "n > x"]);
+    expect(one("x → +∞").tex).toBe("x \\to +\\infty");
+    // "∀ x" seul attend la suite (x in RR) : pas encore une formule.
+    expect(findFormulas("∀ x", "space")).toEqual([]);
+    expect(findFormulas("la borne inf de f")).toEqual([]);
+  });
+});
+
+describe("mots de maths tapes dans le texte", () => {
+  it("convertis en contexte formule", () => {
+    expect(mathWordsAtEnd("forall")).toBe("∀");
+    expect(mathWordsAtEnd("∀ x in RR,")).toBe("∀ x ∈ ℝ,");
+    expect(mathWordsAtEnd("x in RR")).toBe("x ∈ ℝ");
+    expect(mathWordsAtEnd("pour tout x in R")).toBe("pour tout x ∈ R");
+    expect(mathWordsAtEnd("∀ x ∈ ℝ, exists")).toBe("∀ x ∈ ℝ, ∃");
+    expect(mathWordsAtEnd("∀ ε > 0, ∃ N ∈ NN")).toBe("∀ ε > 0, ∃ N ∈ ℕ");
+    expect(mathWordsAtEnd("f : RR")).toBe("f : ℝ");
+    expect(mathWordsAtEnd("f : ℝ → RR")).toBe("f : ℝ → ℝ");
+    expect(mathWordsAtEnd("x → +inf")).toBe("x → +∞");
+    expect(mathWordsAtEnd("infty")).toBe("∞");
+    expect(mathWordsAtEnd("A sub B")).toBe("A ⊂ B");
+    expect(mathWordsAtEnd("n in ZZ")).toBe("n ∈ ℤ");
+    // Formule juste avant dans la ligne (autre noeud) : contexte maths.
+    expect(mathWordsAtEnd(", exists", true)).toBe(", ∃");
+    expect(mathWordsAtEnd(", exists")).toBe(", ∃");
+  });
+  it("le texte courant ne bouge pas", () => {
+    for (const t of ["in", "the file exists", "le CC de maths", "le CC", "QCM in English", "borne inf",
+      "x in the loop", "logged in", "un sub", "Il exists", "RR", "plug in A", "les NN"]) {
+      expect(mathWordsAtEnd(t), t).toBeNull();
+    }
+  });
+});
+
+describe("editeur de formules : garde-fous", () => {
+  it("pas de double indice", () => {
+    expect(subscriptVars("E=\\frac12Cu_{c}^2")).toBe("E=\\frac12Cu_{c}^2");
+    expect(subscriptVars("R1_{a}")).toBe("R1_{a}");
+    expect(subscriptVars("Vbe^2")).toBe("V_{be}^2");
+  });
+  it("j et pulsation", () => {
+    expect(subscriptVars("Z=R+jLw")).toBe("Z=R+j\\,L\\,\\omega");
+    expect(subscriptVars("\\frac{1}{1+jRCw}")).toBe("\\frac{1}{1+j\\,R\\,C\\,\\omega}");
+    expect(subscriptVars("H(jw)")).toBe("H(j\\omega)");
+    expect(subscriptVars("V_{in}+Vin")).toBe("V_{in}+V_{in}");
+  });
+});
+
+describe("sortie MathLive relue pour KaTeX", () => {
+  it("commandes propres a MathLive", () => {
+    expect(cleanMathLive("\\int\\cos(x)\\differentialD x")).toBe("\\int\\cos(x)\\mathrm{d}x");
+    expect(cleanMathLive("\\exponentialE^{\\imaginaryI\\theta}")).toBe("\\mathrm{e}^{\\mathrm{i}\\theta}");
+    expect(cleanMathLive("\\imaginaryJ\\omega")).toBe("\\mathrm{j}\\omega");
+    expect(cleanMathLive("\\mleft(x\\mright)")).toBe("\\left(x\\right)");
+    expect(cleanMathLive("f^{\\prime}+y^{\\doubleprime}")).toBe("f'+y''");
+  });
+  it("bornes vides retirees", () => {
+    expect(cleanMathLive("\\int_{\\placeholder{}}^{\\placeholder{}}\\cos(x)\\differentialD x"))
+      .toBe("\\int\\cos(x)\\mathrm{d}x");
+    expect(cleanMathLive("\\int_{0}^{\\placeholder{}}f")).toBe("\\int_{0}f");
+    expect(cleanMathLive("\\sum_{k=0}^{n}k")).toBe("\\sum_{k=0}^{n}k");
+    expect(cleanMathLive("\\placeholder{}")).toBe("");
+  });
+  it("in et espaces autour des relations", () => {
+    expect(cleanMathLive("x\\;in\\;\\mathbb{R}")).toBe("x\\in\\mathbb{R}");
+    expect(cleanMathLive("\\forall x\\;\\in\\;\\mathbb{R}")).toBe("\\forall x\\in\\mathbb{R}");
+    expect(cleanMathLive("V_{in}=3")).toBe("V_{in}=3");
+    expect(cleanMathLive("\\text{in }x")).toBe("\\text{in }x");
+  });
+  it("parentheses tapees autour d'une racine, d'une borne, d'un denominateur", () => {
+    expect(cleanMathLive("\\sqrt{(1+x)}")).toBe("\\sqrt{1+x}");
+    expect(cleanMathLive("\\sum_{(k=0)}^{n}k")).toBe("\\sum_{k=0}^{n}k");
+    expect(cleanMathLive("\\frac{1}{(2\\;\\sqrt{(x)})}")).toBe("\\frac{1}{2\\;\\sqrt{x}}");
+    expect(cleanMathLive("\\frac{(a+b)}{2}")).toBe("\\frac{a+b}{2}");
+    expect(cleanMathLive("\\frac{(a)(b)}{2}")).toBe("\\frac{(a)(b)}{2}");
+    expect(cleanMathLive("\\sqrt{(a)+(b)}")).toBe("\\sqrt{(a)+(b)}");
   });
 });

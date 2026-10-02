@@ -418,22 +418,39 @@ const TEX_WORDS: Record<string, string> = {
  * "\beta" -> "beta". Sert a la recherche : "vbe" doit trouver V_{be}.
  */
 export function texToPlain(tex: string): string {
-  // Parentheses autour d'un numerateur ou denominateur compose, pas autour
-  // de ce qui est deja entre parentheses.
-  const wrap = (x: string) => {
-    let top = x.trim();
-    for (let k = 0; k < 10 && /\([^()]*\)/.test(top); k++) top = top.replace(/\([^()]*\)/g, "");
-    return /[\s+\-=<>]/.test(top) ? `(${x.trim()})` : x.trim();
+  // Ce qui reste une fois les groupes entre parentheses retires.
+  const top = (x: string) => {
+    let t = x.trim();
+    for (let k = 0; k < 10 && /\([^()]*\)/.test(t); k++) t = t.replace(/\([^()]*\)/g, "");
+    return t;
   };
-  let s = tex.replace(/\\left|\\right|\\displaystyle/g, "");
+  // Numerateur : parentheses seulement autour d'une somme ou d'une
+  // relation ("Ve.R2/(R1+R2)" se tape sans parentheses en haut, "-R2/R1"
+  // aussi). Denominateur : autour de tout ce qui n'est pas un seul terme.
+  const wrapNum = (x: string) => {
+    const t = top(x).replace(/^[-−+]\s*/, "");
+    return /[+\-−=<>]|\\(?:pm|leq|geq|neq|approx|to|ll|gg)(?![A-Za-z])/.test(t) ? `(${x.trim()})` : x.trim();
+  };
+  const wrapDen = (x: string) =>
+    (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) ? `(${x.trim()})` : x.trim());
+  // Indice compose : entre parentheses, comme on le tape ("u_(n+1)").
+  const sub = (x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `(${x.trim()})` : x.trim());
+  let s = tex.replace(/\\left|\\right|\\displaystyle/g, "")
+    // Fractions abregees de MathLive : \frac12, \frac1{x}, \frac{a}2.
+    .replace(/\\frac\s*([0-9A-Za-z])\s*([0-9A-Za-z])/g, "\\frac{$1}{$2}")
+    .replace(/\\frac\s*([0-9A-Za-z])\s*\{/g, "\\frac{$1}{");
   // De l'interieur vers l'exterieur : un groupe sans accolade a la fois.
   for (let k = 0; k < 30; k++) {
     const next = s
       .replace(/\\(?:mathrm|text|operatorname|mathbf|mathit|mathbb|vec|overline)\{([^{}]*)\}/g, "$1")
-      .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (_a, n: string, d: string) => `${wrap(n)}/${wrap(d)}`)
+      .replace(/(\\frac\{[^{}]*\})\s*([0-9A-Za-z])/g, "$1{$2}")
+      .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (_a, n: string, d: string) => `${wrapNum(n)}/${wrapDen(d)}`)
       .replace(/\\sqrt\{([^{}]*)\}/g, "sqrt($1)")
-      .replace(/_\{([^{}]*)\}/g, "$1")
-      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${wrap(e)}`)
+      // Bornes d'une integrale, d'une somme : le "_" reste ("int_0^1").
+      .replace(/\\(int|sum|prod|lim)_\{([^{}]*)\}/g, (_a, op: string, b: string) => `\\${op}\u0001${sub(b)}`)
+      .replace(/\\(int|sum|prod|lim)_/g, "\\$1\u0001")
+      .replace(/_\{([^{}]*)\}/g, (_a, x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `_${sub(x)}` : x))
+      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${wrapDen(e)}`)
       .replace(/\{,\}/g, ",");
     if (next === s) break;
     s = next;
@@ -441,7 +458,9 @@ export function texToPlain(tex: string): string {
   return s
     .replace(/\\[,;:! ]/g, " ")
     .replace(/\\([A-Za-z]+)/g, (_a, name: string) => TEX_WORDS[name] ?? name)
+    .replace(/_(?=\()/g, "\u0001")
     .replace(/[_{}]/g, "")
+    .replace(/\u0001/g, "_")
     .replace(/\s+/g, " ")
     .trim();
 }

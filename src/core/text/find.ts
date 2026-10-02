@@ -28,11 +28,25 @@ const SCRIPTS: Record<string, string> = {};
 "₀₁₂₃₄₅₆₇₈₉".split("").forEach((c, i) => { SCRIPTS[c] = String(i); });
 
 /**
+ * Operateurs d'une formule : les blancs autour ne comptent pas, la
+ * formule relue ("(Ve · R2)/(R1 + R2)") et la recherche tapee
+ * ("R2/(R1+R2)") se plient de la meme facon.
+ */
+export const OPS = new Set(["+", "-", "−", "=", "<", ">", "/", "^", ".", "×", "≤", "≥", "≠", "≈", "→", "⇒", "⇔", "∈"]);
+
+/** Blanc inutile dans le texte plie `text` : en tete, double, ou derriere un operateur. */
+export function skipBlank(text: string): boolean {
+  return text === "" || text.endsWith(" ") || OPS.has(text[text.length - 1]);
+}
+
+/**
  * Forme pliee d'un caractere : minuscule, sans accent, grec par son nom,
  * exposants et indices en chiffres, blanc pour tout espace, rien pour l'espace sans largeur des formules.
  */
 export function foldChar(c: string): string {
   if (c === "​" || c === "﻿") return "";
+  // Produit : "Ve.R2", "Ve*R2" et la formule relue "Ve · R2" se valent.
+  if (c === "·" || c === "⋅" || c === "*") return ".";
   if (/\s/.test(c)) return " ";
   const low = c.toLowerCase();
   const named = GREEK[low] ?? LIGATURES[low] ?? SCRIPTS[low];
@@ -51,7 +65,9 @@ export function fold(s: string): { text: string; map: number[] } {
   let i = 0;
   for (const ch of s) {
     const f = foldChar(ch);
-    if (f === " " && (text.endsWith(" ") || text === "")) { i += ch.length; continue; }
+    // Pas de blanc colle a un operateur : "R1 + R2" se cherche "R1+R2".
+    if (f === " " && skipBlank(text)) { i += ch.length; continue; }
+    if (OPS.has(f[0]) && text.endsWith(" ")) { text = text.slice(0, -1); map.pop(); }
     for (const c of f) { text += c; map.push(i); }
     i += ch.length;
   }

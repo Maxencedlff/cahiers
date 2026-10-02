@@ -15,7 +15,7 @@ export type Command =
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
-  | "copy" | "cut" | "paste" | "sendCalc";
+  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -67,7 +67,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("k", false, "search", "Recherche dans tous les cahiers", "Pendant le cours"),
   { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),
-  { keys: "Échap", label: "Lâcher la sélection du lasso ; quitter le texte ; une seconde fois, retour au menu", group: "Pendant le cours" },
+  {
+    keys: "Échap",
+    label: "Ferme ce qui est ouvert (ruban, sélection du lasso), rend le clavier de la calculatrice à la page, "
+      + "quitte le texte ; un second Échap de suite : retour au menu",
+    group: "Pendant le cours",
+  },
   {
     keys: "# puis Espace",
     label: "En début de ligne : titre (## sous-titre, ### niveau 3) ; - puce ; 1. liste numérotée ; Tab / Maj+Tab : retrait ; Ctrl+Z rend le texte tapé",
@@ -80,9 +85,10 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("pageup", true, "prevDivider", "Intercalaire précédent", "Pages et intercalaires"),
   ctrl("n", false, "newPage", "Nouvelle page à la fin", "Pages et intercalaires"),
   ctrl("n", true, "insertPage", "Insérer une page après la page courante", "Pages et intercalaires"),
+  ctrl("t", false, "newDivider", "Nouvel intercalaire dans le cahier en vue", "Pages et intercalaires"),
   ctrl("g", false, "goto", "Liste des pages ; taper un numéro y va", "Pages et intercalaires"),
   { keys: "Alt+←", label: "Revenir d'où l'on vient après un saut (recherche, repère, lien, liste) ; aussi le bouton retour de la souris", group: "Pages et intercalaires" },
-  { keys: "Appui long", label: "Sur un intercalaire : ouvrir à droite, renommer, déplacer, supprimer", group: "Pages et intercalaires" },
+  { keys: "Appui long", label: "Sur un intercalaire : ouvrir à droite, renommer, déplacer, supprimer ; appui long puis glisser (ou glisser à la souris) : le déplacer", group: "Pages et intercalaires" },
   ctrl("=", false, "zoomIn", "Zoom avant, jusqu'à 300 % (aussi Ctrl+molette, pinch à deux doigts)", "Pages et intercalaires"),
   ctrl("-", false, "zoomOut", "Zoom arrière, jusqu'à 50 %", "Pages et intercalaires"),
   ctrl("0", false, "zoomReset", "Zoom à 100 % (aussi un appui sur « 150 % » en bas du panneau)", "Pages et intercalaires"),
@@ -187,4 +193,45 @@ export function parsePageInput(input: string, nums: readonly number[]): { page: 
     return { error: last ? `Pas de page ${n} : cet intercalaire va de 1 à ${last}` : `Pas de page ${n}` };
   }
   return { page: n };
+}
+
+/* ---------------- Echap ---------------- */
+
+/** Ce qui est ouvert ou a le clavier au moment d'un Echap, sur l'ecran cahier. */
+export interface EscapeState {
+  /** L'Echap precedent etait la touche d'avant (rien entre les deux, ni touche ni appui). */
+  again: boolean;
+  /** Touche deja prise plus bas (formule MathLive figee, photo deselectionnee) ou composition IME. */
+  handled: boolean;
+  /** Fenetre de dialogue ouverte : elle prend son Echap. */
+  dialog: boolean;
+  /** Ruban Maths ouvert en volet par-dessus la page. */
+  popover: boolean;
+  /** Le clavier est dans la calculatrice (bouton, champ, recepteur arme). */
+  calc: boolean;
+  /** Champ de saisie hors de la page (INPUT, TEXTAREA). */
+  field: boolean;
+  /** Selection du lasso. */
+  selection: boolean;
+  /** Le clavier est dans le texte de la page. */
+  inText: boolean;
+}
+
+export type EscapeAction =
+  | "ignore" | "close-popover" | "release-calc" | "leave-field" | "clear-selection" | "menu" | "leave-text" | "to-text";
+
+/**
+ * Un Echap, sur l'ecran cahier. Il ferme d'abord ce qui est ouvert, rend le
+ * clavier de la calculatrice a la page, sinon quitte le texte (ou y revient
+ * depuis un bouton). Le menu seulement au second Echap de suite, et jamais
+ * celui qui termine une saisie (formule, champ, composition).
+ */
+export function escapeAction(s: EscapeState): EscapeAction {
+  if (s.handled || s.dialog) return "ignore";
+  if (s.popover) return "close-popover";
+  if (s.calc) return "release-calc";
+  if (s.field) return "leave-field";
+  if (s.selection) return "clear-selection";
+  if (s.again) return "menu";
+  return s.inText ? "leave-text" : "to-text";
 }
