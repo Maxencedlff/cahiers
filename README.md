@@ -373,6 +373,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Alt+Maj+P` | photos du tableau (`Alt+P` seul = modele Puissance) |
 | `Ctrl+R` | conversion de l'ecriture : au fil de la plume ou sur zone |
 | `Ctrl+D` | doigt : ecrire ou naviguer (avec un stylet : l'oublier) |
+| `Ctrl+Maj+D` | affichage : pages ou defilement (defilement par defaut) |
 | `Ctrl+Tab` / `Ctrl+Maj+Tab` | onglet suivant, precedent (dans le panneau vise) |
 | `Ctrl+W` | fermer l'onglet |
 | `Ctrl+\` (AZERTY : `Ctrl+*`) | split gauche/droite |

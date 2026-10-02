@@ -2023,7 +2023,7 @@ export class App {
           () => void view()?.deleteCurrentPage(), "danger"),
       );
       settings.append(
-        segment("Affichage", "Une page à la fois, ou toutes les pages à la suite", [
+        segment("Affichage", titleOf("Une page à la fois, ou toutes les pages à la suite", "viewMode"), [
           ["Pages", mode === "pages", () => this.setViewMode("pages")],
           ["Défilement", mode === "scroll", () => this.setViewMode("scroll")],
         ]),
@@ -2607,6 +2607,12 @@ export class App {
       }
       case "convert": this.setAutoConvert(!this.autoConvert); return true;
       case "finger": this.toggleFinger(); return true;
+      case "viewMode": {
+        const v = this.focusedTab()?.view;
+        if (v) void this.setViewMode(v.mode === "scroll" ? "pages" : "scroll")
+          .then(() => toast(v.mode === "scroll" ? "Défilement : toutes les pages à la suite" : "Pages : une page à la fois"));
+        return true;
+      }
       case "newPage": if (notebook) void view?.newPage(); return true;
       case "insertPage": if (notebook) void view?.newPage(true); return true;
       case "goto": if (notebook) void this.showPageList(view, true); return true;

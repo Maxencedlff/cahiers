@@ -282,7 +282,7 @@ const sizeMemo = new SizeMemo();
 export class PageView {
   readonly root: HTMLElement;
   private list: LoadedPage[] = [];
-  private viewMode: ViewMode = "pages";
+  private viewMode: ViewMode = "scroll";
   private renderMode: RenderMode = "ink";
   private current = 1;
   /** Nombre de pages de l'intercalaire, lu au dernier rendu. */
@@ -462,7 +462,8 @@ export class PageView {
    */
   async load(startPage?: number): Promise<void> {
     const meta = await this.host.repo.readMeta(this.notebook);
-    this.viewMode = meta.viewMode?.[this.divider] ?? "pages";
+    // Defilement par defaut ; « Pages » seulement si choisi pour cet intercalaire.
+    this.viewMode = meta.viewMode?.[this.divider] ?? "scroll";
     this.paperKind = paperOf(meta.paper, this.divider);
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (nums.length === 0) {
@@ -1080,7 +1081,7 @@ export class PageView {
     } else {
       items.push(...this.conflictNotes(loaded.number));
     }
-    if (loaded.long) items.push(this.longNote(loaded));
+    if (loaded.long && !keptLong(loaded.page.id)) items.push(this.longNote(loaded));
     loaded.notes.replaceChildren(...items);
   }
 
@@ -1685,6 +1686,10 @@ export class PageView {
       loaded.readOnly || this.readOnly ? null : el("button", {
         class: "small", onclick: () => void this.splitLongPage(loaded),
       }, "Répartir sur plusieurs pages"),
+      el("button", {
+        class: "small", title: "Ne plus afficher ce message pour cette page (les pointillés restent)",
+        onclick: () => { keepLong(loaded.page.id); this.paintNotes(loaded); },
+      }, "Laisser ainsi"),
     );
   }
 
@@ -4633,4 +4638,29 @@ function loadImage(src: string): Promise<HTMLImageElement | null> {
     img.onerror = () => resolve(null);
     img.src = src;
   });
+}
+
+/*
+ * « Laisser ainsi » sur une ancienne page longue : retenu sur cette machine
+ * (stockage local), jamais ecrit dans la page ni dans OneDrive.
+ */
+const KEEP_LONG_KEY = "cahiers.keepLong.v1";
+
+function keptLongIds(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEEP_LONG_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function keptLong(id: string): boolean {
+  return keptLongIds().includes(id);
+}
+
+function keepLong(id: string): void {
+  const ids = keptLongIds();
+  if (ids.includes(id)) return;
+  try { localStorage.setItem(KEEP_LONG_KEY, JSON.stringify([...ids, id].slice(-500))); } catch { /* stockage plein : le bandeau reviendra */ }
 }

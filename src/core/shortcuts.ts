@@ -15,7 +15,7 @@ export type Command =
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
-  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf";
+  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf" | "viewMode";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -111,6 +111,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: "Alt+T", label: "Zone texte : une zone, puis retour au stylo ; deux fois = verrou", group: "Outils et couleurs" },
   { keys: `Alt+${NEUTRAL_INK.shortcut}`, label: `${NEUTRAL_INK.label}, en noir`, group: "Outils et couleurs" },
   ...PALETTE.map((p): Shortcut => ({ keys: `Alt+${p.shortcut}`, label: `${p.label} (recolore la sélection du lasso)`, group: "Outils et couleurs" })),
+  ctrl("d", true, "viewMode", "Affichage : une page à la fois ou toutes à la suite (défilement)", "Pages et intercalaires"),
   ctrl("d", false, "finger", "Doigt : écrire ou naviguer (avec un stylet : l'oublier)", "Outils et couleurs"),
 
   { keys: "Alt+=", label: "Nouvelle formule", group: "Formules" },
