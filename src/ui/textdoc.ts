@@ -5,7 +5,7 @@ import { askText, el, toast } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardText, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
+  docClipboardLines, docClipboardText, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
   texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
@@ -260,7 +260,27 @@ export class TextDoc {
     if (!sel?.rangeCount) return;
     const r = sel.getRangeAt(0);
     if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
+    this.markSelectedEqs(sel.isCollapsed ? null : r);
   };
+
+  /**
+   * Formules prises dans la selection : surlignees comme le texte. KaTeX ne
+   * montre pas la selection sur ses glyphes, on ne voyait pas qu'elles
+   * partaient avec le copier.
+   */
+  private markSelectedEqs(r: Range | null): void {
+    const inside = r && this.root.contains(r.commonAncestorContainer) ? r : null;
+    if (!inside && !this.hasSelEq) return;
+    let any = false;
+    for (const eq of this.root.querySelectorAll<HTMLElement>(".eq")) {
+      const on = !!inside && inside.intersectsNode(eq);
+      eq.classList.toggle("in-sel", on);
+      any ||= on;
+    }
+    this.hasSelEq = any;
+  }
+
+  private hasSelEq = false;
 
   /**
    * Page quittee : plus aucun ecouteur global ni minuterie. Sans cela, chaque
@@ -561,12 +581,14 @@ export class TextDoc {
     if (!tokens.length) return;
     e.preventDefault();
     const doc = serializeDoc(tokens);
-    const plain = docClipboardText(tokens);
+    // Ailleurs (messagerie, Bloc-notes) : formules relues comme on les tape,
+    // « (3+5)/2 » plutot que du LaTeX.
+    const plain = docClipboardText(tokens, texToPlain);
     e.clipboardData.setData("text/plain", plain);
     e.clipboardData.setData(CLIP_TYPE, doc);
-    // Copie de secours dans le HTML, si le type interne se perd en route.
-    const holder = el("span", { dataset: { cahiers: doc } }, plain);
-    e.clipboardData.setData("text/html", holder.outerHTML);
+    // HTML : formules en MathML (Word les colle en vraies equations), et
+    // copie de secours du morceau dans data-cahiers si le type interne se perd.
+    e.clipboardData.setData("text/html", clipboardHtml(tokens, doc));
     if (cut) {
       // Par l'editeur du navigateur : Ctrl+Z rend le morceau coupe.
       if (!document.execCommand("delete")) range.deleteContents();
@@ -3181,6 +3203,23 @@ function styleAt(node: Node, root: HTMLElement): { bold: boolean; italic: boolea
 }
 
 /** Morceau interne retrouve dans le HTML du presse-papiers (copie de secours). */
+/** HTML du presse-papiers : texte echappe, formules en MathML, une ligne par <div>. */
+function clipboardHtml(tokens: DocToken[], doc: string): string {
+  const esc = (t: string): string => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const lines = docClipboardLines(tokens).map((line) => esc(line.marker) + line.parts.map((p) => {
+    if ("text" in p) return esc(p.text);
+    try {
+      return katex.renderToString(p.latex, { output: "mathml", throwOnError: false });
+    } catch {
+      return esc(texToPlain(p.latex));
+    }
+  }).join(""));
+  const holder = document.createElement("div");
+  holder.dataset.cahiers = doc;
+  holder.innerHTML = lines.map((l) => `<div>${l || "<br>"}</div>`).join("");
+  return holder.outerHTML;
+}
+
 function docFromHtml(html: string): string {
   if (!html.includes("data-cahiers")) return "";
   const doc = new DOMParser().parseFromString(html, "text/html");

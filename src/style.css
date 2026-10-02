@@ -624,7 +624,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 /* Marges haute et basse posees par src/ui/linesnap.ts : une formule haute
    occupe un nombre entier de lignes. Survol translucide : l'encre dessous
    reste visible. */
-.text-doc .eq { display: inline-block; padding: 0; border-radius: 4px; cursor: pointer; user-select: none; }
+.text-doc .eq { display: inline-block; padding: 0; border-radius: 4px; cursor: pointer; user-select: all; }
+/* Formule dans la selection : elle part avec le copier (un bloc entier). */
+.text-doc .eq.in-sel { background: rgba(59, 110, 230, .28); }
+.text-doc .eq ::selection { background: transparent; }
 .text-doc .eq:hover { background: rgba(59, 110, 230, .07); box-shadow: 0 0 0 2px rgba(59, 110, 230, .07); }
 .text-doc .eq .katex { font-size: 1.08em; }
 

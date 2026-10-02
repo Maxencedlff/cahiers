@@ -466,11 +466,25 @@ export function absorbTextBoxes(
  * Texte d'un morceau copie, pour le presse-papiers des autres logiciels :
  * les formules en $LaTeX$, les photos omises.
  */
-export function docClipboardText(tokens: DocToken[]): string {
+export function docClipboardText(tokens: DocToken[], math: (latex: string) => string = (l) => `$${l}$`): string {
   const lines = docLines(tokens);
   const nums = listNumbers(lines.map((l) => l.format));
   return lines.map((line, k) => (line.format ? lineMarker(line.format, nums[k]) : "") + line.tokens.map((t) =>
-    t.kind === "math" ? `$${t.latex}$` : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "").join("")).join("\n");
+    t.kind === "math" ? math(t.latex) : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "").join("")).join("\n");
+}
+
+/**
+ * Lignes d'un morceau copie, pour le HTML du presse-papiers : texte et
+ * formules a part, marqueur de titre ou de puce compris.
+ */
+export function docClipboardLines(tokens: DocToken[]): { marker: string; parts: ({ text: string } | { latex: string })[] }[] {
+  const lines = docLines(tokens);
+  const nums = listNumbers(lines.map((l) => l.format));
+  return lines.map((line, k) => ({
+    marker: line.format ? lineMarker(line.format, nums[k]) : "",
+    parts: line.tokens.flatMap((t): ({ text: string } | { latex: string })[] =>
+      t.kind === "math" ? [{ latex: t.latex }] : t.kind === "text" ? [{ text: t.text }] : t.kind === "link" ? [{ text: t.label }] : []),
+  }));
 }
 
 /** Commandes LaTeX relues en texte : lettres grecques par leur nom, relations en ASCII. */

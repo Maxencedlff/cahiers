@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  absorbTextBoxes, docClipboardText, docImageIds, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
+  absorbTextBoxes, docClipboardLines, docClipboardText, docImageIds, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
   trailingOperand,
   type DocToken,
 } from "../core/text/doc";
@@ -163,5 +163,15 @@ describe("presse-papiers et recherche", () => {
     expect(texToPlain("u_{n + 1} = 2\\,u_n")).toBe("u_(n + 1) = 2 un");
     expect(texToPlain("\\int_{0}^{1} x^{2}\\,\\mathrm{d}x")).toBe("int_0^1 x^2 dx");
     expect(texToPlain("\\sum_{k = 0}^{n} k")).toBe("sum_(k = 0)^n k");
+  });
+});
+
+describe("copier vers un autre logiciel", () => {
+  it("formules relues comme tapees dans le texte simple, a part pour le HTML", () => {
+    const t = parseDoc("$3+2=5$ le tout divise par 2; $\\frac{3+5}{2}$");
+    expect(docClipboardText(t, texToPlain)).toBe("3+2=5 le tout divise par 2; (3+5)/2");
+    expect(docClipboardLines(t)).toEqual([{ marker: "", parts: [
+      { latex: "3+2=5" }, { text: " le tout divise par 2; " }, { latex: "\\frac{3+5}{2}" },
+    ] }]);
   });
 });
