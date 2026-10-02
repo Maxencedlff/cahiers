@@ -677,7 +677,7 @@ export class InkSurface {
     // hors de la feuille, la page ne s'allonge plus sous la main.
     const point = roundPoint({
       x: clamp(p.x, 0, PAGE_W),
-      y: clamp(p.y, 0, this.pageH),
+      y: clamp(p.y, 0, this.pageH - this.live.width / 2),
       p: e.pressure > 0 ? e.pressure : 0.5,
       t: Math.max(0, e.timeStamp - this.startedAt),
       ...(e.tiltX || e.tiltY ? { tiltX: e.tiltX, tiltY: e.tiltY } : {}),

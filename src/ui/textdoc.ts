@@ -1301,11 +1301,44 @@ export class TextDoc {
     this.lastAuto = null;
     this.lastLine = null;
     if (caret) this.savedRange = null;
-    // Une ligne vide finale reste visible (meme regle que setContent).
-    const head = this.read();
-    if (head[head.length - 1]?.kind === "br" && this.root.lastChild?.nodeName === "BR") this.root.append(el("br"));
+    this.dropTrailingBreak();
     this.emit();
     return { tail, caret };
+  }
+
+  /**
+   * Apres une coupe : le saut qui finissait la derniere ligne gardee ne
+   * sert plus (sinon une ligne vide fantome, invisible ici, reapparaissait
+   * a la reouverture). Une vraie ligne vide finale reste affichee.
+   */
+  private dropTrailingBreak(): void {
+    const last = (): Node | null => {
+      const w = document.createTreeWalker(this.root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+      let n: Node | null = this.root;
+      while (w.lastChild()) n = w.currentNode;
+      for (n = w.currentNode; n && n !== this.root; n = w.previousNode()) {
+        const atom = n.parentElement?.closest(".eq, .doc-img, math-field");
+        if (atom && this.root.contains(atom)) return atom;
+        if (n.nodeType === Node.TEXT_NODE) {
+          if ((n.textContent ?? "").replace(/\u200b/g, "")) return n;
+          continue;
+        }
+        if (n.nodeName === "BR" || (n instanceof HTMLElement && (isLine(n) || n.matches(".eq, .doc-img, math-field")))) return n;
+      }
+      return null;
+    };
+    const n = last();
+    if (n?.nodeType === Node.TEXT_NODE && (n.textContent ?? "").endsWith("\n")) (n as Text).deleteData((n as Text).length - 1, 1);
+    else if (n?.nodeName === "BR" && !isLine(n.parentNode)) n.parentNode?.removeChild(n);
+    const m = last();
+    if ((m?.nodeType === Node.TEXT_NODE && (m.textContent ?? "").endsWith("\n"))
+        || (m?.nodeName === "BR" && !isLine(m.parentNode))) this.root.append(el("br"));
+  }
+
+  /** Le curseur est-il a `at` ou plus loin dans le texte ? */
+  caretFrom(at: Range): boolean {
+    const c = this.caretRange();
+    return !!c && this.root.contains(c.startContainer) && this.toEnd(at).isPointInRange(c.startContainer, c.startOffset);
   }
 
   /** Fin du texte a partir de `at`, au format du disque, sans rien retirer. */

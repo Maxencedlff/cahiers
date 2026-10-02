@@ -192,11 +192,32 @@ redresser à nouveau, retirer (« Annuler » dans le message ; `Suppr` marche
 aussi). Au stylet et à la souris, glisser la photo la déplace ; au doigt,
 glisser une photo sélectionnée la déplace, sinon le doigt fait défiler.
 
+## Pages A4 (pagination automatique)
+
+Une page est une feuille A4, comme dans Word. Quand le texte tapé (ou une
+photo, un calcul, une courbe, ou l'encre poussée par le texte) dépasse le bas,
+ce qui déborde passe en tête de la page suivante : jamais au milieu d'une
+ligne, d'une formule ou d'une photo, un titre ne reste pas seul en bas, un
+schéma part entier et garde sa place par rapport au texte. La page suivante est
+créée (renumérotation) ; si elle a été créée par un débordement précédent, le
+texte y continue. Le curseur suit (en mode pages, la vue passe à la page
+suivante). `Ctrl+Z` juste après un débordement le défait d'un coup. Le stylet
+n'écrit plus hors de la feuille. Une ancienne page plus longue qu'une A4 n'est
+jamais découpée d'office : pointillés à chaque fin de feuille et bouton
+« Répartir sur plusieurs pages » (annulable 8 s). Une photo plus haute qu'une
+page est réduite à la hauteur de page.
+
+Limites : supprimer du texte ne fait pas remonter les lignes de la page
+suivante ; `Ctrl+Z` ne défait le débordement que tout de suite après (une autre
+frappe l'invalide) et l'historique d'encre des deux pages repart de zéro ; en
+mode pages, une page suivante qui déborde à son tour se reporte quand on
+l'ouvre.
+
 ## Export PDF
 
 `Ctrl+P` (la page) ou `Ctrl+Maj+P` (l'intercalaire), puis « Enregistrer au
-format PDF ». Une page qui tient sur une A4 part telle quelle, un peu plus haute
-elle est légèrement réduite ; une page longue n'est jamais réduite : elle est
+format PDF ». Chaque page de l'appli est une feuille A4 : elle part telle
+quelle, jamais coupée. Une ancienne page longue n'est jamais réduite : elle est
 coupée sur plusieurs feuilles A4, entre deux lignes, jamais au milieu d'une
 photo ou d'une formule. L'encre est rendue en haute densité et découpée par
 feuille.

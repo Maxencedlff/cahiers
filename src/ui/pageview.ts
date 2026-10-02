@@ -1392,6 +1392,8 @@ export class PageView {
   /** Repeint une page dont la pagination a deplace le contenu. */
   private repaintFlowed(p: LoadedPage): void {
     this.history.drop(p.page.id);
+    // Ancienne hauteur notee (encre sous l'A4, partie avec la suite) : oubliee.
+    shrinkToInk(p.page);
     this.fitSheet(p);
     this.paintStrokes(p);
     this.paintOverlay(p);
@@ -1446,14 +1448,21 @@ export class PageView {
     let caretTo: { pageId: string; content: string } | null = null;
     try {
       const at = plan.firstRow < m.rows.length ? rowStart(from.doc.root, m, m.rows[plan.firstRow]) : null;
-      const preview = at ? from.doc.tailFrom(at) : "";
-      console.warn("FLOWDBG", JSON.stringify({ n: from.number, preview, plan: { ...plan, strokeIds: plan.strokeIds.length }, head: from.doc.content.slice(-60) }));
+      // Lignes vides seules sous la coupe : elles ne passent pas a la page
+      // suivante (sauf celle du curseur : Entree en bas de page y va).
+      const blank = !!at && !/\S/.test(from.doc.tailFrom(at)) && !from.doc.caretFrom(at);
+      const textOf = (tail: string) => (blank ? "" : tail);
+      const preview = at ? textOf(from.doc.tailFrom(at)) : "";
       const sel: FlowSelection = {
         strokeIds: plan.strokeIds, zoneIds: plan.zoneIds, flagIds: plan.flagIds, blockIds: imageIdsOf(preview),
       };
       if (!preview && !sel.strokeIds.length && !sel.zoneIds.length && !sel.flagIds.length) {
-        // Rien a deplacer (lignes vides finales) : la page garde sa taille.
-        if (at) this.cutText(from, at);
+        // Rien a deplacer : les lignes vides finales sont retirees, la page garde sa taille.
+        if (at) {
+          const before = from.doc.content;
+          this.cutText(from, at);
+          if (from.doc.content === before) this.flowAgain.delete(from);
+        }
         return null;
       }
       const n = from.number + 1;
@@ -1471,7 +1480,7 @@ export class PageView {
         // Page de suite affichee (defilement) : tout se passe en memoire.
         undo.toId = shownNext.page.id;
         undo.toBlocks = JSON.stringify(shownNext.page.blocks);
-        const { tail } = this.cutText(from, at);
+        const tail = textOf(this.cutText(from, at).tail);
         const existing = this.bodyText(shownNext.page)?.content ?? "";
         const c = composeFlowText(tail, plan.lead, existing, plan.textLines, plan.inkLines);
         moveFlowBlocks(from.page, shownNext.page, { ...sel, blockIds: imageIdsOf(tail) }, plan.dy, c.shift, uuid);
@@ -1511,7 +1520,8 @@ export class PageView {
         }
         if (from.dead) return null;
         // Maintenant seulement, `from` perd ce qui est parti.
-        const { tail, caret } = this.cutText(from, at);
+        const cut = this.cutText(from, at);
+        const tail = textOf(cut.tail), caret = cut.caret && !blank;
         moveFlowBlocks(from.page, emptyPage("x", ""), sel, 0, 0, uuid);
         this.repaintFlowed(from);
         this.queueSave(from);
@@ -1992,8 +2002,9 @@ export class PageView {
     loaded.lastEdit = "ink";
     loaded.lastInk = strokeBounds(stroke);
     this.lastGestureId = loaded.page.id;
-    // Trait ecrit sous l'A4 : la feuille (et le canvas) s'allongent.
-    if (growForStroke(loaded.page, stroke)) this.fitSheet(loaded);
+    // Pagination : une page A4 ne s'allonge plus (le stylet s'arrete au bord) ;
+    // seule une ancienne page longue garde ce comportement.
+    if (loaded.long && growForStroke(loaded.page, stroke)) this.fitSheet(loaded);
     this.queueSave(loaded);
     // Un surlignage ne part pas a la reconnaissance.
     if (stroke.tool === "pen" && this.host.autoConvert()) {
@@ -3874,7 +3885,7 @@ export class PageView {
       loaded.page.blocks = restoreBlocks(loaded.page.blocks, JSON.parse(entry) as Block[]);
     } else {
       loaded.page.blocks = applyStrokeCommand(loaded.page.blocks, entry, dir);
-      if (dir === "redo") growForStroke(loaded.page, entry.stroke);
+      if (dir === "redo") { if (loaded.long) growForStroke(loaded.page, entry.stroke); }
       // Annuler le trait qui avait allonge la feuille la rend a sa taille.
       else shrinkToInk(loaded.page);
       // Un trait remis repart a la conversion, comme a son premier lever.

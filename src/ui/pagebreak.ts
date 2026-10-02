@@ -64,10 +64,10 @@ export function measureRows(root: HTMLElement, sheetTop: number, k: number): Mea
     if (!len) continue;
     range.selectNodeContents(t);
     const rects = Array.from(range.getClientRects()).filter((r) => r.height > 0);
-    rects.forEach((r, j) => {
+    for (const r of rects) {
       const top = r.top;
-      items.push({ ...toPage(r), start: () => [t, j === 0 ? 0 : lineStartIn(t, top)] });
-    });
+      items.push({ ...toPage(r), start: () => [t, lineStartIn(t, top)] });
+    }
   }
   return { rows: groupRows(items), items };
 }
