@@ -1,4 +1,4 @@
-import { CalcEngine } from "./engine";
+import { CalcEngine, displayTex, frTexDecimal, isRounded, typedJ, type ImagUnit } from "./engine";
 import { stripY } from "./plot";
 
 /**
@@ -9,10 +9,7 @@ import { stripY } from "./plot";
 
 const reader = new CalcEngine();
 
-/** Point decimal des nombres mis en virgule francaise ({,} : sans espace en TeX). */
-function frDecimal(tex: string): string {
-  return tex.replace(/(\d)\.(\d)/g, "$1{,}$2");
-}
+const frDecimal = frTexDecimal;
 
 /** Texte quelconque dans un \text{} sans casser le TeX. */
 function textTex(s: string): string {
@@ -23,16 +20,36 @@ function textTex(s: string): string {
  * Resultat stocke (texte de format() : « 7234.31559568 », « 1.5e-12 »,
  * « 2 + 3i », « [[1, 2], [3, 4]] », « 5 V ») en LaTeX.
  */
-export function resultTex(result: string | number | null | undefined): string {
+export function resultTex(result: string | number | null | undefined, imag: ImagUnit = "i"): string {
+  return readResult(result, imag).tex;
+}
+
+/**
+ * Resultat stocke relu : nombre a 6 chiffres significatifs (`rounded` : la
+ * valeur stockee est plus longue, la ligne dit ≈), complexe avec j, unite
+ * en lecture ingenieur, ∞ et « non défini » en francais.
+ */
+function readResult(result: string | number | null | undefined, imag: ImagUnit): { tex: string; rounded: boolean } {
   const s = String(result ?? "").trim();
-  if (!s) return "";
-  const m = /^(-?\d+(?:\.\d+)?)e([+-]?\d+)$/i.exec(s);
-  if (m) return `${frDecimal(m[1])} \\cdot 10^{${Number(m[2])}}`;
-  if (/^-?\d+(?:\.\d+)?$/.test(s)) return frDecimal(s);
+  if (!s) return { tex: "", rounded: false };
+  const opts = { imag, angle: "RAD" as const };
+  if (/^-?Infinity$/.test(s)) return { tex: s[0] === "-" ? "-\\infty" : "\\infty", rounded: false };
+  if (s === "NaN") return { tex: "\\text{non défini}", rounded: false };
+  if (/^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(s)) {
+    const x = Number(s);
+    return { tex: displayTex(x, opts), rounded: isRounded(x) };
+  }
   // « f(x) définie », « Variables définies » : une phrase, pas une expression.
-  if (/[^\x00-\x7F]/.test(s)) return textTex(s);
+  if (/[^\x00-\x7F]/.test(s)) return { tex: textTex(s), rounded: false };
+  try {
+    const v = reader.math.evaluate(s);
+    if (typeof v === "object" && v !== null && ((v as any).isComplex || (v as any).isUnit)) {
+      const tex = displayTex(v, opts);
+      return { tex, rounded: (v as any).isUnit || isRounded((v as any).re ?? 0) || isRounded((v as any).im ?? 0) };
+    }
+  } catch { /* pas une valeur : relue comme expression */ }
   const tex = reader.toLatex(s);
-  return tex ? frDecimal(tex) : textTex(s);
+  return { tex: tex ? frDecimal(tex) : textTex(s), rounded: false };
 }
 
 /** Expression d'un calcul telle que le moteur l'a lue (prefixes 2,2k compris). */
@@ -43,8 +60,9 @@ export function exprTex(expr: string): string {
 
 /** Ligne complete d'un bloc calc : « \frac{1}{2\pi ...} = 7234{,}3 ». */
 export function calcTex(expr: string, result: string | number | null | undefined): string {
-  const r = resultTex(result);
-  return r ? `${exprTex(expr)} = ${r}` : exprTex(expr);
+  // Complexe affiche avec j si le calcul l'utilisait, sinon avec i.
+  const r = readResult(result, typedJ(expr) ? "j" : "i");
+  return r.tex ? `${exprTex(expr)} ${r.rounded ? "\\approx" : "="} ${r.tex}` : exprTex(expr);
 }
 
 /** Titre d'un bloc courbe : « y = \frac{x\sin x}{2} ». */

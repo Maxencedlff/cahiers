@@ -193,6 +193,8 @@ export interface GraphBlock extends BlockBase {
   range?: [number, number];
   /** sin(x) en degres ou en radians. Absent = RAD. */
   angle?: BlockAngle;
+  /** Axe x logarithmique (Bode). Absent = lineaire. */
+  logX?: boolean;
   /** Largeur dans le texte, en unites de page (comme ImageBlock.width). */
   width?: number;
 }

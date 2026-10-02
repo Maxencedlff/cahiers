@@ -161,7 +161,8 @@ describe("primitives", () => {
   });
 
   it("echoue proprement sur un produit non couvert", () => {
-    const r = antiderivative("x * sin(x)", "x");
+    // x*sin(x) passe par parties ; exp(x)*sin(x) (parties cycliques) non.
+    const r = antiderivative("exp(x) * sin(x)", "x");
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/parties|non couverte/i);
   });
@@ -173,10 +174,10 @@ describe("primitives", () => {
   });
 
   it("integrale definie numerique quand la primitive manque", () => {
-    const r = definiteIntegral("x * sin(x)", "x", 0, Math.PI);
+    const r = definiteIntegral("exp(x) * sin(x)", "x", 0, Math.PI);
     expect(r.ok).toBe(true);
     expect(r.method).toBe("numerique");
-    expect(r.value).toBeCloseTo(Math.PI, 5);
+    expect(r.value).toBeCloseTo((Math.exp(Math.PI) + 1) / 2, 5);
   });
 });
 

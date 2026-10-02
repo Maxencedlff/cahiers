@@ -95,7 +95,8 @@ describe("rendu LaTeX des blocs (toLatex, jamais le texte brut)", () => {
     const tex = calcTex("1/(2*pi*2,2k*10n)", "7234.31559568");
     expect(tex).toContain("\\frac");
     expect(tex).toContain("\\pi");
-    expect(tex).toContain("7234{,}31559568");
+    // Valeur lisible (6 chiffres significatifs), ≈ car arrondie.
+    expect(tex).toContain("\\approx 7234{,}32");
     expect(tex).not.toContain("2,2k");
   });
   it("resultats : exposant, complexe, texte", () => {
@@ -120,7 +121,7 @@ describe("courbes en degres (l'onglet Courbes suit le mode DEG)", () => {
   it("racines, tableau et extremums en DEG", () => {
     const roots = rootsInWindow("sin(x)", -200, 200, "x", "DEG");
     expect(roots.map((r) => Math.round(r))).toEqual([-180, 0, 180]);
-    expect(Number(valueTable("cos(x)", 60, 60, 1, "x", "DEG")[0].y)).toBeCloseTo(0.5, 6);
+    expect(Number(valueTable("cos(x)", 60, 60, 1, "x", "DEG")[0].y.replace(",", "."))).toBeCloseTo(0.5, 6);
     const ext = extremaInWindow("sin(x)", 0, 360, "x", 800, "DEG");
     expect(ext.map((e) => [e.kind, Math.round(e.x)])).toEqual([["max", 90], ["min", 270]]);
   });

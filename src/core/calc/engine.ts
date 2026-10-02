@@ -6,13 +6,21 @@ import { create, all, type MathJsInstance, type MathNode } from "mathjs";
  */
 
 export type AngleMode = "RAD" | "DEG";
+/** Unite imaginaire affichee : j en electronique (defaut), i en maths. */
+export type ImagUnit = "i" | "j";
 
 export interface EvalOk {
   ok: true;
   /** Valeur brute mathjs (nombre, complexe, matrice, unite...). */
   raw: unknown;
-  /** Resultat formate pour l'affichage. */
+  /** Resultat complet, forme machine (point decimal, i) : stocke dans les blocs. */
   text: string;
+  /** Resultat lisible : virgule, 6 chiffres significatifs, j, ∞. */
+  display: string;
+  /** Valeur complete a la francaise, quand `display` est arrondi. */
+  full?: string;
+  /** Forme polaire d'un complexe : « 5 ∠ 53,1301° ». */
+  polar?: string;
   /** Lecture ingenieur du resultat (unites, prefixes), si elle aide. */
   eng?: string;
   /** Expression telle qu'elle a ete COMPRISE, en LaTeX (section 7). */
@@ -33,9 +41,38 @@ export type EvalResult = EvalOk | EvalErr;
  * `expr` est la saisie telle que tapee (jamais la forme normalisee).
  * `eng` : lecture ingenieur (« 7,234 kHz », « 22 µ »), si elle aide.
  */
-export interface HistoryEntry { expr: string; text: string; latex: string; resultLatex: string; eng?: string }
+export interface HistoryEntry {
+  expr: string; text: string; latex: string; resultLatex: string; eng?: string;
+  /** Lecture a la francaise (voir EvalOk.display). */
+  display: string; full?: string; polar?: string;
+}
 
 const math: MathJsInstance = create(all, { number: "number" });
+
+/**
+ * Fonctions propres a la calculatrice, a installer dans chaque instance
+ * mathjs qui lit la sortie de normalizeInput (courbes comprises) :
+ * - par(a, b, ...) : resistances en parallele a*b/(a+b), associatif,
+ *   reels, complexes (impedances) et unites ; ecrit R1 // R2 ou R1 || R2 ;
+ * - __si(n, e) : nombre a prefixe d'ingenieur, seulement pour l'affichage
+ *   (« 10 n » au lieu de « 1·10⁻⁸ »).
+ */
+export function installCalcFunctions(m: MathJsInstance): void {
+  const f = m as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const par = (...args: unknown[]): unknown => {
+    if (args.length < 2) throw new Error("Le parallèle // demande deux valeurs");
+    return args.reduce((a, b) => f.divide(f.multiply(a, b), f.add(a, b)));
+  };
+  (par as any).toTex = (node: any, options: any) =>
+    `\\left(${node.args.map((a: any) => a.toTex(options)).join("\\parallel ")}\\right)`;
+  const si = (n: unknown, p: unknown) => Number(n) * 10 ** (SI_PREFIX[String(p)] ?? 0);
+  (si as any).toTex = (node: any, options: any) => {
+    const sym = SI_SYMBOL[SI_PREFIX[String(node.args[1].value)] ?? 0] ?? "";
+    return `${node.args[0].toTex(options)}\\,\\mathrm{${sym === "µ" ? "\\mu" : sym}}`;
+  };
+  m.import({ par, __si: si }, { override: true });
+}
+installCalcFunctions(math);
 
 /* ------------------------------------------------------------------ */
 /* Residus flottants                                                   */
@@ -88,7 +125,7 @@ function sumWith(op: "add" | "subtract") {
 }
 
 /** Noms injectes dans le scope : jamais recopies dans les variables. */
-const INJECTED = new Set(["sin", "cos", "tan", "asin", "acos", "atan", "__add", "__sub", "ans"]);
+const INJECTED = new Set(["sin", "cos", "tan", "asin", "acos", "atan", "arg", "__add", "__sub", "ans"]);
 
 /** Trigonometrie RAD ou DEG, nettoyee des residus, tan indefinie signalee. */
 function trigScope(m: MathJsInstance, mode: AngleMode): Record<string, unknown> {
@@ -122,6 +159,8 @@ function trigScope(m: MathJsInstance, mode: AngleMode): Record<string, unknown> 
     asin: (...args: unknown[]) => r2d(f.asin(one("asin", args))),
     acos: (...args: unknown[]) => r2d(f.acos(one("acos", args))),
     atan: (...args: unknown[]) => r2d(f.atan(one("atan", args))),
+    // arg suit le mode d'angle, comme les fonctions reciproques.
+    arg: (...args: unknown[]) => r2d(f.arg(one("arg", args))),
     __add: sumWith("add"),
     __sub: sumWith("subtract"),
   };
@@ -148,8 +187,16 @@ function guardSums(node: MathNode): MathNode {
   return mapped;
 }
 
+/** Resultat sous ses deux formes : machine (text) et lisible (display). */
+interface Shown { text: string; display: string; full?: string; polar?: string }
+
+/** Une phrase (« f(x) définie ») : meme texte sous les deux formes. */
+function plain(t: string): Shown { return { text: t, display: t }; }
+
 export class CalcEngine {
   angleMode: AngleMode = "RAD"; // RAD par defaut (section 7)
+  /** Unite imaginaire affichee (j par defaut : TD d'electronique). */
+  imagUnit: ImagUnit = "j";
   ans: unknown = 0;
   history: HistoryEntry[] = [];
   /** Variables et fonctions definies par l'utilisateur, partagees entre les onglets. */
@@ -169,8 +216,9 @@ export class CalcEngine {
    * Saisie de l'onglet Calcul : normalisee, prefixes d'ingenieur colles a un
    * nombre traduits (2,2k = 2200), sauf si la lettre est une variable definie.
    */
-  calcInput(expr: string): { src: string; prefixed: boolean } {
-    return siPrefixes(normalizeInput(expr), (name) => name in this.vars);
+  calcInput(expr: string, mode: "eval" | "tex" = "eval"): { src: string; prefixed: boolean } {
+    const reserved = (name: string) => name in this.vars;
+    return siPrefixes(normalizeInput(expr, reserved), reserved, mode);
   }
 
   /**
@@ -178,11 +226,15 @@ export class CalcEngine {
    * `prefixes` : lecture de l'onglet Calcul (2,2k lu 2,2e3).
    */
   toLatex(expr: string, prefixes = false): string | null {
-    const src = (prefixes ? this.calcInput(expr).src : normalizeInput(expr)).trim();
+    const reserved = (name: string) => name in this.vars;
+    const src = (prefixes ? this.calcInput(expr, "tex").src : normalizeInput(expr, reserved)).trim();
     if (!src) return null;
     try {
       const tex = math.parse(src).toTex({ parenthesis: "auto" });
-      return tex && tex !== "undefined" ? tex : null;
+      if (!tex || tex === "undefined") return null;
+      // j tape reste j a l'ecran : c'est ce que l'utilisateur a ecrit.
+      const j = typedJ(expr, reserved);
+      return texArc(frTexDecimal(j ? texImag(tex, "j") : tex));
     } catch {
       return null;
     }
@@ -194,6 +246,7 @@ export class CalcEngine {
 
   evaluate(expr: string): EvalResult {
     const { src, prefixed } = this.calcInput(expr);
+    const opts: DisplayOptions = { imag: this.imagUnit, angle: this.angleMode };
     if (!src.trim()) return { ok: false, message: "Expression vide", latex: null };
     let latex: string | null = null;
     try {
@@ -211,28 +264,34 @@ export class CalcEngine {
         const entries = (raw as any).entries as unknown[];
         raw = entries.length ? entries[entries.length - 1] : undefined;
         if (raw === undefined) {
-          return this.record(expr, "Variables définies", latex, "\\text{ok}", undefined);
+          return this.record(expr, plain("Variables définies"), latex, "\\text{ok}", undefined);
         }
       }
       if (typeof raw === "function") {
         const name = (raw as any).syntax ?? "fonction";
-        return this.record(expr, `${name} définie`, latex, `\\text{${name} définie}`, undefined);
+        return this.record(expr, plain(`${name} définie`), latex, `\\text{${name} définie}`, undefined);
       }
       if (raw === undefined) return { ok: false, message: "Pas de résultat", latex };
-      return this.record(expr, format(raw), latex, resultTex(raw), raw, engFormat(raw, prefixed));
+      const shown = displayValue(raw, opts);
+      const out: Shown = { text: format(raw), display: shown.text };
+      if (shown.full) out.full = shown.full;
+      if (shown.polar) out.polar = shown.polar;
+      return this.record(expr, out, latex, displayTex(raw, opts), raw, engFormat(raw, prefixed));
     } catch (e) {
-      return { ok: false, message: humanError(e), latex };
+      return { ok: false, message: humanError(e, expr), latex };
     }
   }
 
-  private record(expr: string, text: string, latex: string, resultLatex: string, raw: unknown, eng?: string): EvalOk {
+  private record(expr: string, shown: Shown, latex: string, resultLatex: string, raw: unknown, eng?: string): EvalOk {
     // ans garde la valeur brute ; une definition ne la change pas.
     if (raw !== undefined) this.ans = raw;
-    const entry: HistoryEntry = { expr: expr.trim(), text, latex, resultLatex };
+    const entry: HistoryEntry = { expr: expr.trim(), latex, resultLatex, ...shown };
     if (eng) entry.eng = eng;
     this.history.push(entry);
     if (this.history.length > 200) this.history.shift();
-    return eng ? { ok: true, raw, text, latex, resultLatex, eng } : { ok: true, raw, text, latex, resultLatex };
+    const r: EvalOk = { ok: true, raw, latex, resultLatex, ...shown };
+    if (eng) r.eng = eng;
+    return r;
   }
 
   /** Les 3 dernieres lignes, plus recente en dernier (section 7). */
@@ -262,8 +321,8 @@ export class CalcEngine {
  *   log(x, b) garde sa base ;
  * - µ et Ω pour les unites (10 µF, 2,2 kΩ).
  */
-export function normalizeInput(expr: string): string {
-  const s = expr
+export function normalizeInput(expr: string, reserved: (name: string) => boolean = () => false): string {
+  const s = imagJ(expr, reserved)
     .replace(/π/g, "pi")
     .replace(/×|·/g, "*")
     .replace(/÷/g, "/")
@@ -274,7 +333,112 @@ export function normalizeInput(expr: string): string {
     .replace(/⁻¹/g, "^(-1)")
     .replace(/[µμ]/g, "u")
     .replace(/Ω/g, "ohm");
-  return renameLogs(decimalCommas(s));
+  return renameLogs(parallel(decimalCommas(s)));
+}
+
+/* ------------------------------------------------------------------ */
+/* j, unite imaginaire de l'electronique                               */
+/* ------------------------------------------------------------------ */
+
+/** j isole : pas dans un nom (adj, jx), pas une variable, pas affecte. */
+const LONE_J = /(^|[^A-Za-z_À-ʯͰ-Ͽ])j(?![A-Za-z0-9_])/g;
+const J_BEFORE = /(^|[^A-Za-z_À-ʯͰ-Ͽ])j(?=[Ͱ-Ͽ(])/g;
+
+/** La saisie utilise-t-elle j comme unite imaginaire ? */
+export function typedJ(expr: string, reserved: (name: string) => boolean = () => false): boolean {
+  return imagJ(expr, reserved) !== expr;
+}
+
+/**
+ * En electronique j = i : 2j, 4j, j*w, jω (j colle a une lettre grecque),
+ * j(1+x). Un j defini par l'utilisateur (j = 3) reste sa variable.
+ */
+function imagJ(expr: string, reserved: (name: string) => boolean): string {
+  if (!expr.includes("j") || reserved("j") || /(^|[;\n])\s*j\s*=(?!=)/.test(expr)) return expr;
+  return expr.replace(J_BEFORE, "$1i*").replace(LONE_J, "$1i");
+}
+
+/** i -> j dans un LaTeX (pas dans \pi, \sin, ni dans un nom). */
+export function texImag(tex: string, unit: ImagUnit): string {
+  return unit === "j" ? tex.replace(/(?<![\\A-Za-z])i(?![A-Za-z])/g, "j") : tex;
+}
+
+/* ------------------------------------------------------------------ */
+/* Parallele : R1 // R2, R1 || R2                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * « a // b » et « a || b » deviennent par(a, b). Le parallele lie plus fort
+ * que + et - (R1 + R2 // R3 = R1 + (R2 // R3)) et moins fort que * et /
+ * (2*R // R = (2R) // R). Associatif : a // b // c = par(a, b, c).
+ * Traite chaque niveau de parentheses.
+ */
+export function parallel(s: string): string {
+  if (!/\/\/|\|\|/.test(s)) return s;
+  // D'abord l'interieur des groupes, recursivement.
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(" || c === "[" || c === "{") {
+      const close = matching(s, i);
+      if (close < 0) { out += s.slice(i); break; }
+      out += c + parallel(s.slice(i + 1, close)) + s[close];
+      i = close;
+    } else out += c;
+  }
+  // Puis le niveau courant : termes separes par + - , ; = (binaires).
+  const terms: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (depth === 0 && isTermBreak(out, i)) {
+      terms.push(out.slice(start, i), c);
+      start = i + 1;
+    }
+  }
+  terms.push(out.slice(start));
+  return terms.map((t, k) => (k % 2 ? t : parTerm(t))).join("");
+}
+
+function matching(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    if ("([{".includes(s[i])) depth++;
+    else if (")]}".includes(s[i]) && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** + ou - binaire (pas l'exposant de 1e-3), virgule, point-virgule, egal. */
+function isTermBreak(s: string, i: number): boolean {
+  const c = s[i];
+  if (c === "," || c === ";" || c === "=" || c === "\n") return true;
+  if (c !== "+" && c !== "-") return false;
+  const before = s.slice(0, i).trimEnd();
+  if (!before || !/[A-Za-z0-9_.)\]}!'²³Ͱ-Ͽ]$/.test(before)) return false; // unaire
+  return !/(^|[^A-Za-z0-9_.])\d+(?:\.\d*)?[eE]$/.test(before); // 1e-3
+}
+
+/** Un terme « a // b // c » (au niveau courant) devient par(a, b, c). */
+function parTerm(t: string): string {
+  const parts: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < t.length - 1; i++) {
+    const c = t[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (depth === 0 && (t.startsWith("//", i) || t.startsWith("||", i))) {
+      parts.push(t.slice(start, i));
+      start = i + 2;
+      i++;
+    }
+  }
+  if (!parts.length) return t;
+  parts.push(t.slice(start));
+  const lead = /^\s*/.exec(parts[0])![0];
+  return `${lead}par(${parts.map((p) => p.trim()).join(", ")})`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,14 +458,18 @@ const SI_SYMBOL: Record<number, string> = { [-12]: "p", [-9]: "n", [-6]: "µ", [
  * pas un prefixe). m colle a un nombre = milli, M = mega, T = tera.
  * `reserved` : nom d'une variable definie, qui garde le produit (k = 5 : 2k = 10).
  */
-export function siPrefixes(s: string, reserved: (name: string) => boolean = () => false): { src: string; prefixed: boolean } {
+export function siPrefixes(
+  s: string, reserved: (name: string) => boolean = () => false, mode: "eval" | "tex" = "eval",
+): { src: string; prefixed: boolean } {
   let prefixed = false;
   const src = s.replace(
     /(^|[^A-Za-z0-9_.])(\d+(?:\.\d*)?|\.\d+)([pnumkMGT])(?![A-Za-z0-9_.(])/g,
     (all, before: string, num: string, p: string) => {
       if (reserved(p)) return all;
       prefixed = true;
-      return `${before}${num.replace(/\.$/, "")}e${SI_PREFIX[p]}`;
+      const n = num.replace(/\.$/, "");
+      // Affichage : « 10 n », jamais « 1·10⁻⁸ » (voir __si).
+      return mode === "tex" ? `${before}__si(${n}, "${p}")` : `${before}${n}e${SI_PREFIX[p]}`;
     },
   );
   return { src, prefixed };
@@ -421,17 +589,160 @@ export function engFormat(v: unknown, prefixed = false): string | undefined {
   return sym ? `${mantissa(m)} ${sym}` : mantissa(m);
 }
 
-/** Resultat en LaTeX (matrices, unites, complexes), via son texte affiche. */
-function resultTex(v: unknown): string {
+/* ------------------------------------------------------------------ */
+/* Lecture a la francaise                                              */
+/* ------------------------------------------------------------------ */
+
+export interface DisplayOptions { imag: ImagUnit; angle: AngleMode }
+
+/** Chiffres significatifs affiches : constant partout (ecran, blocs, tableaux). */
+export const SIG = 6;
+
+const SUP: Record<string, string> = {
+  "-": "⁻", "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+};
+
+/** Mantisse et exposant d'une ecriture scientifique a `sig` chiffres. */
+function sci(x: number, sig: number): { m: string; exp: number } {
+  const [m, e] = x.toExponential(sig - 1).split("e");
+  return { m: String(Number(m)).replace(".", ","), exp: Number(e) };
+}
+
+/**
+ * Nombre a la francaise : virgule decimale, `sig` chiffres significatifs,
+ * zeros inutiles retires. Entier exact jusqu'a 10¹² ; ecriture
+ * scientifique « 1,5·10⁻¹² » hors de [10⁻⁴, 10⁶[. ∞, -∞, non défini.
+ */
+export function frNumber(x: number, sig = SIG): string {
+  if (Number.isNaN(x)) return "non défini";
+  if (!Number.isFinite(x)) return x > 0 ? "∞" : "-∞";
+  if (x === 0) return "0";
+  const a = Math.abs(x);
+  if (Number.isInteger(x) && a < 1e12) return String(x);
+  if (a >= 1e-4 && a < 1e6) {
+    const r = Number(x.toPrecision(sig));
+    if (Math.abs(r) < 1e6) return String(r).replace(".", ",");
+  }
+  const { m, exp } = sci(x, sig);
+  return `${m}·10${[...String(exp)].map((c) => SUP[c]).join("")}`;
+}
+
+/** Le nombre affiche (a `sig` chiffres) n'est pas la valeur exacte. */
+export function isRounded(x: number, sig = SIG): boolean {
+  if (!Number.isFinite(x) || Number.isInteger(x) && Math.abs(x) < 1e12) return false;
+  return Number(x.toPrecision(sig)) !== x;
+}
+
+/** Meme nombre en LaTeX : {,} et \cdot 10^{n}, \infty. */
+export function frNumberTex(x: number, sig = SIG): string {
+  if (Number.isNaN(x)) return "\\text{non défini}";
+  if (!Number.isFinite(x)) return x > 0 ? "\\infty" : "-\\infty";
+  const t = frNumber(x, sig);
+  const m = /^(-?[\d,]+)·10(.+)$/.exec(t);
+  const tex = (n: string) => n.replace(",", "{,}");
+  if (!m) return tex(t);
+  const exp = [...m[2]].map((c) => Object.keys(SUP).find((k) => SUP[k] === c) ?? c).join("");
+  return `${tex(m[1])} \\cdot 10^{${exp}}`;
+}
+
+/** a + bj a la francaise ; jamais « 0 + 2j », jamais « 1j ». */
+function complexText(re: number, im: number, unit: ImagUnit, num: (x: number) => string): string {
+  const imPart = (v: number) => (Math.abs(v) === 1 ? unit : `${num(Math.abs(v))}${unit}`);
+  if (re === 0) return `${im < 0 ? "-" : ""}${imPart(im)}`;
+  return `${num(re)} ${im < 0 ? "-" : "+"} ${imPart(im)}`;
+}
+
+/** Forme polaire : module ∠ argument (degres en DEG, sinon radians). */
+export function polarText(re: number, im: number, angle: AngleMode): string {
+  const mod = frNumber(Math.hypot(re, im));
+  const arg = Math.atan2(im, re);
+  return angle === "DEG" ? `${mod} ∠ ${frNumber(arg * 180 / Math.PI)}°` : `${mod} ∠ ${frNumber(arg)} rad`;
+}
+
+/**
+ * Lecture d'un resultat : `text` arrondi a SIG chiffres, `full` la valeur
+ * complete quand elle differe, `polar` pour un complexe.
+ */
+export function displayValue(v: unknown, opts: DisplayOptions): { text: string; full?: string; polar?: string } {
+  const x = cleanValue(v);
+  if (typeof x === "number") {
+    const text = frNumber(x);
+    return isRounded(x) ? { text, full: frNumber(x, 15) } : { text };
+  }
+  if (isComplex(x)) {
+    const text = complexText(x.re, x.im, opts.imag, (n) => frNumber(n));
+    const full = complexText(x.re, x.im, opts.imag, (n) => frNumber(n, 15));
+    const out: { text: string; full?: string; polar?: string } = { text, polar: polarText(x.re, x.im, opts.angle) };
+    if (full !== text) out.full = full;
+    return out;
+  }
+  if (typeof x === "boolean") return { text: x ? "vrai" : "faux" };
+  if (typeof x === "object" && x !== null && (x as any).isUnit) {
+    const eng = engFormat(x);
+    return eng ? { text: eng, full: frPlain(format(x)) } : { text: frPlain(format(x)) };
+  }
+  if (typeof x === "object" && x !== null && typeof (x as any).toArray === "function") {
+    // Matrice : ; separe les cellules (la virgule est decimale).
+    const cell = (c: unknown): string => (Array.isArray(c) ? `[${c.map(cell).join(" ; ")}]` : displayValue(c, opts).text);
+    return { text: cell((x as any).toArray()) };
+  }
+  return { text: format(x) };
+}
+
+/** Texte mathjs (point decimal) a la francaise, hors separateurs. */
+function frPlain(t: string): string {
+  return t.replace(/(\d)\.(\d)/g, "$1,$2");
+}
+
+/** Resultat en LaTeX, a la francaise (arrondi, j, ∞). */
+export function displayTex(v: unknown, opts: DisplayOptions): string {
+  const x = cleanValue(v);
+  if (typeof x === "number") return frNumberTex(x);
+  if (isComplex(x)) {
+    const unit = `\\,${opts.imag}`;
+    const im = Math.abs(x.im) === 1 ? unit.slice(2) : `${frNumberTex(Math.abs(x.im))}${unit}`;
+    if (x.re === 0) return `${x.im < 0 ? "-" : ""}${im}`;
+    return `${frNumberTex(x.re)} ${x.im < 0 ? "-" : "+"} ${im}`;
+  }
+  if (typeof x === "object" && x !== null && (x as any).isUnit) {
+    const eng = engFormat(x);
+    const m = eng ? /^(\S+)\s*(.*)$/.exec(eng) : null;
+    if (m) return `${m[1].replace(",", "{,}")}${m[2] ? `\\,\\text{${m[2]}}` : ""}`;
+  }
   try {
-    return math.parse(format(v)).toTex({ parenthesis: "auto" });
+    return frTexDecimal(math.parse(format(x)).toTex({ parenthesis: "auto" }));
   } catch {
-    return `\\text{${format(v)}}`;
+    return `\\text{${format(x)}}`;
   }
 }
 
-/** Messages mathjs en clair, en francais. */
-export function humanError(e: unknown): string {
+/** Point decimal des nombres d'un LaTeX mis en virgule ({,} : sans espace). */
+export function frTexDecimal(tex: string): string {
+  return tex.replace(/(\d)\.(\d)/g, "$1{,}$2");
+}
+
+/** Notation francaise des reciproques : arctan, pas tan⁻¹. */
+export function texArc(tex: string): string {
+  return tex.replace(/\\(sin|cos|tan)\^\{-1\}/g, "\\arc$1");
+}
+
+/**
+ * Morceau cite par mathjs (forme normalisee : 2.2, 2.2e3, pi) ramene a ce
+ * que l'utilisateur a tape (2,2 ; 2,2k ; π), quand on le retrouve.
+ */
+function typedPart(part: string, typed?: string): string {
+  if (!typed) return part;
+  const back = (t: string) => t
+    .replace(/(\d)e(-?\d+)/g, (all, d: string, e: string) => {
+      const p = Object.entries(SI_PREFIX).find(([, v]) => v === Number(e))?.[0];
+      return p ? `${d}${p === "u" ? "µ" : p}` : all;
+    });
+  const tries = [part, part.replace(/\./g, ","), back(part), back(part).replace(/\./g, ","), part.replace(/\bpi\b/g, "π")];
+  return tries.find((t) => typed.includes(t)) ?? part.replace(/(\d)\.(\d)/g, "$1,$2");
+}
+
+/** Messages mathjs en clair, en francais. `typed` : la saisie, pour la citer. */
+export function humanError(e: unknown, typed?: string): string {
   const msg = e instanceof Error ? e.message : String(e);
   let m: RegExpExecArray | null;
   if ((m = /Undefined symbol (\w+)/.exec(msg))) return `Symbole inconnu : ${m[1]}`;
@@ -440,8 +751,8 @@ export function humanError(e: unknown): string {
   if (/Parenthesis \) expected/.test(msg)) return "Parenthèse fermante manquante";
   if (/Parenthesis \( expected/.test(msg)) return "Parenthèse ouvrante manquante";
   if (/Unexpected operator/.test(msg)) return "Opérateur mal placé";
-  if ((m = /Unexpected part "([^"]*)"/.exec(msg))) return `Caractère inattendu : ${m[1]}`;
-  if ((m = /Syntax error in part "([^"]*)"/.exec(msg))) return `Écriture non comprise : ${m[1]}`;
+  if ((m = /Unexpected part "([^"]*)"/.exec(msg))) return `Caractère inattendu : ${typedPart(m[1], typed)}`;
+  if ((m = /Syntax error in part "([^"]*)"/.exec(msg))) return `Écriture non comprise : ${typedPart(m[1], typed)}`;
   if (/Value expected/.test(msg)) return "Valeur attendue";
   if (/Dimension mismatch|dimensions mismatch/i.test(msg)) return "Dimensions incompatibles";
   if (/determinant is zero/.test(msg)) return "Matrice non inversible (déterminant nul)";

@@ -45,7 +45,8 @@ export const KEYPAD: Key[] = [
 
   { label: "π", insert: "pi", family: "const" },
   { label: "e", insert: "e", family: "const" },
-  { label: "i", insert: "i", family: "const" },
+  // Affiche j ou i selon le reglage (j par defaut) ; 2nd bascule i/j.
+  { label: "i", insert: "i", family: "const", second: { label: "i/j" } },
   { label: "ans", insert: "ans", family: "const" },
   { label: "x⁻¹", insert: "^(-1)", family: "fn", second: { label: "!", insert: "!" } },
 
@@ -94,7 +95,7 @@ export type KeyCommand =
   | { kind: "reject"; text: string };
 
 /** Caracteres acceptes a la frappe (lettres pour les fonctions et les unites). */
-const TYPABLE = /^[0-9A-Za-z+\-*/^().,!=[\];%²³π _µΩ]$/;
+const TYPABLE = /^[0-9A-Za-z+\-*/^().,!=[\];%²³π _µΩ|ω]$/;
 
 /** Sous-ensemble de KeyboardEvent, pour tester sans DOM. */
 export interface KeyLike {

@@ -1,4 +1,4 @@
-import { niceTicks, tickLabel, type Sample } from "../core/calc/plot";
+import { niceTicks, tickLabel, logTicks, engTick, type Sample } from "../core/calc/plot";
 
 /**
  * Trace d'une courbe : grille, axes gradues, etiquettes, courbe coupee aux
@@ -12,27 +12,46 @@ export interface PlotFrame {
   Y: (y: number) => number;
   /** Ordonnee de l'axe des x a l'ecran, null s'il est hors fenetre. */
   axisY: number | null;
+  /** Abscisse a partir d'une position a l'ecran (inverse de X). */
+  invX: (px: number) => number;
 }
 
 export function drawPlot(
   ctx: CanvasRenderingContext2D, w: number, h: number, samples: Sample[],
   win: { from: number; to: number; yMin: number; yMax: number },
-  opts: { font?: number; line?: number } = {},
+  opts: { font?: number; line?: number; logX?: boolean } = {},
 ): PlotFrame {
   const { from, to, yMin, yMax } = win;
   const font = opts.font ?? 10;
-  const X = (x: number) => ((x - from) / (to - from)) * w;
+  // Axe log (Bode) : une decade = meme largeur a l'ecran.
+  const logX = !!opts.logX && from > 0 && to > from;
+  const la = logX ? Math.log10(from) : 0, lb = logX ? Math.log10(to) : 1;
+  const X = logX
+    ? (x: number) => ((Math.log10(x) - la) / (lb - la)) * w
+    : (x: number) => ((x - from) / (to - from)) * w;
+  const invX = logX
+    ? (px: number) => 10 ** (la + (px / w) * (lb - la))
+    : (px: number) => from + (px / w) * (to - from);
   const Y = (y: number) => h - ((y - yMin) / (yMax - yMin)) * h;
 
   // Grille et graduations rondes, etiquetees.
-  const xt = niceTicks(from, to, Math.max(4, Math.floor(w / (font * 5))));
+  const lt = logX ? logTicks(from, to) : null;
+  const xt = lt
+    ? { step: 0, ticks: lt.major }
+    : niceTicks(from, to, Math.max(4, Math.floor(w / (font * 5))));
+  const xLabel = (t: number) => (lt ? engTick(t) : tickLabel(t, xt.step));
   const yt = niceTicks(yMin, yMax, Math.max(3, Math.floor(h / (font * 4))));
-  ctx.strokeStyle = "#eceff4"; ctx.lineWidth = 1;
+  if (lt) {
+    ctx.strokeStyle = "#f3f5f8"; ctx.lineWidth = 1;
+    for (const t of lt.minor) { const gx = X(t); ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke(); }
+  }
+  ctx.strokeStyle = "#e3e7ee"; ctx.lineWidth = 1;
   for (const t of xt.ticks) { const gx = X(t); ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke(); }
+  ctx.strokeStyle = "#eceff4";
   for (const t of yt.ticks) { const gy = Y(t); ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke(); }
   ctx.strokeStyle = "#9aa3b2"; ctx.lineWidth = 1.2;
   const axisY = 0 >= yMin && 0 <= yMax ? Y(0) : null;
-  const axisX = 0 >= from && 0 <= to ? X(0) : null;
+  const axisX = !logX && 0 >= from && 0 <= to ? X(0) : null;
   if (axisY !== null) { ctx.beginPath(); ctx.moveTo(0, axisY); ctx.lineTo(w, axisY); ctx.stroke(); }
   if (axisX !== null) { ctx.beginPath(); ctx.moveTo(axisX, 0); ctx.lineTo(axisX, h); ctx.stroke(); }
   ctx.fillStyle = "#6b7487"; ctx.font = `${font}px system-ui, sans-serif`;
@@ -42,7 +61,7 @@ export function drawPlot(
     if (t === 0 && axisX !== null) continue;
     const gx = X(t);
     if (gx < font || gx > w - font) continue;
-    ctx.fillText(tickLabel(t, xt.step), gx, labelY);
+    ctx.fillText(xLabel(t), gx, labelY);
   }
   ctx.textAlign = "left";
   const labelX = Math.min(w - 4 * font, Math.max(0.3 * font, (axisX ?? 0) + 0.3 * font));
@@ -70,5 +89,5 @@ export function drawPlot(
   }
   ctx.stroke();
   ctx.restore();
-  return { from, to, yMin, yMax, w, h, X, Y, axisY };
+  return { from, to, yMin, yMax, w, h, X, Y, axisY, invX };
 }

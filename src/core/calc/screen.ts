@@ -15,8 +15,14 @@ export function chainsAns(state: EditState, text: string, hasResult: boolean): b
   return hasResult && state.input === "" && CHAIN_START.test(text);
 }
 
-/** Insere au curseur ; prefixe ans si la saisie enchaine sur le resultat. */
-export function insertText(state: EditState, text: string, hasResult = false): EditState {
+/**
+ * Insere au curseur ; prefixe ans si la saisie enchaine sur le resultat.
+ * `afterError` : l'expression affichee vient d'echouer ; une nouvelle frappe
+ * la remplace (comme une TI), sans reprendre ans. Les fleches et del, eux,
+ * gardent l'expression pour la corriger.
+ */
+export function insertText(state: EditState, text: string, hasResult = false, afterError = false): EditState {
+  if (afterError) return { input: text, caret: text.length };
   const t = chainsAns(state, text, hasResult) ? `ans${text}` : text;
   return {
     input: state.input.slice(0, state.caret) + t + state.input.slice(state.caret),

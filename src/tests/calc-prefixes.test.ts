@@ -56,7 +56,7 @@ describe("prefixes d'ingenieur colles a un nombre", () => {
   });
   it("Lu par le moteur montre la valeur lue", () => {
     const e = new CalcEngine();
-    expect(e.toLatex("2,2k", true)).toMatch(/2\.2.*10\^\{3\}|2200/);
+    expect(e.toLatex("2,2k", true)).toBe("2{,}2\\,\\mathrm{k}");
     // Hors onglet Calcul (Litteral, Courbes) : lecture inchangee.
     expect(e.toLatex("2m")).toMatch(/m/);
   });

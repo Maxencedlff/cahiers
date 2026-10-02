@@ -1,12 +1,13 @@
 import { el, toast } from "../dom";
 import { renderTex } from "../tex";
-import { CalcEngine, normalizeInput, format, type AngleMode } from "../../core/calc/engine";
+import { CalcEngine, normalizeInput, format, frNumber, engFormat, type AngleMode, type ImagUnit } from "../../core/calc/engine";
 import { derivative, nthDerivative, simplifyExpr, substitute, type DerivStep } from "../../core/calc/derive";
 import { antiderivative, definiteIntegral } from "../../core/calc/integrate";
 import { solveEquation, solveSystem, type Root } from "../../core/calc/solve";
 import { applyMatrixOp, multiply, addMatrices, readMatrix, toLatex, type MatrixOutcome } from "../../core/calc/matrix";
 import {
   samplePlot, valueTable, rootsInWindow, extremaInWindow, stripY, plotWindow, readRange,
+  dbWrap, dbUnwrap, levelCrossings, plotVariable,
 } from "../../core/calc/plot";
 import type { CalcSpec, GraphSpec } from "../../core/liveblock";
 import { drawPlot } from "../plotdraw";
@@ -54,7 +55,7 @@ export interface CalculatorHost {
 
 /** Saisies conservees par onglet : changer d'onglet ne perd rien. */
 interface TabState {
-  courbes: { fn: string; from: string; to: string; ymin: string; ymax: string };
+  courbes: { fn: string; from: string; to: string; ymin: string; ymax: string; logX: boolean; db: boolean };
   matrices: { a: string; b: string };
   resoudre: { eq: string; sys: string };
   litteral: { expr: string; v: string; subst: string; a: string; b: string };
@@ -83,7 +84,7 @@ export class Calculator {
   /** Envoi du dernier resultat de l'onglet affiche (Ctrl+Maj+L), s'il y en a un. */
   private lastSend: (() => void) | null = null;
   private state: TabState = {
-    courbes: { fn: "", from: "-8", to: "8", ymin: "", ymax: "" },
+    courbes: { fn: "", from: "-8", to: "8", ymin: "", ymax: "", logX: false, db: false },
     matrices: { a: "", b: "" },
     resoudre: { eq: "", sys: "" },
     litteral: { expr: "", v: "x", subst: "", a: "0", b: "1" },
@@ -115,6 +116,7 @@ export class Calculator {
   private savedRange: Range | null = null;
 
   constructor(private host: CalculatorHost) {
+    this.engine.imagUnit = loadImagUnit();
     this.body = el("div", { class: "calc-body" });
     this.sink = el("div", {
       class: "calc-sink", contenteditable: "true", tabindex: "-1", inputmode: "none",
@@ -143,6 +145,10 @@ export class Calculator {
       if (this.tab === "calcul" && this.armed && t.tagName !== "INPUT" && t.tagName !== "TEXTAREA") this.focusSink();
     });
     document.body.append(this.root);
+    // Fenetre flottante toujours entiere a l'ecran, quelle que soit sa
+    // hauteur (historique, tableau de valeurs, onglet).
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => this.keepInView()).observe(this.root);
+    window.addEventListener("resize", () => this.keepInView());
     document.addEventListener("pointerdown", (e) => {
       this.armed = this.root.contains(e.target as Node);
     }, { capture: true });
@@ -231,6 +237,13 @@ export class Calculator {
     if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 20)}px`;
   }
 
+  /** Remonte la fenetre flottante si son bas sort de l'ecran. */
+  private keepInView(): void {
+    if (!this.visible || this.root.classList.contains("docked")) return;
+    const r = this.root.getBoundingClientRect();
+    if (r.bottom > window.innerHeight - 8) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 8)}px`;
+  }
+
   /** Focus et selection dans le recepteur, sans defiler. */
   private focusSink(): void {
     if (document.activeElement !== this.sink) this.sink.focus({ preventScroll: true });
@@ -255,6 +268,21 @@ export class Calculator {
     const sel = document.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
+    return true;
+  }
+
+  /**
+   * Echap venu de l'appli alors que le clavier est dans la calculatrice
+   * (bouton, champ d'un onglet, recepteur arme) : elle reste ouverte et rend
+   * le clavier au curseur de la page. False si elle n'avait pas le clavier.
+   */
+  releaseKeys(): boolean {
+    if (!this.visible) return false;
+    const active = document.activeElement as HTMLElement | null;
+    const inside = !!active && this.root.contains(active);
+    if (!inside && !this.armed) return false;
+    if (inside && active !== this.sink) active.blur();
+    this.giveBack();
     return true;
   }
 
@@ -338,6 +366,7 @@ export class Calculator {
 
   private render() {
     this.body.replaceChildren();
+    this.body.classList.remove("is-calcul");
     this.repaint = () => {};
     this.lastSend = null;
     switch (this.tab) {
@@ -384,9 +413,12 @@ export class Calculator {
     this.editing = { kind: "graph", update };
     this.engine.angleMode = spec.angle;
     const n = (v: number) => String(round4(v)).replace(".", ",");
+    const h = dbUnwrap(spec.fn);
     this.state.courbes = {
-      fn: spec.fn, from: n(spec.domain[0]), to: n(spec.domain[1]),
+      fn: h ?? spec.fn, from: spec.logX ? engInput(spec.domain[0]) : n(spec.domain[0]),
+      to: spec.logX ? engInput(spec.domain[1]) : n(spec.domain[1]),
       ymin: spec.range ? n(spec.range[0]) : "", ymax: spec.range ? n(spec.range[1]) : "",
+      logX: !!spec.logX, db: h !== null,
     };
     this.show();
     this.selectTab("courbes");
@@ -458,14 +490,18 @@ export class Calculator {
   }
 
   private graphSpec(): GraphSpec | null {
-    const fn = stripY(this.state.courbes.fn.trim());
-    if (!fn) { toast("Tape une fonction d'abord", "warn"); return null; }
-    const plot = samplePlot(fn, ...this.courbesDomain(), 50, "x", this.engine.angleMode);
+    const st = this.state.courbes;
+    const typed = stripY(st.fn.trim());
+    if (!typed) { toast("Tape une fonction d'abord", "warn"); return null; }
+    // Le bloc garde la fonction tracee : en dB, 20*log10(abs(H)).
+    const fn = st.db ? dbWrap(typed) : typed;
+    const plot = samplePlot(fn, ...this.courbesDomain(), 50, "x", this.engine.angleMode, st.logX);
     if (!plot.ok) { toast(plot.message ?? "Expression invalide", "warn"); return null; }
     const r = this.courbesRange();
     if (r.error) { toast(r.error, "warn"); return null; }
     const spec: GraphSpec = { fn, domain: this.courbesDomain(), angle: this.engine.angleMode };
     if (r.range) spec.range = r.range;
+    if (st.logX) spec.logX = true;
     return spec;
   }
 
@@ -503,24 +539,35 @@ export class Calculator {
 
     const paintScreen = () => {
       screen.replaceChildren();
-      // Historique de 3 lignes minimum (section 7). Un clic reprend la ligne.
-      for (const h of this.engine.lastLines(3)) {
+      // Historique : 3 lignes au moins (section 7), davantage en defilant ;
+      // le pave reste toujours entier. Un clic reprend la ligne.
+      for (const h of this.engine.lastLines(30)) {
         screen.append(el("div", {
           class: "hist",
-          title: "Reprendre cette expression",
-          onclick: () => this.setInput(insertText(this.edit, h.expr)),
-        }, `${h.expr} = ${h.eng ?? h.text}`));
+          title: h.full ? `Reprendre cette expression (valeur complète ${h.full})` : "Reprendre cette expression",
+          onclick: () => this.setInput(insertText(this.edit, h.expr, false, this.lastError !== null)),
+        }, `${h.expr} = ${h.eng ?? h.display ?? h.text}`));
       }
       // Curseur visible : on sait ou va le prochain chiffre.
       const { input, caret } = this.edit;
-      screen.append(el("div", { class: "expr" },
+      screen.append(el("div", { class: this.lastError ? "expr failed" : "expr" },
         input.slice(0, caret), el("span", { class: "caret" }), input.slice(caret) || "​"));
       const last = this.engine.history.at(-1);
-      // Lecture ingenieur en grand (7,234 kHz), valeur complete en dessous.
-      screen.append(this.lastError
-        ? el("div", { class: "err" }, this.lastError)
-        : el("div", { class: "res", title: last?.text ?? "" }, last ? last.eng ?? last.text : "",
-          last?.eng !== undefined && !sameReading(last.eng, last.text) ? el("span", { class: "eng-full" }, `= ${last.text}`) : null));
+      // Lecture en grand (7,234 kHz, 0,707107), valeur complete en petit.
+      if (this.lastError) {
+        screen.append(el("div", { class: "err" }, this.lastError,
+          el("span", { class: "err-hint" }, " · une frappe remplace, ← → pour corriger")));
+      } else if (last) {
+        const main = last.eng ?? last.display ?? last.text;
+        const full = last.full ?? (last.eng !== undefined ? last.display : undefined);
+        screen.append(el("div", { class: "res", title: last.full ?? main }, main,
+          full && !sameReading(main, full) ? el("span", { class: "eng-full" }, `= ${full}`) : null));
+        if (last.polar) screen.append(el("div", { class: "polar" }, `polaire : ${last.polar}`));
+      } else {
+        screen.append(el("div", { class: "res" }));
+      }
+      // Le dernier calcul reste en vue, l'historique defile au-dessus.
+      screen.scrollTop = screen.scrollHeight;
 
       // Reafficher en permanence l'expression telle qu'elle a ete comprise :
       // "sin x^2" est ambigu, l'utilisateur doit voir ce que le moteur a lu.
@@ -535,6 +582,19 @@ export class Calculator {
     const press = (k: Key) => {
       const active = this.second && k.second ? k.second : k;
       if (k.action === "second") { this.second = !this.second; paintKeys(); return; }
+      if (k.label === "i") {
+        if (this.second) {
+          // 2nd i : affichage des complexes avec i (maths) ou j (electronique).
+          this.engine.imagUnit = this.engine.imagUnit === "j" ? "i" : "j";
+          saveImagUnit(this.engine.imagUnit);
+          toast(`Complexes affichés avec ${this.engine.imagUnit}`);
+          this.second = false;
+          paintKeys();
+          return;
+        }
+        this.type(this.engine.imagUnit);
+        return;
+      }
       if (this.second && k.action === "del") {
         this.setInput({ input: "", caret: 0 });
         this.second = false;
@@ -556,7 +616,9 @@ export class Calculator {
       keys.replaceChildren();
       for (const k of KEYPAD) {
         const shifted = this.second && k.second;
-        const label = k.action === "mode" ? this.engine.angleMode : (shifted ? k.second!.label : k.label);
+        const label = k.action === "mode" ? this.engine.angleMode
+          : shifted ? k.second!.label
+          : k.label === "i" ? this.engine.imagUnit : k.label;
         const cls = [
           FAMILY_CLASS[k.family],
           k.action === "second" && this.second ? "on" : "",
@@ -577,6 +639,7 @@ export class Calculator {
 
     const bar = this.editBar("calc");
     if (bar) this.body.append(bar);
+    this.body.classList.add("is-calcul");
     this.body.append(screen, read, keys);
     // Toujours present : sans page ouverte, l'appui le dit (toast).
     const updating = this.editing?.kind === "calc";
@@ -605,10 +668,14 @@ export class Calculator {
     this.repaint();
   }
 
-  /** Frappe au pave ou au clavier ; « +1 » apres un resultat reprend ans (D10). */
+  /**
+   * Frappe au pave ou au clavier ; « +1 » apres un resultat reprend ans (D10).
+   * Apres une erreur, la frappe remplace l'expression fautive (comme une TI) :
+   * sans cela chaque nouveau calcul se collait derriere et echouait aussi.
+   */
   private type(text: string): void {
     this.recall.reset();
-    this.setInput(insertText(this.edit, text, this.engine.history.length > 0));
+    this.setInput(insertText(this.edit, text, this.engine.history.length > 0, this.lastError !== null));
   }
 
   /**
@@ -695,7 +762,7 @@ export class Calculator {
 
   private renderCourbes() {
     const st = this.state.courbes;
-    const fnInput = el("input", { type: "text", placeholder: "y = sin(x) * x / 2" });
+    const fnInput = el("input", { type: "text", class: "calc-fn", placeholder: "y = sin(x) * x / 2" });
     fnInput.value = st.fn;
     const small = (title: string, placeholder = "") =>
       el("input", { type: "text", inputmode: "decimal", title, placeholder, style: { width: "72px" } });
@@ -708,7 +775,8 @@ export class Calculator {
     const canvas = el("canvas", { title: "Touche la courbe pour lire un point" });
     const info = el("div", { class: "small muted" });
     const box = el("div", { class: "plot-box" }, canvas);
-    const table = el("div", { class: "small" });
+    // Tableau dans sa propre zone defilante : il ne pousse jamais le reste hors de l'ecran.
+    const table = el("div", { class: "small calc-table" });
     // sin(x) en degres ou en radians : le meme mode que l'onglet Calcul.
     const angleBtn = el("button", {
       class: "calc-angle", title: "Mode d'angle de sin, cos, tan (le même que l'onglet Calcul)",
@@ -718,26 +786,53 @@ export class Calculator {
         draw();
       },
     }, this.engine.angleMode);
+    // Bode : axe x logarithmique et module en decibels (20 log10 |H|).
+    const check = (label: string, title: string, on: boolean, change: (v: boolean) => void) => {
+      const input = el("input", { type: "checkbox" }) as HTMLInputElement;
+      input.checked = on;
+      input.addEventListener("change", () => change(input.checked));
+      return el("label", { class: "calc-check", title }, input, label);
+    };
+    const logBox = check("log x", "Axe x logarithmique, graduations par décade (Bode)", st.logX, (v) => {
+      st.logX = v;
+      // Un axe log commence au-dessus de 0 : bande audio par defaut.
+      if (v && !(this.readNumber(st.from)! > 0)) {
+        st.from = "10"; st.to = "100k";
+        fromInput.value = st.from; toInput.value = st.to;
+      }
+      readX = null;
+      draw();
+      if (table.childElementCount) showTable();
+    });
+    const dbBox = check("dB", "Trace 20·log10(|y|) : gain en décibels, fonctionne avec j", st.db, (v) => {
+      st.db = v;
+      draw();
+      if (table.childElementCount) showTable();
+    });
     let readX: number | null = null;
-    let view: { from: number; to: number } | null = null;
+    let view: { invX: (px: number) => number; w: number } | null = null;
 
     const fnText = () => fnInput.value.trim() || "";
+    /** Ce qui est trace : la fonction, ou son gain en dB. */
+    const plotted = () => (st.db && fnText() ? dbWrap(fnText()) : fnText());
+    const logX = () => st.logX;
 
     const draw = () => {
       const [from, to] = this.courbesDomain();
-      const fn = fnText();
+      const fn = plotted();
       const angle = this.engine.angleMode;
       const ctx = canvas.getContext("2d")!;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const w = box.clientWidth || 400, h = 220;
+      const w = box.clientWidth || 400, h = 200;
       canvas.width = w * dpr; canvas.height = h * dpr;
       canvas.style.height = `${h}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
       view = null;
-      if (!fn) { info.textContent = "Tape une fonction de x."; return; }
+      if (!fn) { info.textContent = "Tape une fonction de x (ou de f, t...)."; return; }
+      const v = plotVariable(fn);
 
-      const plot = samplePlot(fn, from, to, 700, "x", angle);
+      const plot = samplePlot(fn, from, to, 700, v, angle, logX());
       if (!plot.ok || !plot.samples) {
         info.textContent = plot.message ?? "Expression invalide";
         return;
@@ -746,34 +841,53 @@ export class Calculator {
       // asymptote n'ecrase pas la courbe, x + 100 reste a l'ecran.
       const range = this.courbesRange();
       const win = plotWindow(plot.samples, range.range);
-      const frame = drawPlot(ctx, w, h, plot.samples, { from, to, ...win });
-      view = { from, to };
+      const frame = drawPlot(ctx, w, h, plot.samples, { from, to, ...win }, { logX: logX() });
+      view = { invX: frame.invX, w };
       const { X, Y, axisY } = frame;
+      const unit = v === "f" ? "Hz" : "";
+      const xText = (x: number) => (logX() ? engReading(x, unit) : fr(round4(x)));
 
-      const roots = rootsInWindow(fn, from, to, "x", angle);
-      ctx.fillStyle = "#dc2626";
-      if (axisY !== null) {
-        for (const r of roots) { ctx.beginPath(); ctx.arc(X(r), axisY, 3.5, 0, Math.PI * 2); ctx.fill(); }
-      }
-      const ext = extremaInWindow(fn, from, to, "x", 800, angle);
       const parts: string[] = [];
       if (range.error) parts.push(`${range.error}.`);
-      parts.push(roots.length
-        ? `Racines : ${roots.slice(0, 8).map((r) => fr(round4(r))).join(" ; ")}${roots.length > 8 ? ` … et ${roots.length - 8} autres` : ""}.`
-        : "Aucune racine visible.");
-      if (ext.length) {
-        parts.push(ext.slice(0, 4).map((p) => `${p.kind} (${fr(round4(p.x))} ; ${fr(round4(p.y))})`).join(", ")
-          + (ext.length > 4 ? ` … et ${ext.length - 4} autres` : "") + ".");
+      if (st.db) {
+        // Coupure a -3 dB sous le gain maximal visible (passe-bas, passe-haut, passe-bande).
+        const ys = plot.samples.map((p) => p.y).filter((y): y is number => y !== null);
+        const level = Math.max(...ys) - 3.0103;
+        const cuts = levelCrossings(fn, level, from, to, v, angle, logX());
+        ctx.save();
+        ctx.setLineDash([4, 4]); ctx.strokeStyle = "#d97706"; ctx.lineWidth = 1;
+        const ly = Y(level);
+        ctx.beginPath(); ctx.moveTo(0, ly); ctx.lineTo(w, ly); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = "#d97706";
+        for (const c of cuts) { ctx.beginPath(); ctx.arc(X(c), ly, 3.5, 0, Math.PI * 2); ctx.fill(); }
+        parts.push(cuts.length
+          ? `Coupure à −3 dB : ${v} ≈ ${cuts.slice(0, 3).map(xText).join(" ; ")}.`
+          : "Pas de coupure à −3 dB visible.");
+      } else {
+        const roots = rootsInWindow(fn, from, to, v, angle, logX());
+        ctx.fillStyle = "#dc2626";
+        if (axisY !== null) {
+          for (const r of roots) { ctx.beginPath(); ctx.arc(X(r), axisY, 3.5, 0, Math.PI * 2); ctx.fill(); }
+        }
+        parts.push(roots.length
+          ? `Racines : ${roots.slice(0, 8).map(xText).join(" ; ")}${roots.length > 8 ? ` … et ${roots.length - 8} autres` : ""}.`
+          : "Aucune racine visible.");
+        const ext = extremaInWindow(fn, from, to, v, 800, angle, logX());
+        if (ext.length) {
+          parts.push(ext.slice(0, 4).map((p) => `${p.kind} (${xText(p.x)} ; ${frNumber(p.y)})`).join(", ")
+            + (ext.length > 4 ? ` … et ${ext.length - 4} autres` : "") + ".");
+        }
       }
 
       // Lecture d'un point au toucher.
       if (readX !== null && readX >= from && readX <= to) {
-        const row = valueTable(fn, readX, readX, 1, "x", angle)[0];
-        const y = row ? Number(row.y) : NaN;
+        const row = valueTable(fn, readX, readX, 1, v, angle)[0];
+        const y = row ? Number(row.y.replace(",", ".").replace(/·10(.*)$/, (_m, e: string) => `e${supToInt(e)}`)) : NaN;
         if (Number.isFinite(y)) {
           ctx.fillStyle = "#0f172a";
           ctx.beginPath(); ctx.arc(X(readX), Y(y), 4, 0, Math.PI * 2); ctx.fill();
-          parts.unshift(`Point : x = ${fr(round4(readX))}, y = ${fr(round4(y))}.`);
+          parts.unshift(`Point : ${v} = ${xText(readX)}, y = ${row.y}${st.db ? " dB" : ""}.`);
         }
       }
       info.textContent = parts.join(" ");
@@ -782,21 +896,31 @@ export class Calculator {
     canvas.addEventListener("pointerdown", (e) => {
       if (!view) return;
       const r = canvas.getBoundingClientRect();
-      readX = view.from + ((e.clientX - r.left) / r.width) * (view.to - view.from);
+      readX = view.invX(((e.clientX - r.left) / r.width) * view.w);
       draw();
     });
 
     const showTable = () => {
       const [from, to] = this.courbesDomain();
-      const step = (to - from) / 10;
-      const rows = valueTable(fnText(), from, to, step, "x", this.engine.angleMode);
+      const fn = plotted();
+      if (!fn) { table.replaceChildren(); return; }
+      const v = plotVariable(fn);
+      let rows;
+      try {
+        rows = valueTable(fn, from, to, (to - from) / 10, v, this.engine.angleMode, logX());
+      } catch {
+        table.replaceChildren(el("div", { class: "err" }, "Expression invalide"));
+        return;
+      }
+      const unit = v === "f" ? "Hz" : "";
       table.replaceChildren(el("table", { class: "tbl" },
-        el("tr", {}, el("th", {}, "x"), el("th", {}, "y")),
-        ...rows.map((r) => el("tr", {}, el("td", {}, fr(r.x)), el("td", {}, r.y.replace(".", ",")))),
-      ));
+        el("tr", {}, el("th", {}, v), el("th", {}, st.db ? "y (dB)" : "y")),
+        ...rows.map((r) => el("tr", {},
+          el("td", {}, logX() ? engReading(r.x, unit) : frNumber(r.x)),
+          el("td", {}, r.y)))));
     };
 
-    const lu = this.readLine(() => stripY(fnInput.value), (s) => this.engine.toLatex(s));
+    const lu = this.readLine(() => stripY(plotted()), (s) => this.engine.toLatex(s, true));
     const sync = () => {
       st.fn = fnInput.value; st.from = fromInput.value; st.to = toInput.value;
       st.ymin = yminInput.value; st.ymax = ymaxInput.value;
@@ -805,12 +929,23 @@ export class Calculator {
     fnInput.addEventListener("input", () => { sync(); lu.update(); draw(); });
     for (const input of [fromInput, toInput, yminInput, ymaxInput]) input.addEventListener("input", () => { sync(); draw(); });
     onEnter(fnInput, showTable);
+    // Le libelle « Lu par le moteur » suit aussi la case dB.
+    dbBox.addEventListener("change", () => lu.update());
 
     const zoom = (factor: number) => {
       const [from, to] = this.courbesDomain();
-      const mid = (from + to) / 2, half = ((to - from) / 2) * factor;
-      fromInput.value = String(round4(mid - half)).replace(".", ",");
-      toInput.value = String(round4(mid + half)).replace(".", ",");
+      let a: number, b: number;
+      if (logX() && from > 0) {
+        // Zoom en decades : centre geometrique.
+        const mid = Math.sqrt(from * to), half = Math.pow(to / from, factor / 2);
+        a = mid / half; b = mid * half;
+        fromInput.value = engInput(a); toInput.value = engInput(b);
+      } else {
+        const mid = (from + to) / 2, half = ((to - from) / 2) * factor;
+        a = mid - half; b = mid + half;
+        fromInput.value = String(round4(a)).replace(".", ",");
+        toInput.value = String(round4(b)).replace(".", ",");
+      }
       sync();
       draw();
     };
@@ -819,8 +954,9 @@ export class Calculator {
     const bar = this.editBar("graph");
     if (bar) this.body.append(bar);
     this.body.append(
-      el("div", { class: "row" }, el("span", { class: "muted" }, "y ="), fnInput, angleBtn),
+      el("div", { class: "row calc-fn-row" }, el("span", { class: "muted" }, "y ="), fnInput),
       lu.node,
+      el("div", { class: "row" }, angleBtn, logBox, dbBox),
       el("div", { class: "row" },
         el("span", { class: "muted small" }, "x de"), fromInput,
         el("span", { class: "muted small" }, "à"), toInput,
@@ -850,11 +986,11 @@ export class Calculator {
     queueMicrotask(draw);
   }
 
-  /** Nombre saisi dans un champ : « 1,5 », « pi/2 », « -3 ». */
+  /** Nombre saisi dans un champ : « 1,5 », « pi/2 », « -3 », « 100k ». */
   private readNumber(s: string): number | null {
     if (!s.trim()) return null;
     try {
-      const v = Number(this.engine.math.evaluate(normalizeInput(s)));
+      const v = Number(this.engine.math.evaluate(this.engine.calcInput(s).src));
       return Number.isFinite(v) ? v : null;
     } catch {
       return null;
@@ -1228,6 +1364,32 @@ function sameReading(eng: string, text: string): boolean {
   return n(eng) === n(text);
 }
 
+/** Reglage i/j, garde d'une session a l'autre (j par defaut). */
+const IMAG_KEY = "cahiers.calc.imag";
+function loadImagUnit(): ImagUnit {
+  try { return localStorage.getItem(IMAG_KEY) === "i" ? "i" : "j"; } catch { return "j"; }
+}
+function saveImagUnit(u: ImagUnit): void {
+  try { localStorage.setItem(IMAG_KEY, u); } catch { /* stockage indisponible : reglage de session */ }
+}
+
 function round4(v: number): number { return Math.round(v * 1e4) / 1e4; }
+
+/** Lecture ingenieur d'une abscisse (7,234 kHz), unite si la variable en a une. */
+function engReading(x: number, unit: string): string {
+  const e = engFormat(x, true) ?? frNumber(x);
+  return unit ? `${e}${/[a-zµ]$|[A-Z]$/i.test(e) ? "" : " "}${unit}`.replace(/\s+/g, " ") : e;
+}
+
+/** Valeur d'un champ en notation ingenieur relisible (100k, 2,5) ; 4 chiffres. */
+function engInput(x: number): string {
+  return (engFormat(x, true) ?? frNumber(x)).replace(/\s+/g, "");
+}
+
+/** Exposant en chiffres superieurs (⁻⁶) vers un entier. */
+function supToInt(s: string): number {
+  const map: Record<string, string> = { "⁻": "-", "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9" };
+  return Number([...s].map((c) => map[c] ?? "").join(""));
+}
 /** Nombre a la francaise pour les textes : virgule decimale. */
 function fr(v: number): string { return String(v).replace(".", ","); }

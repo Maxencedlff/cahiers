@@ -1,5 +1,5 @@
 import { create, all, type MathNode } from "mathjs";
-import { normalizeInput, humanError } from "./engine";
+import { normalizeInput, humanError, texArc } from "./engine";
 import { dependsOn } from "./derive";
 import { polynomialCoefficients } from "./solve";
 
@@ -38,20 +38,91 @@ export function antiderivative(expr: string, variable = "x"): IntegralOutcome {
       return {
         ok: false,
         message:
-          "Forme non couverte par la table des primitives. " +
-          "Intégration par parties ou par substitution non disponible.",
+          "Primitive non trouvée (table usuelle et intégration par parties simple). " +
+          "Pas de substitution.",
       };
     }
     const simplified = trySimplify(math.parse(found.expr));
+    // Une primitive obtenue par parties est verifiee : sa derivee doit
+    // redonner l'integrande. Sinon rien plutot qu'un resultat faux.
+    if (found.rule.includes("parties") && !checksOut(simplified, node, variable)) {
+      return { ok: false, message: "Primitive par parties non vérifiée : calcule une intégrale définie (numérique)." };
+    }
     return {
       ok: true,
       result: simplified.toString(),
-      resultLatex: simplified.toTex({ parenthesis: "auto" }),
+      resultLatex: texArc(simplified.toTex({ parenthesis: "auto" })),
       rule: found.rule,
     };
   } catch (e) {
     return { ok: false, message: humanError(e) };
   }
+}
+
+/** F' = f en quelques points (derivee numerique centree). */
+function checksOut(F: MathNode, f: MathNode, v: string): boolean {
+  try {
+    const cF = F.compile(), cf = f.compile();
+    let tested = 0;
+    for (const x of [0.37, 1.13, 2.71, -0.83]) {
+      const h = 1e-5 * Math.max(1, Math.abs(x));
+      const d = (Number(cF.evaluate({ [v]: x + h })) - Number(cF.evaluate({ [v]: x - h }))) / (2 * h);
+      const y = Number(cf.evaluate({ [v]: x }));
+      if (!Number.isFinite(d) || !Number.isFinite(y)) continue;
+      tested++;
+      if (Math.abs(d - y) > 1e-4 * Math.max(1, Math.abs(y))) return false;
+    }
+    return tested > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Polynome en v (degre 6 au plus) : l'expression se derive jusqu'a 0. */
+function isPolynomial(n: MathNode, v: string): boolean {
+  try {
+    polynomialCoefficients(n.toString(), v, 6);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Integration par parties, cas simples :
+ * - P(x) · g(x), g = exp, sin, cos, sinh, cosh, a^x d'argument affine :
+ *   methode du tableau, P se derive jusqu'a 0 ;
+ * - P(x) · ln(x) : u = ln x, v' = P.
+ */
+function byParts(a: MathNode, b: MathNode, v: string): Found | null {
+  for (const [p, g] of [[a, b], [b, a]] as const) {
+    if (!isPolynomial(p, v)) continue;
+    const gu = unwrap(g) as any;
+    if (gu.type === "FunctionNode" && gu.fn?.name === "log" && gu.args.length === 1
+      && unwrap(gu.args[0]).type === "SymbolNode" && unwrap(gu.args[0]).name === v) {
+      const Q = integrateNode(p, v);
+      if (!Q) continue;
+      const rest = integrateNode(trySimplify(math.parse(`(${Q.expr}) / ${v}`)), v);
+      if (!rest) continue;
+      return { expr: `(${Q.expr}) * log(${v}) - (${rest.expr})`, rule: "intégration par parties (u = ln x)" };
+    }
+    let G = integrateNode(g, v);
+    if (!G) continue;
+    let P: MathNode = p;
+    const terms: string[] = [];
+    let sign = 1;
+    for (let k = 0; k < 8 && G; k++) {
+      if (!dependsOn(P, v) && P.toString() === "0") break;
+      terms.push(`${sign < 0 ? "-" : "+"} (${P.toString()}) * (${G.expr})`);
+      P = trySimplify(math.derivative(P, v));
+      sign = -sign;
+      if (P.toString() === "0") break;
+      G = integrateNode(math.parse(G.expr), v);
+    }
+    if (P.toString() !== "0") continue;
+    return { expr: terms.join(" ").replace(/^\+ /, ""), rule: "intégration par parties" };
+  }
+  return null;
 }
 
 function trySimplify(n: MathNode): MathNode {
@@ -104,7 +175,7 @@ function integrateNode(raw: MathNode, v: string): Found | null {
           ? { expr: `${s(k)} * (${inner.expr})`, rule: "constante multiplicative" }
           : null;
       }
-      return null; // produit de deux fonctions : parties, non couvert
+      return byParts(args[0], args[1], v); // produit de deux fonctions
     }
 
     if (node.op === "/") {

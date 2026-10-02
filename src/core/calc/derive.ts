@@ -1,5 +1,5 @@
 import { create, all, type MathNode } from "mathjs";
-import { normalizeInput, humanError } from "./engine";
+import { normalizeInput, humanError, texArc } from "./engine";
 
 const math = create(all, { number: "number" });
 
@@ -74,7 +74,7 @@ function deriveNode(node: MathNode, variable: string): DerivOutcome {
     return {
       ok: true,
       result: d.toString(),
-      resultLatex: d.toTex({ parenthesis: "auto" }),
+      resultLatex: texArc(d.toTex({ parenthesis: "auto" })),
       steps,
       node: d,
     };
@@ -145,7 +145,7 @@ function hasFreeSymbol(node: MathNode): boolean {
 }
 
 function tex(n: MathNode): string {
-  try { return n.toTex({ parenthesis: "auto" }); } catch { return n.toString(); }
+  try { return texArc(n.toTex({ parenthesis: "auto" })); } catch { return n.toString(); }
 }
 
 function dTex(n: MathNode, v: string): string {
@@ -371,8 +371,8 @@ export function simplifyExpr(expr: string, substitutions?: Record<string, number
     return {
       ok: true,
       result: out.toString(),
-      resultLatex: out.toTex({ parenthesis: "auto" }),
-      inputLatex: input.toTex({ parenthesis: "auto" }),
+      resultLatex: texArc(out.toTex({ parenthesis: "auto" })),
+      inputLatex: texArc(input.toTex({ parenthesis: "auto" })),
     };
   } catch (e) {
     return { ok: false, message: humanError(e) };
@@ -394,7 +394,7 @@ export function substitute(expr: string, values: Record<string, number | string>
     return {
       ok: true,
       result: out.toString(),
-      resultLatex: out.toTex({ parenthesis: "auto" }),
+      resultLatex: texArc(out.toTex({ parenthesis: "auto" })),
     };
   } catch (e) {
     return { ok: false, message: humanError(e) };

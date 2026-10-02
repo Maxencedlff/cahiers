@@ -46,7 +46,11 @@ export function liveLabel(b: LiveBlock): string {
 
 /** Ce que la calculatrice renvoie a « Mettre à jour » ou « Envoyer ». */
 export interface CalcSpec { expr: string; result: string; angle: BlockAngle }
-export interface GraphSpec { fn: string; domain: [number, number]; range?: [number, number]; angle: BlockAngle }
+export interface GraphSpec {
+  fn: string; domain: [number, number]; range?: [number, number]; angle: BlockAngle;
+  /** Axe x logarithmique (Bode). Absent = lineaire. */
+  logX?: boolean;
+}
 
 /**
  * Applique une modification venue de la calculatrice. Le mode RAD n'est pas
@@ -62,12 +66,13 @@ export function applyCalcSpec(b: CalcBlock, s: CalcSpec): boolean {
 }
 
 export function applyGraphSpec(b: GraphBlock, s: GraphSpec): boolean {
-  const before = JSON.stringify([b.fn, b.domain, b.range ?? null, b.angle ?? "RAD"]);
+  const before = JSON.stringify([b.fn, b.domain, b.range ?? null, b.angle ?? "RAD", !!b.logX]);
   b.fn = s.fn;
   b.domain = [s.domain[0], s.domain[1]];
   if (s.range) b.range = [s.range[0], s.range[1]]; else delete b.range;
   if (s.angle === "DEG") b.angle = "DEG"; else delete b.angle;
-  return JSON.stringify([b.fn, b.domain, b.range ?? null, b.angle ?? "RAD"]) !== before;
+  if (s.logX) b.logX = true; else delete b.logX;
+  return JSON.stringify([b.fn, b.domain, b.range ?? null, b.angle ?? "RAD", !!b.logX]) !== before;
 }
 
 /** Spec d'un bloc existant, pour preremplir la calculatrice. */
@@ -77,6 +82,7 @@ export function calcSpecOf(b: CalcBlock): CalcSpec {
 
 export function graphSpecOf(b: GraphBlock): GraphSpec {
   const spec: GraphSpec = { fn: b.fn, domain: [b.domain[0], b.domain[1]], angle: b.angle ?? "RAD" };
+  if (b.logX) spec.logX = true;
   if (b.range && Number.isFinite(b.range[0]) && Number.isFinite(b.range[1]) && b.range[0] < b.range[1]) {
     spec.range = [b.range[0], b.range[1]];
   }
