@@ -103,6 +103,24 @@ describe("intercalaires", () => {
     expect(pickSplitDivider(["Cours"], "Cours")).toBeNull();
     expect(pickSplitDivider(["Cours", "Exos"], "Cours", ["Exos"])).toBeNull();
   });
+
+  it("intercalaires imbriques : le TD du meme groupe d'abord (D4)", () => {
+    const all = ["S2/TD", "S1/Cours", "S1/TD", "Annales"];
+    expect(pickSplitDivider(all, "S1/Cours")).toBe("S1/TD");
+    expect(pickSplitDivider(["S2/TD", "S1/Cours", "Annales"], "S1/Cours")).toBe("S2/TD");
+  });
+
+  it("historique : un groupe renomme ou supprime emmene son contenu (D4)", () => {
+    const h = new NavHistory();
+    h.push(spot("Elec", "E3A/S1/TP 4", 2));
+    h.push(spot("Elec", "E3A/S10", 1));
+    h.renameDivider("Elec", "E3A/S1", "E3A/Semestre 1");
+    expect(h.pop()).toEqual(spot("Elec", "E3A/S10", 1));
+    expect(h.pop()).toEqual(spot("Elec", "E3A/Semestre 1/TP 4", 2));
+    h.push(spot("Elec", "E3A/S1/TP 4", 2));
+    h.drop("Elec", "E3A/S1");
+    expect(h.pop()).toBeNull();
+  });
 });
 
 describe("liste des pages (manque-nav-pages)", () => {

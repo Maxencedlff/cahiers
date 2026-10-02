@@ -13,6 +13,7 @@ import {
 } from "../core/liveblock";
 import { isFutureVersion } from "../core/types";
 import { dayLabel } from "../core/nav";
+import { MAX_DEPTH, childPath, depthOf, dividerLabel } from "../core/dividers";
 import { uuid, nowIso } from "../core/id";
 import type { ConflictCopy, Repo, TrashEntry } from "../core/storage/repo";
 import { mergeInk } from "../core/sync";
@@ -21,6 +22,10 @@ import {
   LINE_HEIGHT, type PlacedWord,
 } from "../core/ink/words";
 import { blockKey, isPending, type BlockRef } from "../core/ink/recokey";
+import {
+  AUTO_IDLE_MS, invalidateStrokes, planIncremental, sendSignature, type RecoInk,
+} from "../core/ink/bands";
+import { AUTO_DEBOUNCE_MS } from "../core/ink/recognizer";
 import { confusionCandidates } from "../core/ink/confusions";
 import { askLatex } from "./mathdialog";
 import { colorOf, labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
@@ -45,6 +50,13 @@ import {
   scrollToAnchor, stepZoom, wheelFactor, zoomLabel, type Pt,
 } from "../core/zoom";
 import { titleOf } from "../core/shortcuts";
+import {
+  INK_LIMIT, TEXT_LIMIT, composeFlowText, inkExtent, isLongPage, moveFlowBlocks, pageBreaks, planFlow,
+  type FlowPlan, type FlowSelection,
+} from "../core/paginate";
+import { measureRows, rowStart, type MeasuredRows } from "./pagebreak";
+import { parseDoc } from "../core/text/doc";
+import { emptyPage } from "../core/types";
 
 /**
  * Largeur de feuille minimale hors zoom : le texte (21 px a 900 de large)
@@ -77,19 +89,23 @@ export interface PageViewHost {
    * pause d'ecriture. `auto` = conversion au fil de la plume (pause plus
    * longue, D14).
    */
-  requestRecognition: (key: string, kind: "math" | "text", strokes: Stroke[], auto?: boolean) => void;
+  requestRecognition: (
+    key: string, kind: "math" | "text", strokes: Stroke[], auto?: boolean, partial?: boolean,
+  ) => void;
   /**
    * Remet en file un bloc reste « en attente » (page rouverte apres une
    * fermeture de l'appli, cles saisies), sans pause ni message. Ne fait
    * rien si ce bloc attend deja ou part en ce moment.
    */
-  resumeRecognition: (key: string, kind: "math" | "text", strokes: Stroke[]) => void;
+  resumeRecognition: (key: string, kind: "math" | "text", strokes: Stroke[], partial?: boolean) => void;
   /** Retire la demande en attente d'un bloc. Vrai s'il y en avait une. */
   cancelRecognition: (key: string) => boolean;
   onDirty: () => void;
   /** La page en vue a change (navigation, defilement, ajout, suppression). */
   onPageChange?: (n: number, total: number) => void;
   openLink: (target: string) => void;
+  /** Ouvre un intercalaire de la meme matiere (sous-dossier d'un groupe, D4). */
+  openDivider?: (divider: string) => void;
   /** Une page vient de partir a la corbeille : l'appli propose « Annuler ». */
   onTrashed: (entry: TrashEntry) => void;
   /**
@@ -175,6 +191,48 @@ interface LoadedPage {
   preEdit?: { y: number; t: number };
   /** Lignes ajoutees par l'appli (clic sous le texte, saut de l'encre) : l'encre ne bouge pas. */
   noPush?: boolean;
+  /*
+   * Pagination automatique (core/paginate.ts, PageView.flow*).
+   */
+  /** Photos, polices et blocs charges : avant, aucun debordement n'est traite (mesures fausses). */
+  settled?: boolean;
+  /** Ancienne page plus haute qu'une A4 : affichee telle quelle, reperes de saut, « Répartir ». */
+  long?: boolean;
+  /** Derniere action de l'utilisateur sur la page (ms) : un debordement qui la suit se traite. */
+  editedAt?: number;
+  /** Texte avant la derniere frappe et curseur (annuler la frappe qui a fait deborder). */
+  prevText?: { content: string; caret: number | null; t: number };
+  /** Curseur (caracteres) note avant la derniere frappe. */
+  preCaret?: number | null;
+  /** Dernier decalage de l'encre par le texte (followText), annule avec la frappe. */
+  lastShift?: { y: number; d: number; t: number };
+  /** Reperes de saut de page (feuille plus haute qu'une A4). */
+  breaks?: HTMLElement;
+}
+
+/** Marqueur du curseur qui suit le texte sur la page suivante (jamais ecrit). */
+const CARET_MARK = "";
+/** Une action plus ancienne ne fait plus deborder la page d'elle-meme (ms). */
+const FLOW_EDIT_MS = 3000;
+
+/**
+ * Debordement qu'on peut annuler (Ctrl+Z juste apres) : la page d'avant
+ * retrouve son texte d'avant la frappe, la page d'apres son contenu (ou
+ * part a la corbeille si elle a ete creee pour l'occasion).
+ */
+interface FlowUndo {
+  fromId: string;
+  /** Blocs de la page d'avant au moment du debordement (JSON). */
+  fromBlocks: string;
+  /** Texte d'avant la frappe, et son curseur. */
+  fromText: string | null;
+  fromCaret: number | null;
+  shift?: { y: number; d: number };
+  toId: string;
+  /** Blocs de la page d'apres avant le debordement ; null : creee par lui. */
+  toBlocks: string | null;
+  /** Compteur des modifications au moment du debordement (toute autre action l'invalide). */
+  seq: number;
 }
 
 /** Une frappe plus ancienne ne decide plus de ce que l'encre suit (ms). */
@@ -488,7 +546,7 @@ export class PageView {
           this.root.append(el("div", { class: "page-sep" }));
         }
         this.root.append(this.unreadableSheet(n, e, nums));
-        toast(`Page ${n} de ${this.divider} illisible : ${errorText(e)}`, "err", 6000);
+        toast(`Page ${n} de ${dividerLabel(this.divider)} illisible : ${errorText(e)}`, "err", 6000);
         continue;
       }
       if (gen !== this.renderGen) return;
@@ -541,23 +599,34 @@ export class PageView {
         el("p", { class: "small muted" }, el("code", {}, path), " : ", errorText(err)),
         actions,
       ),
-      el("div", { class: "page-num" }, `${this.divider} p. ${n}`),
+      el("div", { class: "page-num" }, `${dividerLabel(this.divider)} p. ${n}`),
     );
   }
 
   /**
-   * A la place des pages d'un intercalaire qui n'a que des sous-dossiers :
-   * ce qu'il contient, et de quoi y ecrire quand meme.
+   * A la place des pages d'un groupe qui n'a que des sous-dossiers : ses
+   * intercalaires (un appui les ouvre, D4), et de quoi y ecrire quand meme.
+   * Au-dela de MAX_DEPTH niveaux, les sous-dossiers sont seulement nommes.
    */
   private folderSheet(subs: string[]): HTMLElement {
+    const open = depthOf(this.divider) < MAX_DEPTH && !!this.host.openDivider;
+    const name = dividerLabel(this.divider);
     return el("div", { class: "page-wrap folder-wrap" },
       el("div", { class: "sheet folder-sheet" },
-        el("h2", {}, subs.length ? "Dossier rangé en sous-dossiers" : "Aucune page"),
+        el("h2", {}, subs.length ? (open ? "Groupe d'intercalaires" : "Dossier rangé en sous-dossiers") : "Aucune page"),
         subs.length
-          ? el("p", {}, `${this.divider} contient ${subs.length > 1 ? `${subs.length} sous-dossiers` : "un sous-dossier"}. `
-              + "Cahiers ne lit pas encore les sous-dossiers, et n'y crée aucune page d'office : ton rangement reste intact.")
+          ? el("p", {}, `${name} contient ${subs.length > 1 ? `${subs.length} sous-dossiers` : "un sous-dossier"}. `
+              + (open
+                ? `${subs.length > 1 ? "Choisis l'un d'eux" : "Ouvre-le"} ci-dessous ou dans la bande d'intercalaires. Aucune page n'est créée ici d'office : ton rangement reste intact.`
+                : `Cahiers lit ${MAX_DEPTH} niveaux sous la matière : ces sous-dossiers ne sont pas lus, et aucune page n'y est créée d'office.`))
           : el("p", {}, "Cet intercalaire est vide."),
-        subs.length ? el("ul", { class: "folder-list" }, ...subs.map((d) => el("li", {}, d))) : null,
+        subs.length
+          ? (open
+            ? el("div", { class: "folder-open" }, ...subs.map((d) => el("button", {
+                onclick: () => this.host.openDivider?.(childPath(this.divider, d)),
+              }, d)))
+            : el("ul", { class: "folder-list" }, ...subs.map((d) => el("li", {}, d))))
+          : null,
         el("div", { class: "unreadable-actions" },
           el("button", { class: "primary", onclick: () => void this.newPage() }, "Nouvelle page ici"),
           this.host.repo.canReveal
@@ -615,6 +684,7 @@ export class PageView {
     } else {
       items.push(...this.conflictNotes(loaded.number));
     }
+    if (loaded.long) items.push(this.longNote(loaded));
     loaded.notes.replaceChildren(...items);
   }
 
@@ -835,8 +905,8 @@ export class PageView {
       notes,
       sheet,
       el("div", { class: "page-num" }, copy
-        ? `${this.divider} · copie de la p. ${n} venue de ${copy.label}`
-        : `${this.divider} p. ${n}${day ? ` · ${day}` : ""}`),
+        ? `${dividerLabel(this.divider)} · copie de la p. ${n} venue de ${copy.label}`
+        : `${dividerLabel(this.divider)} p. ${n}${day ? ` · ${day}` : ""}`),
     );
 
     const loaded: LoadedPage = {
@@ -872,8 +942,11 @@ export class PageView {
     surface.setPaper(this.paperKind);
     this.routePointers(loaded);
     // Une photo qui finit de charger allonge le texte : la feuille suit.
-    loaded.ro = new ResizeObserver(() => this.fitSheet(loaded));
+    // Une photo posee juste avant (collee, deposee) peut faire deborder la
+    // page en finissant de charger (flowSoon).
+    loaded.ro = new ResizeObserver(() => { this.fitSheet(loaded); this.flowSoon(loaded); });
     loaded.ro.observe(doc.root);
+    void this.settle(loaded);
     // Polices KaTeX arrivees apres le premier affichage : formules recalees.
     void document.fonts?.ready.then(() => {
       if (!loaded.dead && snapLines(doc.root, true)) this.fitSheet(loaded);
@@ -896,9 +969,11 @@ export class PageView {
     for (const b of loaded.page.blocks) {
       if (!isPending(b) || (b.type !== "math" && b.type !== "ink")) continue;
       if (b.type === "ink" && !b.rect && !this.host.autoConvert()) continue;
-      const strokes = b.strokes.filter((st) => st.tool === "pen");
+      // Fond de page : seules les lignes pas encore lues repartent (reco-3).
+      const main = b.type === "ink" && !b.rect;
+      const strokes = main ? planIncremental(b).all : b.strokes.filter((st) => st.tool === "pen");
       if (!strokes.length) continue;
-      this.host.resumeRecognition(this.keyOf(loaded, b.id), kindOf(b), strokes);
+      this.host.resumeRecognition(this.keyOf(loaded, b.id), kindOf(b), strokes, main);
     }
   }
 
@@ -926,6 +1001,11 @@ export class PageView {
       loaded.page.blocks.push(body);
     }
     if (body.content === content) return;
+    // Texte d'avant : Ctrl+Z juste apres un debordement le rend (flowUndo).
+    if (!this.flowing) {
+      loaded.prevText = { content: body.content, caret: loaded.preCaret ?? null, t: performance.now() };
+      this.editSeq++;
+    }
     body.content = content;
     loaded.lastEdit = "text";
     this.lastGestureId = loaded.page.id;
@@ -933,6 +1013,7 @@ export class PageView {
     this.fitSheet(loaded);
     if (before !== undefined && loaded.textH !== undefined && !loaded.noPush) this.followText(loaded, loaded.textH - before);
     this.queueSave(loaded);
+    this.maybeFlow(loaded);
   }
 
   /**
@@ -947,6 +1028,7 @@ export class PageView {
     if (Math.abs(dy) < 2 || !pre || performance.now() - pre.t > PRE_EDIT_MS || loaded.readOnly) return;
     const d = shiftBelow(loaded.page.blocks, pre.y, dy);
     if (!d) return;
+    loaded.lastShift = { y: pre.y, d, t: performance.now() };
     this.fitSheet(loaded);
     this.paintStrokes(loaded);
     this.paintOverlay(loaded);
@@ -954,11 +1036,13 @@ export class PageView {
 
   /** Note la ligne du curseur avant une frappe (followText). */
   private notePreEdit(loaded: LoadedPage): void {
+    loaded.editedAt = performance.now();
     const row = loaded.doc.caretRow();
     if (!row) return;
     const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
     const top = loaded.sheet.getBoundingClientRect().top;
     loaded.preEdit = { y: rowBottom(((row.top + row.bottom) / 2 - top) / k), t: performance.now() };
+    loaded.preCaret = loaded.doc.caretOffset();
   }
 
   /**
@@ -1042,6 +1126,16 @@ export class PageView {
       e.key.length === 1 && !e.metaKey && (e.ctrlKey === e.altKey); // AltGr = Ctrl+Alt
     loaded.doc.root.addEventListener("keydown", (e) => {
       if (loaded.readOnly || e.isComposing) return;
+      // Ctrl+Z juste apres un debordement : il est annule d'un coup (lignes rendues).
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z") {
+        const u = this.flowUndoFor(loaded.page.id);
+        if (u) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          void this.undoFlow(u);
+          return;
+        }
+      }
       if (e.target === loaded.doc.root && typing(e)) this.skipInk(loaded);
       this.notePreEdit(loaded);
     }, { capture: true });
@@ -1108,9 +1202,569 @@ export class PageView {
     if (textPx) loaded.textH = textPx / k;
     const h = sheetHeight(loaded.page, textPx / k);
     loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
+    this.paintBreaks(loaded, h, k);
     const d = density ?? this.densityOf(loaded, width, h * k);
     if (force) loaded.surface?.layout(width, h, d);
     else loaded.surface?.fit(width, h, d);
+  }
+
+  /* ---------------- pagination automatique (core/paginate.ts) ---------------- */
+
+  /** Compteur des modifications : un debordement ne s'annule que s'il est la derniere. */
+  private editSeq = 0;
+  /** Un debordement en cours (lecture, creation de page) : un seul a la fois. */
+  private flowing = false;
+  /** Pages a revoir quand le debordement en cours sera fini. */
+  private flowAgain = new Set<LoadedPage>();
+  /** Touches tapees pendant un debordement (ecriture disque) : rejouees a la fin. */
+  private flowKeys: { key: string; shift: boolean }[] | null = null;
+  private flowUndo: FlowUndo | null = null;
+  /** Pages creees par « Répartir sur plusieurs pages » en cours (pour l'annuler). */
+  private splitLog: string[] | null = null;
+  private flowRaf = 0;
+  private flowSoonSet = new Set<LoadedPage>();
+
+  /**
+   * Reperes de saut de page en pointille, tous les A4, sur une feuille plus
+   * haute (ancienne page longue, ou contenu qui ne se coupe pas).
+   */
+  private paintBreaks(loaded: LoadedPage, h: number, k: number): void {
+    const ys = pageBreaks(h);
+    if (!ys.length) {
+      loaded.breaks?.remove();
+      loaded.breaks = undefined;
+      return;
+    }
+    if (!loaded.breaks) {
+      loaded.breaks = el("div", { class: "page-breaks", "aria-hidden": "true" });
+      loaded.sheet.append(loaded.breaks);
+    }
+    loaded.breaks.replaceChildren(...ys.map((y, i) => {
+      const b = el("div", { class: "page-break" }, el("span", {}, `fin de la feuille A4 ${i + 1}`));
+      b.style.top = `${Math.round(y * k)}px`;
+      return b;
+    }));
+  }
+
+  /**
+   * La page a fini de charger (photos decodees, polices KaTeX) : ses mesures
+   * sont justes. Une page de suite (creee par un debordement) qui deborde
+   * continue sur la suivante ; toute autre page plus haute qu'une A4 est une
+   * ancienne page longue : jamais decoupee d'office (risque de perte),
+   * affichee telle quelle avec ses reperes et « Répartir sur plusieurs pages ».
+   */
+  private async settle(loaded: LoadedPage): Promise<void> {
+    await Promise.all([loaded.doc.imagesReady(), document.fonts?.ready]).catch(() => undefined);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    if (loaded.dead || loaded.settled) return;
+    // Vue pas encore a l'ecran : relayout() relancera la mesure.
+    if (!loaded.sheet.isConnected || !loaded.sheet.clientWidth) return;
+    loaded.settled = true;
+    this.fitSheet(loaded);
+    if (!isLongPage(loaded.surface?.height ?? 0)) return;
+    // « Répartir » en cours : il coupe lui-meme, page apres page.
+    if (this.splitLog) return;
+    if (loaded.page.continues) {
+      this.maybeFlow(loaded, "settle");
+      if (this.flowing || !isLongPage(loaded.surface?.height ?? 0)) return;
+    }
+    loaded.long = true;
+    this.paintNotes(loaded);
+  }
+
+  /** Bandeau d'une ancienne page longue : la repartir, explicitement. */
+  private longNote(loaded: LoadedPage): HTMLElement {
+    return el("div", { class: "readonly-note long-note" },
+      el("span", {}, "Page plus longue qu'une feuille A4 (pointillés : fins de feuille). "
+        + "Elle reste telle quelle tant que tu ne la répartis pas."),
+      loaded.readOnly || this.readOnly ? null : el("button", {
+        class: "small", onclick: () => void this.splitLongPage(loaded),
+      }, "Répartir sur plusieurs pages"),
+    );
+  }
+
+  /** Apres un redimensionnement ou une image chargee : debordement verifie a la prochaine image. */
+  private flowSoon(loaded: LoadedPage): void {
+    if (!loaded.settled || loaded.long || this.flowing) return;
+    this.flowSoonSet.add(loaded);
+    if (this.flowRaf) return;
+    this.flowRaf = requestAnimationFrame(() => {
+      this.flowRaf = 0;
+      const pages = [...this.flowSoonSet];
+      this.flowSoonSet.clear();
+      for (const p of pages) this.maybeFlow(p);
+    });
+  }
+
+  /**
+   * Le contenu de la page depasse-t-il le bas de l'A4 ? Si oui, ce qui
+   * deborde part en tete de la page suivante (flowOut). Seulement apres une
+   * action de l'utilisateur sur la page (FLOW_EDIT_MS), sur une page de
+   * suite, ou sur demande (`why`) : jamais d'office a l'ouverture.
+   */
+  private maybeFlow(loaded: LoadedPage, why?: "settle" | "force"): void {
+    if (this.flowing) { if (!loaded.dead) this.flowAgain.add(loaded); return; }
+    if (loaded.dead || loaded.readOnly || this.readOnly || this.exporting || this.peek || loaded.copy) return;
+    if (!loaded.settled || loaded.doc.editingFormula) return;
+    if (why !== "force") {
+      if (loaded.long) return;
+      const recent = loaded.editedAt !== undefined && performance.now() - loaded.editedAt < FLOW_EDIT_MS;
+      if (!recent && !(why === "settle" && loaded.page.continues)) return;
+    }
+    const width = loaded.sheet.clientWidth;
+    if (!width) return;
+    const k = width / PAGE_W;
+    // Test rapide a chaque frappe : bas du texte (marge du bas retiree) et encre.
+    const pad = (parseFloat(getComputedStyle(loaded.doc.root).paddingBottom) || 0) / k;
+    if ((loaded.textH ?? 0) - pad <= TEXT_LIMIT + 0.5 && inkExtent(loaded.page.blocks) <= INK_LIMIT + 0.5) return;
+    const m = measureRows(loaded.doc.root, loaded.sheet.getBoundingClientRect().top, k);
+    const plan = planFlow(m.rows, loaded.page.blocks);
+    if (!plan) return;
+    void this.flowOut(loaded, plan, m);
+  }
+
+  /** Touches retenues pendant un debordement asynchrone (rejouees ensuite). */
+  private onFlowKey = (e: KeyboardEvent): void => {
+    if (!this.flowKeys || e.isComposing) return;
+    const altGr = e.ctrlKey && e.altKey;
+    if ((e.ctrlKey || e.altKey || e.metaKey) && !altGr) return;
+    if (e.key.length !== 1 && !["Enter", "Backspace", "Delete", "Tab"].includes(e.key)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    this.flowKeys.push({ key: e.key, shift: e.shiftKey });
+  };
+
+  private onFlowInput = (e: InputEvent): void => {
+    if (!this.flowKeys || !e.inputType.startsWith("insert")) return;
+    e.preventDefault();
+    if (e.data) for (const ch of e.data) this.flowKeys.push({ key: ch, shift: false });
+  };
+
+  private holdKeys(): void {
+    if (this.flowKeys) return;
+    this.flowKeys = [];
+    window.addEventListener("keydown", this.onFlowKey, { capture: true });
+    window.addEventListener("beforeinput", this.onFlowInput as EventListener, { capture: true });
+  }
+
+  /** Fin du debordement : les touches retenues partent la ou est le curseur. */
+  private releaseKeys(): void {
+    const keys = this.flowKeys ?? [];
+    this.flowKeys = null;
+    window.removeEventListener("keydown", this.onFlowKey, { capture: true });
+    window.removeEventListener("beforeinput", this.onFlowInput as EventListener, { capture: true });
+    while (keys.length) {
+      if (this.flowing) { this.holdKeys(); this.flowKeys!.push(...keys); return; }
+      const k = keys.shift()!;
+      const target = document.activeElement?.closest?.(".text-doc");
+      if (!(target instanceof HTMLElement)) continue;
+      const ev = new KeyboardEvent("keydown", { key: k.key, shiftKey: k.shift, bubbles: true, cancelable: true });
+      if (!target.dispatchEvent(ev)) continue;
+      if (k.key.length === 1) document.execCommand("insertText", false, k.key);
+      else if (k.key === "Backspace") document.execCommand("delete");
+      else if (k.key === "Delete") document.execCommand("forwardDelete");
+    }
+  }
+
+  /** Coupe le texte de la page au debut de la rangee `at` (l'encre ne suit pas : c'est voulu). */
+  private cutText(from: LoadedPage, at: Range | null): { tail: string; caret: boolean } {
+    if (!at) return { tail: "", caret: false };
+    from.noPush = true;
+    try {
+      return from.doc.splitOff(at, CARET_MARK);
+    } finally {
+      from.noPush = false;
+    }
+  }
+
+  /** Texte d'une page affichee remplace (pagination) ; le curseur va au marqueur s'il y est. */
+  private setFlowText(p: LoadedPage, text: string): void {
+    p.noPush = true;
+    try {
+      p.doc.setContent(text);
+      if (text.includes(CARET_MARK)) p.doc.takeMarker(CARET_MARK);
+      this.setBodyText(p, p.doc.content);
+    } finally {
+      p.noPush = false;
+    }
+  }
+
+  /** Repeint une page dont la pagination a deplace le contenu. */
+  private repaintFlowed(p: LoadedPage): void {
+    this.history.drop(p.page.id);
+    this.fitSheet(p);
+    this.paintStrokes(p);
+    this.paintOverlay(p);
+  }
+
+  /** Numero de page affiche sous la feuille (apres une renumerotation). */
+  private relabel(p: LoadedPage): void {
+    p.wrap.dataset.page = String(p.number);
+    const num = p.wrap.querySelector(":scope > .page-num");
+    if (!num || p.copy) return;
+    const day = dayLabel(p.page.created);
+    num.textContent = `${dividerLabel(this.divider)} p. ${p.number}${day ? ` · ${day}` : ""}`;
+  }
+
+  /** Page creee par la pagination, posee juste sous `after` (mode defilement). */
+  private insertLoaded(after: LoadedPage, n: number, page: Page): LoadedPage {
+    const p = this.buildPage(n, page);
+    this.list.splice(this.list.indexOf(after) + 1, 0, p);
+    after.wrap.after(el("div", { class: "page-sep" }), p.wrap);
+    p.wrap.style.maxWidth = after.wrap.style.maxWidth;
+    p.wrap.style.width = after.wrap.style.width;
+    p.sheet.style.setProperty("--k", after.sheet.style.getPropertyValue("--k"));
+    this.fitSheet(p, true);
+    this.paintOverlay(p);
+    for (const q of this.list) this.relabel(q);
+    return p;
+  }
+
+  /**
+   * Debordement : ce qui passe sous le bas de la page `from` (plan) part en
+   * tete de la page suivante. Si celle-ci a ete creee par un debordement de
+   * `from` (continues), le flux y continue ; sinon une page neuve est
+   * inseree juste apres (renumerotation), jamais de fusion dans une page
+   * deja ecrite. Jamais de perte : la page d'arrivee est ecrite (ou tenue en
+   * memoire avec `from`) avant que `from` ne perde quoi que ce soit.
+   * Rend la page d'arrivee si elle est affichee.
+   */
+  private async flowOut(from: LoadedPage, plan: FlowPlan, m: MeasuredRows): Promise<LoadedPage | null> {
+    this.flowing = true;
+    const now = performance.now();
+    const prev = from.prevText && now - from.prevText.t < FLOW_EDIT_MS ? from.prevText : null;
+    const shift = from.lastShift && now - from.lastShift.t < FLOW_EDIT_MS ? from.lastShift : null;
+    const undo: FlowUndo = {
+      fromId: from.page.id,
+      fromBlocks: JSON.stringify(from.page.blocks),
+      fromText: prev?.content ?? null,
+      fromCaret: prev?.caret ?? null,
+      ...(shift ? { shift: { y: shift.y, d: shift.d } } : {}),
+      toId: "", toBlocks: null, seq: 0,
+    };
+    let shown: LoadedPage | null = null;
+    let caretTo: { pageId: string; content: string } | null = null;
+    try {
+      const at = plan.firstRow < m.rows.length ? rowStart(from.doc.root, m, m.rows[plan.firstRow]) : null;
+      const preview = at ? from.doc.tailFrom(at) : "";
+      console.warn("FLOWDBG", JSON.stringify({ n: from.number, preview, plan: { ...plan, strokeIds: plan.strokeIds.length }, head: from.doc.content.slice(-60) }));
+      const sel: FlowSelection = {
+        strokeIds: plan.strokeIds, zoneIds: plan.zoneIds, flagIds: plan.flagIds, blockIds: imageIdsOf(preview),
+      };
+      if (!preview && !sel.strokeIds.length && !sel.zoneIds.length && !sel.flagIds.length) {
+        // Rien a deplacer (lignes vides finales) : la page garde sa taille.
+        if (at) this.cutText(from, at);
+        return null;
+      }
+      const n = from.number + 1;
+      // Page suivante : affichee, en file d'ecriture, ou sur le disque.
+      const shownNext = this.list.find((p) => p.number === n && !p.dead && !p.copy) ?? null;
+      let nextPage: Page | null = shownNext?.page
+        ?? [...this.pendingSave.values()].find((p) => p.number === n)?.page ?? null;
+      if (!nextPage && n <= this.total) {
+        this.holdKeys();
+        nextPage = await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, n)).catch(() => null);
+      }
+      const isFlow = !!nextPage && nextPage.continues === from.page.id && !isFutureVersion(nextPage) && !shownNext?.readOnly;
+
+      if (isFlow && shownNext) {
+        // Page de suite affichee (defilement) : tout se passe en memoire.
+        undo.toId = shownNext.page.id;
+        undo.toBlocks = JSON.stringify(shownNext.page.blocks);
+        const { tail } = this.cutText(from, at);
+        const existing = this.bodyText(shownNext.page)?.content ?? "";
+        const c = composeFlowText(tail, plan.lead, existing, plan.textLines, plan.inkLines);
+        moveFlowBlocks(from.page, shownNext.page, { ...sel, blockIds: imageIdsOf(tail) }, plan.dy, c.shift, uuid);
+        this.setFlowText(shownNext, c.text);
+        this.repaintFlowed(shownNext);
+        this.repaintFlowed(from);
+        // La page d'arrivee part la premiere sur le disque.
+        this.pendingSave.delete(from.page.id);
+        this.queueSave(shownNext);
+        this.queueSave(from);
+        shown = shownNext;
+      } else {
+        // Page d'arrivee preparee sur une copie, ecrite AVANT de toucher a `from`.
+        this.holdKeys();
+        const target: Page = isFlow ? structuredClone(nextPage!) : { ...emptyPage(uuid(), nowIso()), continues: from.page.id };
+        undo.toId = target.id;
+        undo.toBlocks = isFlow ? JSON.stringify(nextPage!.blocks) : null;
+        const existing = isFlow ? this.bodyText(target)?.content ?? "" : "";
+        const compose = (tail: string) => composeFlowText(tail, plan.lead, existing, plan.textLines, isFlow ? plan.inkLines : 0);
+        const c = compose(preview);
+        moveFlowBlocks(structuredClone(from.page), target, sel, plan.dy, c.shift, uuid);
+        setPageText(target, c.text);
+        // Ce qui attend d'etre ecrit part avant (la page d'avant garde encore tout).
+        await this.flush();
+        let num = n;
+        if (isFlow) {
+          this.pendingSave.delete(target.id);
+          await this.serial(() => this.host.repo.writePage(this.notebook, this.divider, n, target));
+        } else {
+          num = await this.serial(async () => {
+            const made = await this.host.repo.createPage(this.notebook, this.divider, n, target);
+            this.shiftNumbers(made, +1);
+            return made;
+          });
+          this.total++;
+          this.splitLog?.push(target.id);
+        }
+        if (from.dead) return null;
+        // Maintenant seulement, `from` perd ce qui est parti.
+        const { tail, caret } = this.cutText(from, at);
+        moveFlowBlocks(from.page, emptyPage("x", ""), sel, 0, 0, uuid);
+        this.repaintFlowed(from);
+        this.queueSave(from);
+        const clean = tail.split(CARET_MARK).join("");
+        if (clean !== preview) {
+          // Le texte a change pendant l'ecriture (formule mise en forme) : on reprend la derniere version.
+          setPageText(target, compose(clean).text);
+          this.pendingSave.set(target.id, { number: num, page: target, dead: true } as LoadedPage);
+        }
+        if (caret) caretTo = { pageId: target.id, content: compose(tail).text };
+        if (!isFlow && this.viewMode === "scroll" && this.list.includes(from)) {
+          shown = this.insertLoaded(from, num, target);
+        }
+        this.host.onPageChange?.(this.current, this.total);
+        this.host.onDirty();
+        // Mode pages : le curseur suit le texte, la vue passe a la page suivante.
+        if (caretTo && this.viewMode === "pages") {
+          this.flowing = false;
+          await this.goTo(num);
+          this.flowing = true;
+          shown = this.list.find((p) => p.page.id === target.id) ?? null;
+        }
+      }
+      if (caretTo && shown && shown.page.id === caretTo.pageId) {
+        // Le texte affiche est celui sans marqueur : on y pose le curseur.
+        shown.noPush = true;
+        try {
+          shown.doc.setContent(caretTo.content);
+          shown.doc.takeMarker(CARET_MARK);
+        } finally {
+          shown.noPush = false;
+        }
+      }
+      undo.seq = this.editSeq;
+      this.flowUndo = undo;
+      return shown;
+    } catch (e) {
+      toast(`Page suivante impossible à écrire : ${errorText(e)}. La page reste plus longue pour l'instant.`, "err", 6000);
+      return null;
+    } finally {
+      this.flowing = false;
+      this.releaseKeys();
+      const again = [...this.flowAgain];
+      this.flowAgain.clear();
+      if (shown && !again.includes(shown)) again.push(shown);
+      for (const p of again) if (p.settled) this.maybeFlow(p, p.page.continues ? "settle" : undefined);
+    }
+  }
+
+  /** Ctrl+Z juste apres un debordement : est-ce lui qu'on annule ? */
+  private flowUndoFor(pageId?: string): FlowUndo | null {
+    const u = this.flowUndo;
+    if (!u || u.seq !== this.editSeq || this.flowing) return null;
+    if (pageId && pageId !== u.fromId && pageId !== u.toId) return null;
+    return u;
+  }
+
+  /**
+   * Annule le dernier debordement : la page d'avant retrouve son texte
+   * d'avant la frappe (et son encre), la page d'apres son contenu, ou part
+   * a la corbeille si le debordement l'avait creee.
+   */
+  private async undoFlow(u: FlowUndo): Promise<void> {
+    this.flowUndo = null;
+    if (this.locked()) return;
+    this.flowing = true;
+    this.holdKeys();
+    try {
+      await this.flush();
+      const from = this.list.find((p) => p.page.id === u.fromId && !p.dead) ?? null;
+      const fromNum = from?.number ?? (await this.findPageNumber(u.fromId));
+      if (fromNum === null) return;
+      const toNum = fromNum + 1;
+      const toShown = this.list.find((p) => p.page.id === u.toId && !p.dead) ?? null;
+      // Page d'apres : contenu d'avant, ou corbeille si le debordement l'a creee.
+      if (u.toBlocks === null) {
+        const check = toShown?.page ?? (await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, toNum)).catch(() => null));
+        if (check?.id === u.toId) {
+          await this.serial(async () => {
+            await this.host.repo.deletePage(this.notebook, this.divider, toNum);
+            for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === u.toId)) {
+              p.dead = true;
+              p.number = 0;
+              this.pendingSave.delete(p.page.id);
+              this.history.drop(p.page.id);
+            }
+            this.shiftNumbers(toNum + 1, -1);
+          });
+          this.total--;
+          if (toShown) {
+            toShown.ro?.disconnect();
+            toShown.doc.dispose();
+            toShown.surface?.dispose();
+            const sep = toShown.wrap.previousElementSibling;
+            if (sep?.classList.contains("page-sep")) sep.remove();
+            toShown.wrap.remove();
+            this.list.splice(this.list.indexOf(toShown), 1);
+          }
+        }
+      } else if (toShown) {
+        toShown.page.blocks = JSON.parse(u.toBlocks) as Block[];
+        this.setFlowText(toShown, this.bodyText(toShown.page)?.content ?? "");
+        this.repaintFlowed(toShown);
+        this.queueSave(toShown);
+      } else {
+        const page = await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, toNum)).catch(() => null);
+        if (page?.id === u.toId) {
+          page.blocks = JSON.parse(u.toBlocks) as Block[];
+          await this.serial(() => this.host.repo.writePage(this.notebook, this.divider, toNum, page));
+        }
+      }
+      // Page d'avant : blocs du moment du debordement, texte d'avant la frappe.
+      const restore = (page: Page) => {
+        page.blocks = JSON.parse(u.fromBlocks) as Block[];
+        const body = this.bodyText(page);
+        if (u.fromText !== null) {
+          if (body) body.content = u.fromText;
+          if (u.shift) shiftBelow(page.blocks, u.shift.y + u.shift.d, -u.shift.d);
+        }
+      };
+      if (this.viewMode === "pages" && this.current !== fromNum) {
+        const page = await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, fromNum)).catch(() => null);
+        if (page?.id === u.fromId) {
+          restore(page);
+          await this.serial(() => this.host.repo.writePage(this.notebook, this.divider, fromNum, page));
+        }
+        this.flowing = false;
+        await this.goTo(fromNum);
+        this.flowing = true;
+      } else if (from) {
+        restore(from.page);
+        this.setFlowText(from, this.bodyText(from.page)?.content ?? "");
+        this.repaintFlowed(from);
+        this.queueSave(from);
+      }
+      const back = this.list.find((p) => p.page.id === u.fromId && !p.dead);
+      if (back) {
+        // Pas de nouveau debordement d'office : la page reprend a la prochaine frappe.
+        back.editedAt = undefined;
+        if (u.fromCaret !== null) back.doc.setCaretOffset(u.fromCaret);
+        else back.doc.focus();
+      }
+      for (const p of this.list) this.relabel(p);
+      this.host.onPageChange?.(this.current, this.total);
+      this.host.onDirty();
+    } catch (e) {
+      toast(`Annulation impossible : ${errorText(e)}`, "err", 6000);
+    } finally {
+      this.flowing = false;
+      this.releaseKeys();
+    }
+  }
+
+  /** Numero d'une page de l'intercalaire d'apres son id (lecture du disque). */
+  private async findPageNumber(id: string): Promise<number | null> {
+    const shown = this.list.find((p) => p.page.id === id && !p.dead);
+    if (shown) return shown.number;
+    const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
+    for (const n of nums) {
+      const page = await this.host.repo.readPage(this.notebook, this.divider, n).catch(() => null);
+      if (page?.id === id) return n;
+    }
+    return null;
+  }
+
+  /**
+   * « Répartir sur plusieurs pages » d'une ancienne page longue : ce qui est
+   * sous chaque fin de feuille A4 part sur des pages inserees juste apres.
+   * Explicite, et annulable (toast « Annuler » : la page longue revient, les
+   * pages creees partent a la corbeille).
+   */
+  async splitLongPage(loaded: LoadedPage): Promise<void> {
+    if (this.locked() || loaded.readOnly || this.flowing) return;
+    if (!(await this.readyToRenumber("répartition"))) return;
+    const before = JSON.stringify(loaded.page.blocks);
+    const pageId = loaded.page.id;
+    const wasPages = this.viewMode === "pages";
+    this.splitLog = [];
+    try {
+      // En mode pages, la suite doit etre affichee pour se couper a son tour.
+      if (wasPages) {
+        this.viewMode = "scroll";
+        await this.render();
+      }
+      const first = this.list.find((p) => p.page.id === pageId);
+      if (!first) return;
+      for (const p of this.list) p.long = p.page.id === pageId ? false : p.long;
+      first.settled = true;
+      first.editedAt = performance.now();
+      this.paintNotes(first);
+      let cur: LoadedPage | null = first;
+      for (let guard = 0; cur && guard < 60; guard++) {
+        while (this.flowing) await new Promise((r) => setTimeout(r, 30));
+        await cur.doc.imagesReady().catch(() => undefined);
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        cur.settled = true;
+        cur.long = false;
+        this.fitSheet(cur);
+        const k = (cur.sheet.clientWidth || PAGE_W) / PAGE_W;
+        const m = measureRows(cur.doc.root, cur.sheet.getBoundingClientRect().top, k);
+        const plan = planFlow(m.rows, cur.page.blocks);
+        if (!plan) break;
+        cur = await this.flowOut(cur, plan, m);
+      }
+    } finally {
+      const made = this.splitLog ?? [];
+      this.splitLog = null;
+      if (wasPages) {
+        this.viewMode = "pages";
+        await this.render();
+      }
+      if (made.length) {
+        toast(`Page répartie sur ${made.length + 1} pages`, "info", 8000, {
+          label: "Annuler", run: () => void this.unsplit(pageId, before, made),
+        });
+      }
+    }
+  }
+
+  /** Annule « Répartir » : la page longue revient, les pages creees vont a la corbeille. */
+  private async unsplit(pageId: string, before: string, made: string[]): Promise<void> {
+    if (this.locked() || this.flowing) return;
+    if (!(await this.readyToRenumber("annulation"))) return;
+    this.flowing = true;
+    try {
+      for (const id of [...made].reverse()) {
+        const n = await this.findPageNumber(id);
+        if (n === null) continue;
+        await this.serial(async () => {
+          await this.host.repo.deletePage(this.notebook, this.divider, n);
+          for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === id)) {
+            p.dead = true;
+            p.number = 0;
+            this.pendingSave.delete(p.page.id);
+          }
+          this.shiftNumbers(n + 1, -1);
+        });
+      }
+      const n = await this.findPageNumber(pageId);
+      if (n !== null) {
+        const page = await this.host.repo.readPage(this.notebook, this.divider, n);
+        page.blocks = JSON.parse(before) as Block[];
+        await this.serial(() => this.host.repo.writePage(this.notebook, this.divider, n, page));
+        this.current = n;
+      }
+    } catch (e) {
+      toast(`Annulation impossible : ${errorText(e)}`, "err", 6000);
+    } finally {
+      this.flowing = false;
+    }
+    await this.render();
+    this.revealCurrent();
+    this.host.onDirty();
   }
 
   /** Zoom en vigueur : 100 % pendant un export PDF (feuilles A4). */
@@ -1290,6 +1944,8 @@ export class PageView {
       // sous chaque ancienne photo : c'est le cas au premier relayout visible.
       if (this.root.isConnected && this.root.clientWidth > 0) this.adoptFloatingImages(p);
       this.paintOverlay(p);
+      // Pagination : une page construite hors ecran se mesure maintenant.
+      if (!p.settled && this.root.isConnected) void this.settle(p);
     }
     // Le cadre est sur le canvas (unites de page), la barre en pixels : elle suit.
     if (this.sel) this.paintSelBar();
@@ -1330,6 +1986,7 @@ export class PageView {
     const ink = this.mainInk(loaded.page);
     // Commande legere : l'ajout d'un trait ne serialise plus toute la page.
     this.history.push(loaded.page.id, { op: "add", blockId: ink.id, stroke });
+    this.editSeq++;
     this.lastEditedId = loaded.page.id;
     ink.strokes.push(stroke);
     loaded.lastEdit = "ink";
@@ -1339,29 +1996,54 @@ export class PageView {
     if (growForStroke(loaded.page, stroke)) this.fitSheet(loaded);
     this.queueSave(loaded);
     // Un surlignage ne part pas a la reconnaissance.
-    if (stroke.tool === "pen" && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+    if (stroke.tool === "pen" && this.host.autoConvert()) {
+      this.scheduleAutoConvert(loaded, { current: strokeBounds(stroke) });
+    }
   }
+
+  /** Conversion par bandes : dernier envoi demande et pause longue, par page. */
+  private autoState = new WeakMap<LoadedPage, { sig: string; idle: ReturnType<typeof setTimeout> | null }>();
 
   /**
    * Conversion au fil de la plume (section 4). L'envoi part au lever du
    * stylet plus une pause, jamais en flux continu : sans cela on paierait
    * une requete par trait et la batterie avec.
    */
-  private scheduleAutoConvert(loaded: LoadedPage): void {
-    const ink = this.mainInk(loaded.page);
+  private scheduleAutoConvert(loaded: LoadedPage, opts: { current?: Bounds; full?: boolean } = {}): void {
+    const ink = this.mainInk(loaded.page) as RecoInk;
     // Ancienne transcription pleine page reprise au clavier : ne pas l'ecraser.
     // En mot a mot, les corrections sont reportees mot par mot (carryEdits).
     if (ink.editedByHand && !ink.words) return;
+    // Par bandes de lignes (reco-3, bands.ts) : seules les lignes touchees
+    // depuis la derniere lecture partent, jamais les mots deja lus. Apres
+    // un trait, la ligne en cours attend qu'on la quitte ou une pause
+    // longue : une requete par ligne au lieu d'une par hesitation.
+    const plan = planIncremental(ink, opts);
+    let state = this.autoState.get(loaded);
+    if (!state) { state = { sig: "", idle: null }; this.autoState.set(loaded, state); }
+    if (state.idle) { clearTimeout(state.idle); state.idle = null; }
+    if (!plan.all.length) {
+      // Plus rien a lire (gomme, zone tracee) : un envoi deja parti fixera
+      // l'etat a son retour.
+      if (ink.pending) { ink.pending = false; this.paintOverlay(loaded); }
+      return;
+    }
     ink.pending = true;
     delete ink.recoError;
     this.paintOverlay(loaded);
-    // Seule l'ecriture part chez MyScript : un surlignage la perturbe.
-    this.host.requestRecognition(
-      this.keyOf(loaded, ink.id),
-      "text",
-      ink.strokes.filter((s) => s.tool === "pen"),
-      true,
-    );
+    const send = (strokes: Stroke[]) => {
+      state!.sig = sendSignature(strokes);
+      // Seule l'ecriture part chez MyScript : un surlignage la perturbe.
+      this.host.requestRecognition(this.keyOf(loaded, ink.id), "text", strokes, true, true);
+    };
+    if (!opts.current) { send(plan.all); return; }
+    // Meme envoi que le precedent (encore en route) : pas de doublon.
+    if (plan.now.length && sendSignature(plan.now) !== state.sig) send(plan.now);
+    state.idle = setTimeout(() => {
+      state!.idle = null;
+      const all = planIncremental(this.mainInk(loaded.page) as RecoInk).all;
+      if (all.length && sendSignature(all) !== state!.sig) send(all);
+    }, Math.max(0, AUTO_IDLE_MS - AUTO_DEBOUNCE_MS));
   }
 
   /** Relance la conversion de la page, meme apres une correction clavier. */
@@ -1372,7 +2054,7 @@ export class PageView {
     const ink = this.mainInk(loaded.page);
     if (!ink.strokes.some((s) => s.tool === "pen")) { toast("Rien à convertir sur cette page", "warn"); return; }
     ink.editedByHand = false;
-    this.scheduleAutoConvert(loaded);
+    this.scheduleAutoConvert(loaded, { full: true });
   }
 
   private onErase(loaded: LoadedPage, ids: string[]): void {
@@ -1391,6 +2073,8 @@ export class PageView {
               const lost = w.strokeIds.filter((id) => set.has(id)).length;
               return lost > 0 && lost < w.strokeIds.length;
             });
+            // Mot ampute : a relire (bands.ts), il reste affiche d'ici la.
+            invalidateStrokes(b as RecoInk, set);
           }
           b.words = dropStrokes(b.words, set);
           b.recognized = joinWords(b.words) || null;
@@ -1424,6 +2108,11 @@ export class PageView {
     if (!loaded.eraseNoted) { this.pushUndo(loaded); loaded.eraseNoted = true; }
     const r = replaceStrokes(loaded.page.blocks, split);
     loaded.page.blocks = r.blocks;
+    // Les morceaux ont des ids neufs : le mot coupe est a relire.
+    if (r.wordsTouched) {
+      const main = loaded.page.blocks.find((b): b is InkBlock => b.type === "ink" && !b.rect);
+      if (main) invalidateStrokes(main as RecoInk, [...split.values()].flat().map((st) => st.id));
+    }
     if (this.sel?.loaded === loaded && [...split.keys()].some((id) => this.sel!.ids.has(id))) this.clearSelection();
     this.paintOverlay(loaded);
     this.queueSave(loaded);
@@ -1519,15 +2208,23 @@ export class PageView {
    * passe dans les blocs (ids gardes), la feuille s'allonge si besoin.
    */
   private applyTransform(loaded: LoadedPage, ids: Set<string>, t: Transform, kind: "move" | "resize" | "space"): void {
+    // Deplacer ou retailler au lasso change la ligne des traits : leurs mots
+    // sont a relire. Un espace insere decale des lignes entieres, sans les
+    // changer.
+    const main = loaded.page.blocks.find((b): b is InkBlock => b.type === "ink" && !b.rect);
+    const stale = kind !== "space" && !!main && invalidateStrokes(main as RecoInk, ids);
     transformBlocks(loaded.page.blocks, ids, t);
-    for (const st of strokesById(loaded.page.blocks, ids)) growForStroke(loaded.page, st);
+    // Page A4 (pagination) : la feuille ne s'allonge plus, l'encre poussee
+    // sous le bas (insertion d'espace) passe a la page suivante (maybeFlow).
+    if (loaded.long) for (const st of strokesById(loaded.page.blocks, ids)) growForStroke(loaded.page, st);
     loaded.lastEdit = "ink";
     this.lastGestureId = loaded.page.id;
     this.fitSheet(loaded);
     this.paintStrokes(loaded);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
-    if (kind === "space") return;
+    if (stale && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
+    if (kind === "space") { this.maybeFlow(loaded); return; }
     this.select(loaded, ids);
   }
 
@@ -1634,6 +2331,8 @@ export class PageView {
     // Les mots lus dans ces traits (souvent absurdes : une integrale lue en
     // texte) partent avec eux, de l'affichage comme de la recherche.
     if (ink.words) {
+      // Un mot dont une partie seulement part dans la zone est a relire.
+      invalidateStrokes(ink as RecoInk, ids);
       ink.words = dropStrokes(ink.words, ids);
       ink.recognized = joinWords(ink.words) || null;
     }
@@ -2637,7 +3336,7 @@ export class PageView {
     const n = this.current;
     const ok = await confirmDialog(
       "Supprimer la page",
-      `La page ${n} de ${this.divider} part à la corbeille et les suivantes sont renumérotées. `
+      `La page ${n} de ${dividerLabel(this.divider)} part à la corbeille et les suivantes sont renumérotées. `
         + "Le bouton « Annuler » du message qui suit la remet en place.",
       "Supprimer",
     );
@@ -2955,8 +3654,8 @@ export class PageView {
       }
       for (const p of this.list) p.wrap.classList.add("print-src");
       document.title = scope === "current"
-        ? `${this.notebook} - ${this.divider} p. ${prevPage}`
-        : `${this.notebook} - ${this.divider}`;
+        ? `${this.notebook} - ${this.divider.replace(/\//g, " - ")} p. ${prevPage}`
+        : `${this.notebook} - ${this.divider.replace(/\//g, " - ")}`;
       document.body.classList.add("printing");
       const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
       window.print();
@@ -3012,7 +3711,9 @@ export class PageView {
         soft.push({ top: bb.y * k, bottom: (bb.y + bb.h) * k });
       }
     }
-    const plan = planPrint(H, numH, hard, soft);
+    // Page paginee (A4) : une feuille, jamais coupee ; ancienne page longue :
+    // decoupage d'avant (core/print.ts).
+    const plan = planPrint(H, numH, hard, soft, !p.long && !isLongPage(p.surface?.height ?? 0));
 
     // Encre en densite 3, le temps de copier les tranches, puis retour a
     // la densite de l'ecran (une page en densite 3 pese ~30 Mo).
@@ -3131,6 +3832,8 @@ export class PageView {
   /* ---------------- annulation ---------------- */
 
   private pushUndo(loaded: LoadedPage): void {
+    this.editSeq++;
+    loaded.editedAt = performance.now();
     this.history.push(loaded.page.id, JSON.stringify(loaded.page.blocks));
     this.lastEditedId = loaded.page.id;
   }
@@ -3154,6 +3857,8 @@ export class PageView {
   }
 
   private step(dir: "undo" | "redo"): void {
+    const flow = dir === "undo" ? this.flowUndoFor() : null;
+    if (flow) { void this.undoFlow(flow); return; }
     const loaded = this.undoTarget();
     if (!loaded) return;
     const id = loaded.page.id;
@@ -3336,6 +4041,22 @@ function cloneWithCanvases(node: HTMLElement): HTMLElement {
   copy.querySelectorAll(".doc-img-bar").forEach((b) => b.remove());
   copy.querySelectorAll(".selected").forEach((b) => b.classList.remove("selected"));
   return copy;
+}
+
+/** Photos, calculs et courbes poses dans un texte (jeton img:). */
+function imageIdsOf(text: string): string[] {
+  return parseDoc(text).flatMap((t) => (t.kind === "image" ? [t.id] : []));
+}
+
+/** Texte tape d'une page qui n'est pas affichee (pagination). */
+function setPageText(page: Page, text: string): void {
+  let body = page.blocks.find((b): b is TextBlock => b.type === "text" && !b.rect);
+  if (!body) {
+    if (!text) return;
+    body = { id: uuid(), type: "text", content: "" };
+    page.blocks.push(body);
+  }
+  body.content = text;
 }
 
 function readAsDataUrl(file: File): Promise<string> {

@@ -4,7 +4,20 @@
  * ajouter un type apres coup obligerait a migrer tous les fichiers du disque.
  */
 
-export const SCHEMA_VERSION = 1 as const;
+/**
+ * Version du format des pages. v2 : les points d'un trait sont ecrits en
+ * tableaux plats (`pts`, `p`, `t`, voir core/ink/stroke.ts et CLAUDE.md
+ * section 2). Une page v1 se lit toujours ; elle n'est reecrite en v2 que
+ * lorsqu'elle est modifiee. Une page de version superieure s'ouvre en
+ * lecture seule.
+ */
+export const SCHEMA_VERSION = 2 as const;
+
+/**
+ * Version de cahier.json : son format n'a pas change avec la v2 des pages,
+ * il garde donc le numero 1 (rien a faire sur l'autre PC).
+ */
+export const META_VERSION = 1 as const;
 
 /** Les 5 couleurs a semantique fixe. Palette fermee, voir section 8. */
 export type ColorKey =
@@ -232,7 +245,11 @@ export type Block =
   | FlagBlock;
 
 export interface Page {
-  version: typeof SCHEMA_VERSION;
+  /**
+   * Version du format. En memoire, une page lue est ramenee a SCHEMA_VERSION
+   * par migratePage, sauf une page future, gardee telle quelle (lecture seule).
+   */
+  version: number;
   id: string;
   created: string;
   modified: string;
@@ -242,12 +259,19 @@ export interface Page {
    * anciens fichiers restent lisibles.
    */
   height?: number;
+  /**
+   * Pagination automatique (core/paginate.ts) : id de la page d'avant quand
+   * cette page a ete creee par son debordement. Le texte qui deborde encore
+   * y continue (comme Word) au lieu de creer une nouvelle page. Optionnel.
+   */
+  continues?: string;
   blocks: Block[];
 }
 
 /** cahier.json : metadonnees d'une matiere. */
 export interface NotebookMeta {
-  version: typeof SCHEMA_VERSION;
+  /** META_VERSION (1). Les anciens cahier.json ecrits avec SCHEMA_VERSION 1 sont identiques. */
+  version: number;
   title: string;
   color: string;
   /** Ordre des intercalaires. Le disque fait autorite sur l'existence,

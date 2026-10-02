@@ -257,10 +257,13 @@ describe("cle d'un bloc", () => {
     expect(parseBlockKey(key)).toEqual({ notebook: "Maths", divider: "Cours", pageId: "page-1", blockId: "bloc-1" });
   });
 
-  it("supporte un « # » dans le nom et un cahier en chemin", () => {
-    const key = blockKey("S5/Info", "C# avancé", "p", "b");
-    expect(parseBlockKey(key)).toEqual({ notebook: "S5/Info", divider: "C# avancé", pageId: "p", blockId: "b" });
+  it("supporte un « # » dans le nom et un intercalaire a plusieurs niveaux (D4)", () => {
+    const key = blockKey("Info", "S5/C# avancé", "p", "b");
+    expect(parseBlockKey(key)).toEqual({ notebook: "Info", divider: "S5/C# avancé", pageId: "p", blockId: "b" });
+    expect(parseBlockKey(blockKey("Elec", "E3A/S1/Chapitre 1", "p", "b")))
+      .toEqual({ notebook: "Elec", divider: "E3A/S1/Chapitre 1", pageId: "p", blockId: "b" });
     expect(parseBlockKey("sans-diese")).toBeNull();
+    expect(parseBlockKey("Maths/p#b")).toBeNull();
   });
 });
 

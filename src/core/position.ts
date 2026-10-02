@@ -33,6 +33,11 @@ export interface Spot {
 
 export const POSITIONS_KEY = "cahiers.positions.v1";
 
+/** `path` est l'intercalaire `ancestor` ou se trouve dans ce groupe. */
+const under = (path: string, ancestor: string) => path === ancestor || path.startsWith(ancestor + "/");
+/** Chemin apres renommage ou deplacement du groupe `from` en `to`. */
+const moved = (path: string, from: string, to: string) => (under(path, from) ? to + path.slice(from.length) : path);
+
 /** Retient la page vue. Rend une nouvelle table, l'ancienne n'est pas touchee. */
 export function recordPosition(
   map: PositionMap, notebook: string, divider: string, page: number, now: string,
@@ -67,21 +72,27 @@ export function lastDivider(
   return d && existing.includes(d) ? d : undefined;
 }
 
+/**
+ * Intercalaire renomme ou deplace (D4 : un groupe emmene tout ce qu'il
+ * contient, « S1/Chapitre 1 » devient « Semestre 1/Chapitre 1 »).
+ */
 export function renameDividerIn(map: PositionMap, notebook: string, from: string, to: string): PositionMap {
   const spot = map[notebook];
   if (!spot || from === to) return map;
-  const pages = { ...spot.pages };
-  if (from in pages) { pages[to] = pages[from]; delete pages[from]; }
-  return { ...map, [notebook]: { ...spot, pages, divider: spot.divider === from ? to : spot.divider } };
+  const pages: Record<string, number> = {};
+  for (const [d, n] of Object.entries(spot.pages)) if (!under(d, from)) pages[d] = n;
+  for (const [d, n] of Object.entries(spot.pages)) if (under(d, from)) pages[moved(d, from, to)] = n;
+  return { ...map, [notebook]: { ...spot, pages, divider: moved(spot.divider, from, to) } };
 }
 
+/** Intercalaire (ou groupe, avec son contenu) parti a la corbeille. */
 export function dropDividerIn(map: PositionMap, notebook: string, divider: string): PositionMap {
   const spot = map[notebook];
   if (!spot) return map;
   const pages = { ...spot.pages };
-  delete pages[divider];
+  for (const d of Object.keys(pages)) if (under(d, divider)) delete pages[d];
   const next = { ...map };
-  if (spot.divider === divider) {
+  if (under(spot.divider, divider)) {
     // Plus d'intercalaire a reprendre : on garde les pages des autres.
     const other = Object.keys(pages)[0];
     if (other) next[notebook] = { ...spot, pages, divider: other };

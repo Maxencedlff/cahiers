@@ -1,5 +1,6 @@
 import type { Repo } from "./repo";
 import type { Block, ColorKey, Page } from "../types";
+import { dividerMatches, extractReview, groupReview, type ReviewFilter, type ReviewItem, type ReviewResult, type ReviewSource } from "../review";
 import { docImageIds, docTitle, parseDoc, texToPlain } from "../text/doc";
 import {
   fold, makeExcerpt, matchesAll, notebookMatches, parseQuery, queryReady,
@@ -72,6 +73,8 @@ export interface PageIndex {
   title?: string;
   flags: PageFlag[];
   blocks: IndexedBlock[];
+  /** Extraits en couleur (vue de revision, core/review.ts). Absent : aucun. */
+  review?: ReviewItem[];
 }
 
 /** Longueur de la premiere ligne montree dans la liste des pages. */
@@ -117,9 +120,11 @@ export function indexPage(page: Page): PageIndex {
   const lead = blocks.find((b) => b.id === body?.id) ?? blocks.find((b) => b.type === "ink")
     ?? blocks.find((b) => b.type !== "flag");
   const title = body?.type === "text" ? firstLineOf(docTitle(parseDoc(body.content))) : "";
+  const review = extractReview(page);
   return {
     modified: page.modified ?? "", created: page.created ?? "",
     firstLine: title || (lead ? firstLineOf(lead.text) : ""), ...(title ? { title } : {}), flags, blocks,
+    ...(review.length ? { review } : {}),
   };
 }
 
@@ -232,4 +237,41 @@ export function sortFlags(flags: FlagHit[]): FlagHit[] {
     .map((f, i) => ({ f, i }))
     .sort((a, b) => (b.f.created ?? "").localeCompare(a.f.created ?? "") || a.i - b.i)
     .map((x) => x.f);
+}
+
+export interface ReviewOptions {
+  /** Seulement cette matiere (dossier). Absent = toutes. */
+  notebook?: string;
+  /** Une autre demande a pris la main : on arrete de lire le disque. */
+  isStale?: () => boolean;
+}
+
+/**
+ * Vue de revision (core/review.ts) : extraits des couleurs choisies, par
+ * matiere, intercalaire et page, dans l'ordre des cahiers. Lit les pages par
+ * Repo.scanDivider : seules les pages modifiees depuis la derniere lecture
+ * sont relues. null si `isStale` a dit d'arreter.
+ */
+export async function collectReview(
+  repo: Repo, filter: ReviewFilter, opts: ReviewOptions = {},
+): Promise<(ReviewResult & { pages: number }) | null> {
+  const dirs = opts.notebook ? [opts.notebook] : await repo.listNotebookDirs();
+  const sources: ReviewSource[] = [];
+  let pages = 0;
+  for (const dir of dirs) {
+    if (opts.isStale?.()) return null;
+    const meta = await repo.readMeta(dir);
+    for (const divider of await repo.listDividers(dir)) {
+      if (!dividerMatches(divider, filter.divider)) continue;
+      const scanned = await repo.scanDivider(dir, divider, opts.isStale);
+      if (!scanned) return null;
+      pages += scanned.length;
+      for (const { n, index } of scanned) {
+        if (index?.review?.length) {
+          sources.push({ notebook: dir, notebookTitle: meta.title, divider, page: n, items: index.review });
+        }
+      }
+    }
+  }
+  return { ...groupReview(sources, filter), pages };
 }

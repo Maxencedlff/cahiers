@@ -73,6 +73,24 @@ intercalaire) reste sur chaque PC, dans le stockage local, jamais dans le
 dossier synchronise. Une page ecrite par une version plus recente de
 l'application s'ouvre en lecture seule.
 
+Format des pages, version 2 : les points d'un trait sont ecrits en tableaux
+plats, un trait par ligne :
+
+```json
+{"id":"uuid","points":[],"color":"normal","width":1.4,"tool":"pen","pts":[611.2,113.6,611.8,113.6],"p":0.5,"t":[0,191]}
+```
+
+`pts` = x0, y0, x1, y1... au dixieme ; `p` = pression au centieme (un seul
+nombre si elle est constante, absent si nulle) ; `t` = temps en ms, le premier
+puis l'ecart avec le point precedent (absent si tous nuls) ; `tilt` =
+inclinaison, seulement si le stylet la donne. `points: []` reste vide pour que
+l'ancienne version de l'appli ne plante pas. Les pages v1 (un objet
+`{x, y, p, t}` par point) se lisent toujours et ne passent en v2 qu'a leur
+premiere modification. Gain mesure sur de vraies pages : environ 37 octets
+par point en v1 arrondie contre 16 en v2 (40 Ko de pages actuelles → 12 Ko).
+Un PC pas encore mis a jour ouvre une page v2 en lecture seule : mettre a jour
+les deux PC.
+
 ## Deux PC (OneDrive)
 
 - Presence : un cahier ouvert pose `.presence-<NOMPC>.json` a sa racine,
@@ -241,6 +259,14 @@ quel ordre ; `"phrase exacte"` entre guillemets ; `@maths` pour une matiere,
 choisir, Entree ouvre la page au passage trouve, surligne ; Echap revient a
 la page ou l'on ecrivait. Les resultats les plus recents viennent d'abord.
 
+Reviser (`Ctrl+Maj+K`, menu « ⋯ » d'une matiere, ou les puces de couleur de
+la recherche) : tous les extraits d'une couleur, « tous les theoremes de
+Maths », groupes par intercalaire puis page dans l'ordre du cahier. Texte
+tape colore (formules rendues), encre de cette couleur redessinee et
+recadree, zones math/texte reconnues, surligneur. Filtres en puces :
+matiere, couleurs (touches 1 a 5), intercalaire. Un appui ouvre la page a
+l'endroit, `Alt+←` revient a la vue. « Exporter en PDF » imprime la fiche.
+
 `Ctrl+F` pose le repere a la hauteur du curseur (ou du dernier trait) et
 garde la ligne : la vue « Pas compris » (depuis le menu, ou le badge d'une
 matiere) dit ce qui n'etait pas compris, ouvre l'endroit exact, et
@@ -272,6 +298,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |
 | `Ctrl+K` | recherche globale |
+| `Ctrl+Maj+K` | reviser : extraits d'une couleur (theoremes, definitions...) par matiere, export PDF |
 | `Ctrl+L` | calculatrice |
 | `Ctrl+Maj+L` | envoyer le dernier resultat de la calculatrice dans la page (au curseur du texte, sinon sous le dernier contenu) |
 | `Alt+Maj+P` | photos du tableau (`Alt+P` seul = modele Puissance) |

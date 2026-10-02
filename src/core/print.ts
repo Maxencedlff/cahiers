@@ -2,7 +2,9 @@
  * Export PDF : decoupage d'une page du cahier en feuilles A4. Logique pure,
  * le DOM (mesures, clones, tranches d'encre) est dans PageView.exportPdf.
  *
- * Une page qui tient sur une A4 part telle quelle. Un peu plus haute
+ * Depuis la pagination automatique (core/paginate.ts), une page de l'appli
+ * est une feuille A4 : elle part telle quelle. Les anciennes pages longues
+ * gardent le decoupage ci-dessous. Une page qui tient sur une A4 part telle quelle. Un peu plus haute
  * (jusqu'a PRINT_ZOOM_MAX), elle est legerement reduite. Au-dela, jamais de
  * reduction : elle est coupee en plusieurs feuilles, entre deux lignes de
  * texte, jamais au milieu d'une photo ou d'une formule, et si possible pas
@@ -39,11 +41,15 @@ export interface PrintPlan {
  * Plan d'impression d'une feuille de `sheetH` px, avec un numero de page de
  * `numH` px sous chaque tranche. `hard` : a ne jamais couper si possible
  * (lignes de texte, photos, formules) ; `soft` : a eviter (encre).
+ * `single` : page au format A4 (pagination automatique), jamais decoupee ;
+ * seules les anciennes pages longues gardent le decoupage.
  */
-export function planPrint(sheetH: number, numH: number, hard: Span[], soft: Span[] = []): PrintPlan {
+export function planPrint(sheetH: number, numH: number, hard: Span[], soft: Span[] = [], single = false): PrintPlan {
   const total = sheetH + numH;
   if (total <= PRINT_FIT) return { zoom: 1, cuts: [0, sheetH] };
-  if (total <= PRINT_ZOOM_MAX) return { zoom: PRINT_FIT / total, cuts: [0, sheetH] };
+  // Page paginee (core/paginate.ts) : une page = une feuille A4, jamais
+  // coupee ; au pire un arrondi de mise en page la reduit d'un cheveu.
+  if (single || total <= PRINT_ZOOM_MAX) return { zoom: PRINT_FIT / total, cuts: [0, sheetH] };
   const max = PRINT_FIT - numH;
   const both = merge([...hard, ...soft]);
   const strict = merge(hard);

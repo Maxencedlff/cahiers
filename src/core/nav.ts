@@ -51,8 +51,13 @@ export class NavHistory {
     }
   }
 
+  /** Un groupe renomme ou deplace emmene les endroits de son contenu (D4). */
   renameDivider(notebook: string, from: string, to: string): void {
-    for (const s of this.stack) if (s.notebook === notebook && s.divider === from) s.divider = to;
+    for (const s of this.stack) {
+      if (s.notebook !== notebook) continue;
+      if (s.divider === from) s.divider = to;
+      else if (s.divider.startsWith(from + "/")) s.divider = to + s.divider.slice(from.length);
+    }
   }
 
   renameNotebook(from: string, to: string): void {
@@ -61,7 +66,8 @@ export class NavHistory {
 
   /** Intercalaire (ou tout le cahier, sans `divider`) parti a la corbeille. */
   drop(notebook: string, divider?: string): void {
-    this.stack = this.stack.filter((s) => s.notebook !== notebook || (divider != null && s.divider !== divider));
+    this.stack = this.stack.filter((s) => s.notebook !== notebook
+      || (divider != null && s.divider !== divider && !s.divider.startsWith(divider + "/")));
   }
 }
 
@@ -152,9 +158,16 @@ const SPLIT_PREFERRED = ["exos", "exercices", "td", "tp"];
 export function pickSplitDivider(dividers: readonly string[], current: string, taken: readonly string[] = []): string | null {
   const free = dividers.filter((d) => d !== current && !taken.includes(d));
   if (!free.length) return null;
-  for (const name of SPLIT_PREFERRED) {
-    const hit = free.find((d) => fold(d).text.trim() === name);
-    if (hit) return hit;
+  // Intercalaires imbriques (D4) : le nom du dossier, et d'abord ceux du
+  // meme groupe (S1/Cours a gauche, S1/TD a droite, pas S2/TD).
+  const leaf = (d: string) => fold(d.slice(d.lastIndexOf("/") + 1)).text.trim();
+  const group = current.includes("/") ? current.slice(0, current.lastIndexOf("/") + 1) : "";
+  const near = free.filter((d) => (group ? d.startsWith(group) : !d.includes("/")));
+  for (const pool of [near, free]) {
+    for (const name of SPLIT_PREFERRED) {
+      const hit = pool.find((d) => leaf(d) === name);
+      if (hit) return hit;
+    }
   }
   const i = dividers.indexOf(current);
   return free.find((d) => dividers.indexOf(d) > i) ?? free[free.length - 1];

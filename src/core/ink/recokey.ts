@@ -2,6 +2,7 @@ import type { Block, Page } from "../types";
 import type { Repo } from "../storage/repo";
 import type { RecoResult } from "./recognizer";
 import { carryEdits, dropStrokes, joinWords } from "./words";
+import { hasDirty, mergeIncremental } from "./bands";
 
 /**
  * Ou ranger un resultat de reconnaissance, eventuellement bien plus tard.
@@ -29,9 +30,10 @@ export function blockKey(nb: string, div: string, pageId: string, blockId: strin
 }
 
 /**
- * Relit une cle. Lue par la droite : les ids n'ont ni « / » ni « # », un
- * intercalaire n'a pas de « / » (nom de dossier), mais un nom peut porter
- * un « # » (« C# ») et un cahier pourra un jour etre un chemin.
+ * Relit une cle. Les ids n'ont ni « / » ni « # », un nom peut porter un
+ * « # » (« C# »). La matiere est un dossier de la racine (premier segment) ;
+ * l'intercalaire est tout ce qui suit jusqu'a l'id de page, sur un ou
+ * plusieurs niveaux (« E3A/S1/Chapitre 1 », D4).
  */
 export function parseBlockKey(key: string): BlockRef | null {
   const hash = key.lastIndexOf("#");
@@ -39,8 +41,8 @@ export function parseBlockKey(key: string): BlockRef | null {
   const blockId = key.slice(hash + 1);
   const path = key.slice(0, hash);
   const p = path.lastIndexOf("/");
-  const d = p > 0 ? path.lastIndexOf("/", p - 1) : -1;
-  if (p < 0 || d <= 0 || !blockId) return null;
+  const d = path.indexOf("/");
+  if (p < 0 || d <= 0 || d >= p || !blockId) return null;
   return {
     notebook: path.slice(0, d),
     divider: path.slice(d + 1, p),
@@ -59,6 +61,14 @@ export function applyToBlock(block: Block, result: RecoResult, more = false): vo
   if (block.type === "math") {
     block.latex = result.value;
     block.candidates = result.candidates.length ? result.candidates : undefined;
+  } else if (!block.rect && result.scope) {
+    // Envoi par bandes : seuls les traits envoyes changent de lecture, et le
+    // bloc reste en attente tant qu'une ligne n'est pas lue (ligne en cours
+    // gardee par la vue, a reprendre apres une fermeture).
+    mergeIncremental(block, result.words, result.scope);
+    delete block.recoError;
+    block.pending = more || hasDirty(block);
+    return;
   } else if (!block.rect && result.words) {
     // Mot a mot. Un trait gomme (ou deplace dans une zone) pendant
     // l'aller-retour reseau ne doit pas ressusciter dans un mot : on ne

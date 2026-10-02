@@ -82,4 +82,10 @@ describe("export PDF : decoupage en feuilles A4", () => {
       expect(text.some((l) => l.top <= c && c <= l.bottom)).toBe(false);
     }
   });
+
+  it("page paginee (A4) : jamais coupee, au pire reduite", () => {
+    const p = planPrint(1300, 26, lines(40, 1290), [], true);
+    expect(p.cuts).toEqual([0, 1300]);
+    expect(p.zoom).toBeCloseTo(PRINT_FIT / 1326, 5);
+  });
 });

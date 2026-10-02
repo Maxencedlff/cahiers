@@ -600,7 +600,8 @@ export class InkSurface {
     let t: Transform;
     if (d.kind === "move") {
       const c = clampMove(d.bounds, dx, dy);
-      t = translation(c.dx, c.dy);
+      // Pas sous le bas de la feuille non plus (pagination : une A4).
+      t = translation(c.dx, Math.min(c.dy, Math.max(0, this.pageH - (d.bounds.y + d.bounds.h))));
     } else if (d.kind === "resize") {
       t = resizeTransform(d.bounds, dx, dy);
     } else {
@@ -671,11 +672,12 @@ export class InkSurface {
 
   private addPoint(e: PointerEvent, p: { x: number; y: number }) {
     if (!this.live) return;
-    // Pas de borne en bas : la feuille s'allonge sous l'encre (sheetHeight),
-    // un trait ecrit sous l'A4 garde ses coordonnees.
+    // Borne en bas : le bas de la feuille (une A4, pagination automatique ;
+    // une ancienne page longue garde sa hauteur). Le stylet n'ecrit jamais
+    // hors de la feuille, la page ne s'allonge plus sous la main.
     const point = roundPoint({
       x: clamp(p.x, 0, PAGE_W),
-      y: Math.max(0, p.y),
+      y: clamp(p.y, 0, this.pageH),
       p: e.pressure > 0 ? e.pressure : 0.5,
       t: Math.max(0, e.timeStamp - this.startedAt),
       ...(e.tiltX || e.tiltY ? { tiltX: e.tiltX, tiltY: e.tiltY } : {}),

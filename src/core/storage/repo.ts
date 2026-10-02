@@ -1,12 +1,17 @@
 import type { FileStat, FsAdapter } from "./fs";
 import { joinPath } from "./fs";
 import {
-  SCHEMA_VERSION, emptyPage, isFutureVersion, pageFileName, parsePageNumber,
-  type NotebookMeta, type Page, type PaperKind,
+  META_VERSION, SCHEMA_VERSION, emptyPage, isFutureVersion, pageFileName, parsePageNumber,
+  type NotebookMeta, type Page, type PaperKind, type Stroke,
 } from "../types";
 import { uuid, nowIso } from "../id";
+import { decodeStroke, encodeStroke, isMemoryStroke } from "../ink/stroke";
 import { indexPage, type FlagHit, type PageIndex } from "./search";
 import { parseConflictName, renumberConflictName } from "../sync";
+import {
+  MAX_DEPTH, buildTree, childPath, depthOf, findNode, flattenTree, leafName, moveRefusal, parentPath,
+  remapKeys, renamePrefix, subtreeHeight, type DividerNode, type RawDir,
+} from "../dividers";
 
 export const VRAC = "Vrac";
 export const META_FILE = "cahier.json";
@@ -161,10 +166,11 @@ export class Repo {
   }
 
   /**
-   * Au moins une page dans le dossier, ses intercalaires ou un niveau en
-   * dessous. S'arrete a la premiere trouvee, et apres PROBE_BUDGET dossiers.
+   * Au moins une page dans le dossier ou ses intercalaires, jusqu'a
+   * MAX_DEPTH niveaux (E3A/S1/Chapitre 1). S'arrete a la premiere trouvee,
+   * et apres PROBE_BUDGET dossiers.
    */
-  async hasPages(rel: string, depth = 3, budget = { left: PROBE_BUDGET }): Promise<boolean> {
+  async hasPages(rel: string, depth = MAX_DEPTH + 1, budget = { left: PROBE_BUDGET }): Promise<boolean> {
     if (budget.left-- <= 0) return false;
     if ((await this.fs.listFiles(rel)).some((f) => parsePageNumber(f) !== null)) return true;
     if (depth <= 1) return false;
@@ -197,7 +203,7 @@ export class Repo {
     const known = m && typeof m === "object" && !Array.isArray(m) ? m : null;
     return {
       ...(known ?? {}),
-      version: SCHEMA_VERSION,
+      version: META_VERSION,
       title: (typeof known?.title === "string" && known.title.trim()) || dir,
       color: (typeof known?.color === "string" && known.color) || "#2563eb",
       dividers: Array.isArray(known?.dividers) ? known!.dividers.filter((d) => typeof d === "string") : [],
@@ -259,7 +265,7 @@ export class Repo {
     const dir = safeName(title);
     await this.fs.mkdir(dir);
     await this.writeMeta(dir, {
-      version: SCHEMA_VERSION, title: title.trim() || dir, color, dividers: [], viewMode: {},
+      version: META_VERSION, title: title.trim() || dir, color, dividers: [], viewMode: {},
     });
     return dir;
   }
@@ -381,17 +387,49 @@ export class Repo {
   /* ---------------- intercalaires ---------------- */
 
   /**
-   * Ordre = celui de cahier.json, filtre par ce qui existe reellement,
-   * puis les dossiers apparus dans l'explorateur Windows, a la fin. Rien
-   * n'est ecrit : l'ordre fusionne n'est garde qu'a la prochaine action de
-   * l'utilisateur (creation, deplacement d'un intercalaire).
+   * Les intercalaires en arbre (D4, palier 2) : un intercalaire peut etre
+   * un groupe (E3A, S1) qui en contient d'autres, jusqu'a MAX_DEPTH
+   * niveaux sous la matiere. Ordre = celui de cahier.json (chemins
+   * relatifs), filtre par ce qui existe reellement, puis les dossiers
+   * apparus dans l'explorateur Windows. Rien n'est ecrit : l'ordre
+   * fusionne n'est garde qu'a la prochaine action de l'utilisateur.
+   */
+  async listDividerTree(dir: string): Promise<DividerNode[]> {
+    const meta = await this.readMeta(dir);
+    return buildTree(await this.readLevel(dir, 1), meta.dividers);
+  }
+
+  /**
+   * Tous les intercalaires, chemins relatifs (« E3A/S1/Chapitre 1 »), un
+   * groupe avant son contenu. Un cahier a 2 niveaux rend exactement les
+   * memes noms qu'avant.
    */
   async listDividers(dir: string): Promise<string[]> {
-    const onDisk = await this.subfolders(dir);
-    const meta = await this.readMeta(dir);
-    const ordered = meta.dividers.filter((d) => onDisk.includes(d));
-    for (const d of onDisk) if (!ordered.includes(d)) ordered.push(d);
-    return ordered;
+    return flattenTree(await this.listDividerTree(dir));
+  }
+
+  /**
+   * Un niveau de dossiers d'intercalaires, et ce qu'il y a dessous. Un
+   * dossier qui contient un depot git (projet de code) n'est pas lu. Les
+   * pages ne sont cherchees que dans les groupes : une feuille est toujours
+   * un intercalaire.
+   */
+  private async readLevel(rel: string, depth: number): Promise<RawDir[]> {
+    const out: RawDir[] = [];
+    for (const name of await this.subfolders(rel)) {
+      const path = joinPath(rel, name);
+      if (depth >= MAX_DEPTH) { out.push({ name }); continue; }
+      let inner: string[];
+      try { inner = await this.fs.listDirs(path); } catch { inner = []; }
+      if (inner.includes(".git")) continue;
+      const children = inner.some((d) => d !== ASSETS_DIR && !d.startsWith("."))
+        ? await this.readLevel(path, depth + 1) : [];
+      const pages = children.length
+        ? (await this.fs.listFiles(path).catch(() => [] as string[])).some((f) => parsePageNumber(f) !== null)
+        : true;
+      out.push({ name, children, pages });
+    }
+    return out;
   }
 
   /** Sous-dossiers d'un intercalaire (rangement a plusieurs niveaux, D4). */
@@ -403,8 +441,18 @@ export class Repo {
     return (await this.fs.listDirs(rel)).filter((d) => d !== ASSETS_DIR && !d.startsWith("."));
   }
 
-  async createDivider(dir: string, name: string): Promise<string> {
-    const d = safeName(name);
+  /**
+   * Nouvel intercalaire, au premier niveau ou dans le groupe `parent`
+   * (« E3A/S1 »). Rend son chemin. Un nom deja pris (a la casse pres)
+   * rend l'intercalaire existant.
+   */
+  async createDivider(dir: string, name: string, parent = ""): Promise<string> {
+    if (parent && depthOf(parent) >= MAX_DEPTH) throw new Error(`au plus ${MAX_DEPTH} niveaux sous la matière`);
+    const wanted = safeName(name);
+    if (wanted.toLowerCase() === ASSETS_DIR || wanted.startsWith(".")) throw new Error("ce nom est réservé");
+    const same = (await this.fs.listDirs(joinPath(dir, parent)).catch(() => [] as string[]))
+      .find((x) => x.toLowerCase() === wanted.toLowerCase());
+    const d = childPath(parent, same ?? wanted);
     // L'ordre affiche (cahier.json puis le disque) devient celui du fichier.
     const order = await this.listDividers(dir);
     await this.fs.mkdir(joinPath(dir, d));
@@ -413,38 +461,60 @@ export class Repo {
   }
 
   /**
-   * Renomme le dossier reel. Rend le nom applique : `from` quand le nom est
-   * deja pris. Windows ne distingue pas la casse : « cours » est pris si
-   * « Cours » existe, et un changement de casse seul passe par un nom
-   * intermediaire.
+   * Renomme le dossier reel (le dernier niveau du chemin). Rend le chemin
+   * applique : `from` quand le nom est deja pris. Windows ne distingue pas
+   * la casse : « cours » est pris si « Cours » existe, et un changement de
+   * casse seul passe par un nom intermediaire. Un groupe renomme emmene
+   * son contenu : ordre, modes et fonds suivent.
    */
   async renameDivider(dir: string, from: string, to: string): Promise<string> {
-    const next = safeName(to);
-    if (next === from) return from;
-    const key = next.toLowerCase();
-    const taken = (await this.fs.listDirs(dir)).filter((d) => d !== from);
-    if (key === ASSETS_DIR || next.startsWith(".") || taken.some((d) => d.toLowerCase() === key)) {
+    const parent = parentPath(from);
+    const old = leafName(from);
+    const nextName = safeName(to);
+    if (nextName === old) return from;
+    const key = nextName.toLowerCase();
+    const taken = (await this.fs.listDirs(joinPath(dir, parent))).filter((d) => d !== old);
+    if (key === ASSETS_DIR || nextName.startsWith(".") || taken.some((d) => d.toLowerCase() === key)) {
       return from;
     }
+    const next = childPath(parent, nextName);
     this.forget(joinPath(dir, from));
-    if (key === from.toLowerCase()) {
-      const step = `${from}.renommage`;
+    if (key === old.toLowerCase()) {
+      const step = childPath(parent, `${old}.renommage`);
       await this.fs.rename(joinPath(dir, from), joinPath(dir, step));
       await this.fs.rename(joinPath(dir, step), joinPath(dir, next));
     } else {
       await this.fs.rename(joinPath(dir, from), joinPath(dir, next));
     }
+    await this.updateMeta(dir, (meta) => remapMeta(meta, from, next));
+    return next;
+  }
+
+  /**
+   * Range l'intercalaire (ou le groupe, avec son contenu) dans le groupe
+   * `toParent`, ou au premier niveau avec "". Deplace le dossier reel.
+   * Rend le nouveau chemin ; refuse (erreur) un nom deja pris a l'arrivee,
+   * un dossier dans lui-meme, ou plus de MAX_DEPTH niveaux.
+   */
+  async moveDivider(dir: string, from: string, toParent: string): Promise<string> {
+    const node = findNode(await this.listDividerTree(dir), from);
+    if (!node) throw new Error(`${from} est introuvable`);
+    if (toParent && !(await this.fs.exists(joinPath(dir, toParent)))) throw new Error(`${toParent} est introuvable`);
+    const refused = moveRefusal(from, toParent, subtreeHeight(node));
+    if (refused) throw new Error(refused);
+    const name = leafName(from);
+    const there = await this.fs.listDirs(joinPath(dir, toParent));
+    if (there.some((d) => d.toLowerCase() === name.toLowerCase())) {
+      throw new Error(`un intercalaire « ${name} » existe déjà à cet endroit`);
+    }
+    const next = childPath(toParent, name);
+    this.forget(joinPath(dir, from));
+    await this.fs.rename(joinPath(dir, from), joinPath(dir, next));
     await this.updateMeta(dir, (meta) => {
-      meta.dividers = meta.dividers.map((d) => (d === from ? next : d));
-      if (meta.lastPosition?.divider === from) meta.lastPosition.divider = next;
-      if (meta.viewMode && from in meta.viewMode) {
-        meta.viewMode[next] = meta.viewMode[from];
-        delete meta.viewMode[from];
-      }
-      if (meta.paper && from in meta.paper) {
-        meta.paper[next] = meta.paper[from];
-        delete meta.paper[from];
-      }
+      remapMeta(meta, from, next);
+      // Arrive en dernier dans son nouveau groupe.
+      meta.dividers = meta.dividers.filter((d) => d !== next);
+      meta.dividers.push(next);
     });
     return next;
   }
@@ -457,7 +527,8 @@ export class Repo {
   async deleteDivider(dir: string, name: string): Promise<TrashEntry> {
     const index = (await this.listDividers(dir)).indexOf(name);
     const bin = await this.newBin();
-    await this.fs.mkdir(joinPath(bin, dir));
+    // Un intercalaire imbrique garde son chemin dans la corbeille.
+    await this.fs.mkdir(joinPath(bin, dir, parentPath(name)));
     this.forget(joinPath(dir, name));
     await this.fs.rename(joinPath(dir, name), joinPath(bin, dir, name));
     await this.updateMeta(dir, (meta) => { meta.dividers = meta.dividers.filter((d) => d !== name); });
@@ -472,12 +543,16 @@ export class Repo {
   async restoreDivider(entry: TrashEntry): Promise<string> {
     const src = joinPath(entry.bin, entry.dir, entry.divider);
     if (!(await this.fs.exists(src))) throw new Error("introuvable dans la corbeille");
-    const taken = (await this.fs.listDirs(entry.dir)).map((d) => d.toLowerCase());
-    let name = entry.divider;
-    for (let i = 1; taken.includes(name.toLowerCase()); i++) {
-      name = `${entry.divider} (restauré${i > 1 ? ` ${i}` : ""})`;
+    // Son groupe d'origine (recree s'il a disparu entre temps).
+    const parent = parentPath(entry.divider);
+    const leaf = leafName(entry.divider);
+    await this.fs.mkdir(joinPath(entry.dir, parent));
+    const taken = (await this.fs.listDirs(joinPath(entry.dir, parent))).map((d) => d.toLowerCase());
+    let short = leaf;
+    for (let i = 1; taken.includes(short.toLowerCase()); i++) {
+      short = `${leaf} (restauré${i > 1 ? ` ${i}` : ""})`;
     }
-    await this.fs.mkdir(entry.dir);
+    const name = childPath(parent, short);
     this.forget(joinPath(entry.dir, name));
     await this.fs.rename(src, joinPath(entry.dir, name));
     const order = (await this.listDividers(entry.dir)).filter((d) => d !== name);
@@ -624,8 +699,10 @@ export class Repo {
   /**
    * Cree une page. `at` = numero souhaite ; les pages suivantes sont
    * renumerotees en descendant pour ne jamais ecraser un fichier.
+   * `page` : contenu de depart (pagination automatique : la suite d'une
+   * page qui deborde), une page vide sinon.
    */
-  async createPage(dir: string, divider: string, at?: number): Promise<number> {
+  async createPage(dir: string, divider: string, at?: number, page?: Page): Promise<number> {
     await this.fs.mkdir(joinPath(dir, divider));
     const nums = await this.listPageNumbers(dir, divider);
     const last = nums.length ? nums[nums.length - 1] : 0;
@@ -637,7 +714,7 @@ export class Repo {
     for (let i = all.length - 1; i >= 0; i--) {
       if (all[i] >= target) await this.movePage(rel, all[i], all[i] + 1, files);
     }
-    await this.writePage(dir, divider, target, emptyPage(uuid(), nowIso()));
+    await this.writePage(dir, divider, target, page ?? emptyPage(uuid(), nowIso()));
     return target;
   }
 
@@ -857,11 +934,28 @@ export class Repo {
     if (!(await this.fs.exists(VRAC))) {
       await this.fs.mkdir(joinPath(VRAC, "Notes"));
       await this.writeMeta(VRAC, {
-        version: SCHEMA_VERSION, title: "Vrac", color: "#64748b",
+        version: META_VERSION, title: "Vrac", color: "#64748b",
         dividers: ["Notes"], viewMode: {},
       });
     }
   }
+}
+
+/**
+ * cahier.json apres le renommage ou le deplacement de l'intercalaire `from`
+ * en `to` : ordre, ancienne position, modes et fonds de page suivent, pour
+ * lui et tout ce qu'il contient. Les autres champs ne sont pas touches.
+ */
+export function remapMeta(meta: NotebookMeta, from: string, to: string): NotebookMeta {
+  meta.dividers = meta.dividers.map((d) => renamePrefix(d, from, to));
+  if (meta.lastPosition && typeof meta.lastPosition.divider === "string") {
+    meta.lastPosition.divider = renamePrefix(meta.lastPosition.divider, from, to);
+  }
+  if (meta.viewMode) meta.viewMode = remapKeys(meta.viewMode, from, to);
+  if (meta.paper && typeof meta.paper === "object" && !Array.isArray(meta.paper)) {
+    meta.paper = remapKeys(meta.paper, from, to);
+  }
+  return meta;
 }
 
 /** Horodatage lisible et triable d'une suppression : 2026-10-01_14-03-22-123. */
@@ -882,34 +976,62 @@ export function safeName(input: string): string {
 }
 
 /**
- * Texte d'une page sur le disque. Le JSON reste lisible a la main (un
- * champ par ligne), mais les points d'un trait tiennent sur une seule
- * ligne compacte : indentes, chaque point prenait 6 lignes et une page de
- * cours pesait 189 octets par point, reecrits et renvoyes a OneDrive a
- * chaque pause. Un trait par ligne garde aussi les differences lisibles.
+ * Texte d'une page sur le disque (format v2, CLAUDE.md section 2). Le JSON
+ * reste lisible a la main (un champ par ligne), mais chaque trait tient sur
+ * une seule ligne, ses points en tableaux plats (`pts`, `p`, `t`, voir
+ * encodeStroke) : en objets {x, y, p, t}, une page de cours pesait 60 a
+ * 190 octets par point, reecrits et renvoyes a OneDrive a chaque pause.
+ * Un trait par ligne garde aussi les differences lisibles. Le fichier porte
+ * toujours SCHEMA_VERSION : une page v1 lue puis modifiee repart en v2.
  */
 export function serializePage(page: Page): string {
   const compact: string[] = [];
-  const text = JSON.stringify(page, (key, value) => {
-    if (key === "points" && Array.isArray(value)) {
-      compact.push(JSON.stringify(value));
-      return `\u0000pts${compact.length - 1}\u0000`;
+  const text = JSON.stringify({ ...page, version: SCHEMA_VERSION }, (_key, value: unknown) => {
+    if (isMemoryStroke(value)) {
+      compact.push(JSON.stringify(diskStroke(value)));
+      return `\u0000stroke${compact.length - 1}\u0000`;
     }
     return value;
   }, 1);
-  return text.replace(/"\\u0000pts(\d+)\\u0000"/g, (_, i: string) => compact[Number(i)]);
+  return text.replace(/"\\u0000stroke(\d+)\\u0000"/g, (_, i: string) => compact[Number(i)]);
 }
 
 /**
- * Point d'entree unique des migrations de schema. Aujourd'hui la v1 est la
- * seule version ; la fonction existe pour que la v2 ait un endroit ou aller.
+ * Trait v2 tel qu'ecrit. `points: []` reste en tete, vide : la version 1
+ * de l'application (l'autre PC pas encore mis a jour) lit alors la page en
+ * lecture seule sans encre au lieu de planter sur des traits sans points.
+ * Les vrais points sont dans `pts` ; decodeStroke ignore `points` des que
+ * `pts` est la.
+ */
+function diskStroke(s: Stroke): Record<string, unknown> {
+  const { id, ...rest } = encodeStroke(s);
+  return { id, points: [], ...rest };
+}
+
+/**
+ * Point d'entree unique des migrations de schema : toute page lue (page,
+ * copie de conflit, fichier remis de la corbeille) passe ici.
+ *  - v1 : points en objets {x, y, p, t}, gardes tels quels ;
+ *  - v2 : points en tableaux plats, decodes en objets (decodeStroke).
+ * Les deux formats peuvent cohabiter dans un meme fichier (trait par trait).
+ * La page est ramenee a SCHEMA_VERSION en memoire mais rien n'est ecrit ici :
+ * une page v1 ouverte sans etre modifiee reste v1 sur le disque, lisible par
+ * l'autre PC tant qu'il n'est pas a jour. Une page plus recente garde sa
+ * version (lecture seule) ; ses traits sont decodes s'ils sont en v2, pour
+ * l'afficher.
  */
 export function migratePage(p: Page): Page {
-  // Version plus recente : rendue telle quelle, elle s'ouvre en lecture seule.
   if (!Array.isArray(p.blocks)) p.blocks = [];
+  p.blocks = p.blocks.filter((b) => !!b && typeof b === "object");
   for (const b of p.blocks) {
-    if (b.type === "math" && !Array.isArray(b.strokes)) b.strokes = [];
-    if (b.type === "ink" && !Array.isArray(b.strokes)) b.strokes = [];
+    if ((b.type === "math" || b.type === "ink") && !Array.isArray(b.strokes)) b.strokes = [];
+    if (b.type === "pdf" && !Array.isArray(b.annotations)) b.annotations = [];
+    const holder = b as unknown as Record<string, unknown>;
+    for (const key of ["strokes", "annotations"]) {
+      const list = holder[key];
+      if (Array.isArray(list)) holder[key] = list.map(decodeStroke);
+    }
   }
+  if (!isFutureVersion(p)) p.version = SCHEMA_VERSION;
   return p;
 }

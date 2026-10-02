@@ -18,6 +18,12 @@ export interface RecoResult {
   candidates: string[];
   /** Texte seulement : chaque mot avec sa position et ses traits. */
   words?: InkWord[];
+  /**
+   * Envoi partiel du fond de page (bands.ts) : ids des traits envoyes. Le
+   * resultat ne vaut que pour eux, les autres mots du bloc restent.
+   * Absent = le resultat couvre tout le bloc.
+   */
+  scope?: string[];
 }
 
 export interface RecognitionBackend {
@@ -306,6 +312,8 @@ export interface RecoJob {
   nextTry?: number;
   /** Dernier echec de CE job : un succes ailleurs ne l'efface pas. */
   error?: string;
+  /** Envoi partiel (une ou plusieurs bandes) : recopie dans RecoResult.scope. */
+  scope?: string[];
 }
 
 export type QueueListener = (state: QueueState) => void;
@@ -503,6 +511,7 @@ export class RecognitionQueue {
           continue;
         }
         this.inflight = null;
+        if (job.scope) result = { ...result, scope: job.scope };
         // Seule la version envoyee quitte la file : une version plus recente,
         // posee pendant l'aller-retour, attend son tour.
         if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);

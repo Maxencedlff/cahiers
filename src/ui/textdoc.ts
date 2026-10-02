@@ -15,6 +15,7 @@ import {
 } from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
 import { linesToReach } from "../core/textlayout";
+import { BLOCK_MAX_H } from "../core/paginate";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
 // fonctionne hors ligne et en amphi.
@@ -82,6 +83,17 @@ export interface DocImages {
   live?: (id: string) => { node: HTMLElement; width?: number; label: string; ready?: Promise<void> } | null;
   /** Appui sur un bloc vivant : la calculatrice le rouvre (« Mettre à jour »). */
   openLive?: (id: string) => void;
+}
+
+/**
+ * Photo plus haute qu'une page : reduite a la hauteur de page (largeur
+ * maximale deduite de ses proportions). Elle tient toujours sur une feuille
+ * A4, la pagination ne la coupe jamais (core/paginate.ts).
+ */
+function fitPageHeight(fig: HTMLElement, img: HTMLImageElement): void {
+  const { naturalWidth: w, naturalHeight: h } = img;
+  if (!w || !h) return;
+  fig.style.maxWidth = `calc(${((BLOCK_MAX_H * w) / h).toFixed(1)}px * var(--k, 1))`;
 }
 
 /** Fichier image d'un presse-papiers ou d'un depot, s'il y en a un. */
@@ -659,7 +671,7 @@ export class TextDoc {
       // hauteurs apres (en Tauri, le src n'arrive qu'apres l'IPC).
       this.imgReady.set(fig, info.url.then((u) => {
         img.src = u;
-        return img.decode().catch(() => undefined);
+        return img.decode().catch(() => undefined).then(() => fitPageHeight(fig, img));
       }).catch(() => { fig.classList.add("missing"); }));
     } else {
       fig.classList.add("missing");
@@ -1263,6 +1275,113 @@ export class TextDoc {
     }
     this.savedRange = r.cloneRange();
     lastDoc = this;
+  }
+
+  /* ---------------- pagination (core/paginate.ts, ui/pagebreak.ts) ---------------- */
+
+  /** Une formule est ouverte (champ MathLive) : la page ne se coupe pas pendant la saisie. */
+  get editingFormula(): boolean { return !!this.field; }
+
+  /**
+   * Coupe le texte au point `at` (debut d'une rangee, pagebreak.rowStart) :
+   * rend la fin, au format du disque, et la retire de la page. Si le
+   * curseur est dans la fin, `marker` y est pose : il suit le texte sur la
+   * page suivante (takeMarker). La page est prevenue (onChange).
+   */
+  splitOff(at: Range, marker: string): { tail: string; caret: boolean } {
+    const r = this.toEnd(at);
+    let caret = false;
+    const c = this.caretRange();
+    if (c && this.root.contains(c.startContainer) && r.isPointInRange(c.startContainer, c.startOffset)) {
+      c.insertNode(document.createTextNode(marker));
+      caret = true;
+    }
+    const tail = this.readTail(r);
+    r.deleteContents();
+    this.lastAuto = null;
+    this.lastLine = null;
+    if (caret) this.savedRange = null;
+    // Une ligne vide finale reste visible (meme regle que setContent).
+    const head = this.read();
+    if (head[head.length - 1]?.kind === "br" && this.root.lastChild?.nodeName === "BR") this.root.append(el("br"));
+    this.emit();
+    return { tail, caret };
+  }
+
+  /** Fin du texte a partir de `at`, au format du disque, sans rien retirer. */
+  tailFrom(at: Range): string {
+    return this.readTail(this.toEnd(at));
+  }
+
+  private toEnd(at: Range): Range {
+    const r = document.createRange();
+    r.setStart(at.startContainer, at.startOffset);
+    r.setEnd(this.root, this.root.childNodes.length);
+    return r;
+  }
+
+  private readTail(r: Range): string {
+    const tokens = this.readNodes(r.cloneContents());
+    // Le <br> de fin ajoute pour l'affichage n'est pas une ligne (voir read).
+    if (tokens[tokens.length - 1]?.kind === "br") tokens.pop();
+    return serializeDoc(normalizeTokens(tokens));
+  }
+
+  /**
+   * Retire `marker` du texte (pose par splitOff sur la page d'avant) et y met
+   * le curseur. Rend false s'il n'y est pas.
+   */
+  takeMarker(marker: string): boolean {
+    const walker = document.createTreeWalker(this.root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const t = n as Text;
+      const i = t.data.indexOf(marker);
+      if (i < 0) continue;
+      t.deleteData(i, marker.length);
+      const r = document.createRange();
+      r.setStart(t, i);
+      r.collapse(true);
+      this.root.focus({ preventScroll: true });
+      this.setCaret(r);
+      scrollCaretIntoView(this.root);
+      return true;
+    }
+    return false;
+  }
+
+  /** Curseur en nombre de caracteres depuis le debut du texte (annulation d'un debordement). */
+  caretOffset(): number | null {
+    const c = this.caretRange();
+    if (!c) return null;
+    const r = document.createRange();
+    r.setStart(this.root, 0);
+    r.setEnd(c.startContainer, c.startOffset);
+    return r.toString().length;
+  }
+
+  /** Pose le curseur a `offset` caracteres du debut (voir caretOffset). */
+  setCaretOffset(offset: number): void {
+    const walker = document.createTreeWalker(this.root, NodeFilter.SHOW_TEXT);
+    let left = offset;
+    const r = document.createRange();
+    let placed = false;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const len = (n.textContent ?? "").length;
+      if (left <= len) {
+        // Dans une formule ou un bloc : juste apres lui.
+        const atom = n.parentElement?.closest(".eq, .doc-img");
+        if (atom && this.root.contains(atom) && atom !== this.root) r.setStartAfter(atom);
+        else r.setStart(n, left);
+        placed = true;
+        break;
+      }
+      left -= len;
+    }
+    if (!placed) { r.selectNodeContents(this.root); r.collapse(false); }
+    r.collapse(true);
+    this.root.focus({ preventScroll: true });
+    this.setCaret(r);
+    scrollCaretIntoView(this.root);
   }
 
   /** Bloc vivant modifie (« Mettre à jour ») : redessine sur place. */

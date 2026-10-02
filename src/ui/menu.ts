@@ -1,14 +1,15 @@
 import { el, askText, onLongPress, pick, toast } from "./dom";
-import { NOTEBOOK_COLORS } from "../core/palette";
+import { NOTEBOOK_COLORS, PALETTE } from "../core/palette";
 import { VRAC, type Repo, type NotebookSummary, type OtherDir } from "../core/storage/repo";
 import {
   listFlags, sortFlags, DEFAULT_FLAG_NOTE,
   type FlagHit, type SearchHit, type SearchOptions,
 } from "../core/storage/search";
-import { parseQuery, queryReady, type ExcerptPart } from "../core/text/find";
+import { notebookMatches, parseQuery, queryReady, type ExcerptPart } from "../core/text/find";
 import { filterByTitle, gridStep } from "../core/nav";
+import { dividerLabel } from "../core/dividers";
 import type { Spot } from "../core/position";
-import type { Block } from "../core/types";
+import type { Block, ColorKey } from "../core/types";
 
 export interface MenuHost {
   repo: Repo;
@@ -19,6 +20,8 @@ export interface MenuHost {
   openSearch: () => void;
   /** Vue des reperes, de toutes les matieres ou d'une seule. */
   openFlags: (notebook?: string) => void;
+  /** Vue Reviser (extraits par couleur) ; `notebook: null` = toutes les matieres. */
+  openReview?: (o?: { notebook?: string | null; colors?: ColorKey[] }) => void;
   /** Marque un repere compris (true) ou le rend (false). false si rien n'a change. */
   setFlagResolved: (f: FlagHit, resolved: boolean) => Promise<boolean>;
   rootLabel: string;
@@ -103,7 +106,7 @@ export async function buildMenu(host: MenuHost): Promise<MenuScreen> {
       el("div", { class: "bar", style: { background: resume.color, width: "6px", height: "42px", borderRadius: "3px" } }),
       el("div", {},
         el("div", { class: "big" }, resume.title),
-        el("div", { class: "muted small" }, `${resume.divider}, page ${resume.page}`),
+        el("div", { class: "muted small" }, `${dividerLabel(resume.divider)}, page ${resume.page}`),
       ),
       el("div", { class: "spacer" }),
       el("span", { class: "muted small key-hint" }, "Entrée"),
@@ -279,7 +282,7 @@ function card(host: MenuHost, nb: NotebookSummary, usedColors: string[]): { wrap
     onLongPress(node, openMenu);
     wrap.append(el("button", {
       class: "ghost card-more",
-      title: `Renommer, couleur, supprimer : ${nb.meta.title}`,
+      title: `Réviser, renommer, couleur, supprimer : ${nb.meta.title}`,
       "aria-label": `Actions sur ${nb.meta.title}`,
       onclick: openMenu,
     }, "⋯"));
@@ -291,11 +294,14 @@ function card(host: MenuHost, nb: NotebookSummary, usedColors: string[]): { wrap
 async function notebookMenu(host: MenuHost, nb: NotebookSummary, usedColors: string[]): Promise<void> {
   const vrac = nb.dir === VRAC;
   const choice = await pick(nb.meta.title, [
+    ...(host.openReview ? [{ value: "review", label: "Réviser (théorèmes, définitions… par couleur)" }] : []),
     ...(vrac ? [] : [{ value: "rename", label: "Renommer" }]),
     { value: "color", label: "Couleur" },
     ...(vrac ? [] : [{ value: "delete", label: "Supprimer la matière" }]),
   ]);
-  if (choice === "rename") {
+  if (choice === "review") {
+    host.openReview?.({ notebook: nb.dir });
+  } else if (choice === "rename") {
     const next = await askText("Renommer la matière", "Nouveau nom (le dossier est renommé aussi)", nb.meta.title);
     if (next?.trim() && next.trim() !== nb.meta.title) await host.renameNotebook?.(nb.dir, next.trim());
   } else if (choice === "color") {
@@ -510,7 +516,7 @@ export async function buildFlagsView(host: MenuHost, onBack: () => void, noteboo
       el("div", { class: said ? "what" : "what muted" }, said || "Pas de texte à cet endroit (schéma, ou repère ancien)"),
       el("div", { class: "where" },
         // La matiere est deja en titre du groupe.
-        `${f.divider}, page ${f.page}`
+        `${dividerLabel(f.divider)}, page ${f.page}`
           + (f.created ? ` · ${relative(f.created)}` : "")),
     );
     open.addEventListener("keydown", (e) => {
@@ -640,7 +646,7 @@ export function buildSearchView(
       },
         excerptNode(h.parts),
         el("div", { class: "where" },
-          `${h.notebookTitle} · ${h.divider} p.${h.page} · ${BLOCK_LABEL[h.blockType] ?? h.blockType}`),
+          `${h.notebookTitle} · ${dividerLabel(h.divider)} p.${h.page} · ${BLOCK_LABEL[h.blockType] ?? h.blockType}`),
       );
       row.addEventListener("mouseenter", () => select(i));
       results.append(row);
@@ -673,12 +679,38 @@ export function buildSearchView(
     if (e.key === "Escape") { e.preventDefault(); onBack(); }
   });
 
+  // Puces de couleur : la vue Reviser sur cette couleur, dans le cahier
+  // vise (ou la matiere @ tapee), sinon dans toutes les matieres.
+  const reviewChips = host.openReview
+    ? el("div", { class: "review-chips search-review", role: "group", "aria-label": "Réviser une couleur" },
+        el("span", { class: "muted small" }, "Réviser :"),
+        ...PALETTE.map((p) => el("button", {
+          class: "review-chip",
+          title: `Tous les extraits « ${p.label} »${only && opts.notebook ? "" : " (matière @ tapée, sinon toutes)"} (Ctrl+Maj+K)`,
+          onclick: () => {
+            const at = parseQuery(input.value).notebook ? matchNotebook() : null;
+            host.openReview?.({ notebook: only && opts.notebook ? opts.notebook.dir : at, colors: [p.key] });
+          },
+        }, el("span", { class: "review-chip-in" }, el("i", { class: "dot", style: { background: p.ink } }), p.label))),
+      )
+    : null;
+  let dirsSeen: { dir: string; title: string }[] = [];
+  void host.repo.listNotebookDirs()
+    .then((dirs) => Promise.all(dirs.map(async (dir) => ({ dir, title: (await host.repo.readMeta(dir)).title }))))
+    .then((l) => { dirsSeen = l; }, () => undefined);
+  /** Matiere designee par « @maths » (meme regle que la recherche). */
+  const matchNotebook = (): string | null => {
+    const q = parseQuery(input.value);
+    return dirsSeen.find((d) => notebookMatches(q, d.dir, d.title))?.dir ?? null;
+  };
+
   const inner = el("div", { class: "screen-inner" },
     el("div", { class: "row" },
       el("button", { onclick: onBack }, "Retour"),
       el("h1", { style: { margin: "0 0 0 8px" } }, "Recherche"),
     ),
     el("div", { class: "search-bar" }, input, scope),
+    reviewChips,
     infoRow, results,
   );
   setTimeout(() => { input.focus(); input.select(); }, 40);

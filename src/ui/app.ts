@@ -1,10 +1,13 @@
 import {
   el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick,
-  appendToToast, dismissPageToasts, APP_TOAST,
+  appendToToast, dismissPageToasts, APP_TOAST, type DialogField,
 } from "./dom";
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
 import { pageListDialog } from "./pagelist";
 import { buildProbe } from "./probe";
+import { buildReviewView, markRect, type ReviewState, type ReviewWhere } from "./review";
+import { REVIEW_COLORS, focusQuery, type ReviewItem } from "../core/review";
+import type { Bounds } from "../core/ink/stroke";
 import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
 import { insertMathTemplate, isEditingDoc, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
@@ -15,13 +18,19 @@ import { uuid } from "../core/id";
 import { calcSpecOf, graphSpecOf, type CalcSpec, type GraphSpec } from "../core/liveblock";
 import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
 import { Positions } from "../core/position";
-import { NavHistory, dayLabel, dropIndex, moveItem, moveTo, pickSplitDivider, type NavSpot } from "../core/nav";
+import { NavHistory, dayLabel, dropIndex, pickSplitDivider, type NavSpot } from "../core/nav";
+import {
+  MAX_DEPTH, defaultExpanded, depthOf, dividerLabel, expandedChain, findNode, flattenTree,
+  isUnder, leafName, moveAmongSiblings, moveRefusal, openableDividers, parentPath, parsePagePath,
+  renamePrefix, subtreeHeight, type DividerNode,
+} from "../core/dividers";
 import { searchAll, type FlagHit } from "../core/storage/search";
 import type { FsAdapter } from "../core/storage/fs";
 import {
   RecognitionQueue, SEND_DEBOUNCE_MS, AUTO_DEBOUNCE_MS, MyScriptBackend, NoBackend, testKeys,
-  type RecognitionBackend, type QueueState, type RecoResult, type MyScriptKeys,
+  type RecognitionBackend, type QueueState, type RecoResult, type MyScriptKeys, type RecoJob,
 } from "../core/ink/recognizer";
+import { planIncremental } from "../core/ink/bands";
 import {
   applyToBlock, findBlockOnDisk, isPending, markFailed, parseBlockKey, updateBlockOnDisk,
   type BlockRef,
@@ -40,7 +49,7 @@ import { showShortcuts } from "./help";
 import type { Presence } from "../platform";
 import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
 
-type Screen = "menu" | "notebook" | "search" | "flags" | "probe";
+type Screen = "menu" | "notebook" | "search" | "flags" | "probe" | "review";
 type Tool = ToolKind | "region" | "textregion" | "lasso" | "space";
 /** Lasso et insertion d'espace : la selection n'existe qu'avec eux. */
 const isSelect = (t: Tool): t is "lasso" | "space" => t === "lasso" || t === "space";
@@ -63,7 +72,13 @@ interface Tab {
   notebook: string;
   title: string;
   color: string;
+  /** Chemin de l'intercalaire dans la matiere (« E3A/S1/Chapitre 1 », D4). */
   divider: string;
+  /**
+   * Groupe dont la sous-bande est ouverte : choisi d'un appui sur un
+   * groupe ; absent, celui de l'intercalaire affiche (defaultExpanded).
+   */
+  expanded?: string | null;
   view: PageView | null;
   host: HTMLElement;
   /** Dernier usage (ms) : rouvrir une matiere reprend son onglet le plus recent. */
@@ -125,6 +140,13 @@ export class App {
   private auxFrom: "menu" | "notebook" = "menu";
   /** Derniere recherche tapee, reproposee au Ctrl+K suivant. */
   private lastQuery = "";
+  /** Filtres de la vue Reviser, gardes d'une ouverture a l'autre. */
+  private reviewState: ReviewState = { colors: [...REVIEW_COLORS] };
+  /**
+   * Taille de la pile de retour juste apres un saut depuis la vue Reviser :
+   * Alt+← a cette taille revient a la vue (et non a la page d'avant).
+   */
+  private reviewBack: number | null = null;
   /**
    * La touche d'avant etait un Echap, sans appui ni autre touche entre les
    * deux : le suivant va au menu (escapeAction).
@@ -375,6 +397,7 @@ export class App {
         void this.openAt(dir, divider, page, blockId, query),
       openSearch: () => void this.showSearch(),
       openFlags: (notebook?: string) => void this.showFlags(notebook),
+      openReview: (o?: { notebook?: string | null; colors?: ColorKey[] }) => void this.showReview(o),
       setFlagResolved: (f: FlagHit, resolved: boolean) => this.setFlagResolved(f, resolved),
       lastSpot: (dirs: string[]) => this.positions.latest(dirs),
       createNotebook: (title: string, color: string) => this.createNotebook(title, color),
@@ -430,11 +453,48 @@ export class App {
     this.main.append(await buildFlagsView(this.menuHost(), () => this.leaveAux(), notebook));
   }
 
-  /** Ouvre une page et va au bloc (resultat de recherche, repere). */
-  private async openAt(dir: string, divider: string, page: number, blockId: string, query?: string): Promise<void> {
+  /**
+   * Vue Reviser (lot 11) : extraits d'une couleur par matiere. Sans
+   * argument, les derniers filtres ; depuis un cahier, sa matiere.
+   */
+  private async showReview(o?: { notebook?: string | null; colors?: ColorKey[] }): Promise<void> {
+    this.noteAuxFrom();
+    const st = this.reviewState;
+    const from = this.auxFrom === "notebook" ? this.focusedTab()?.notebook : undefined;
+    const nb = o ? (o.notebook === null ? undefined : o.notebook ?? from ?? st.notebook) : st.notebook;
+    if (nb !== st.notebook || o?.colors) { st.divider = undefined; st.focusKey = undefined; st.scroll = undefined; }
+    st.notebook = nb;
+    if (o?.colors?.length) st.colors = [...o.colors];
+    this.screen = "review";
+    dismissPageToasts();
+    await this.flushAll();
+    clear(this.main);
+    this.paintTabs();
+    this.main.append(buildReviewView({
+      repo: this.repo,
+      openItem: (w, item) => void this.openReviewItem(w, item),
+      openPage: (w) => void this.openReviewItem(w, null),
+    }, () => this.leaveAux(), st));
+  }
+
+  /** Extrait choisi dans la vue Reviser : la page, a l'endroit ; Alt+← y revient. */
+  private async openReviewItem(w: ReviewWhere, item: ReviewItem | null): Promise<void> {
+    if (!item) await this.openAt(w.notebook, w.divider, w.page, "");
+    else if (item.kind === "text") await this.openAt(w.notebook, w.divider, w.page, item.blockId, focusQuery(item.plain));
+    // Zone reconnue : son cadre suffit a focusBlock. Encre libre : le cadre de l'extrait.
+    else if (item.kind === "math" || item.kind === "zone") await this.openAt(w.notebook, w.divider, w.page, item.blockId);
+    else await this.openAt(w.notebook, w.divider, w.page, item.blockId, undefined, item.box);
+    this.reviewBack = this.nav.size;
+    toast("Alt+← revient à la révision", "info", 2400, undefined, "nav-back");
+  }
+
+  /** Ouvre une page et va au bloc (resultat de recherche, repere) ; `rect` : cadre a montrer. */
+  private async openAt(dir: string, divider: string, page: number, blockId: string, query?: string, rect?: Bounds): Promise<void> {
+    this.reviewBack = null;
     this.noteJump();
     const tab = await this.openNotebook(dir, divider, page);
     await tab?.view?.focusBlock(page, blockId, query);
+    if (rect && tab?.view) markRect(tab.view.root, page, rect);
   }
 
   /* ---------------- retour arriere ---------------- */
@@ -457,6 +517,12 @@ export class App {
 
   /** Alt+← ou bouton retour de la souris. */
   private async goBack(): Promise<void> {
+    // Venu de la vue Reviser sans autre saut depuis : on y revient.
+    if (this.reviewBack !== null && this.screen === "notebook" && this.nav.size === this.reviewBack) {
+      this.reviewBack = null;
+      await this.showReview();
+      return;
+    }
     const spot = this.nav.pop(this.screen === "notebook" ? this.hereSpot() : null);
     if (!spot) {
       toast("Rien à reprendre : Alt+← revient après un saut (recherche, repère, lien, liste des pages)", "info", 2400, undefined, "nav-back");
@@ -464,7 +530,7 @@ export class App {
     }
     try {
       const tab = await this.openNotebook(spot.notebook, spot.divider, spot.page);
-      if (tab && tab.divider !== spot.divider) toast(`${spot.divider} n'existe plus dans ce cahier`, "warn", 3000);
+      if (tab && tab.divider !== spot.divider) toast(`${dividerLabel(spot.divider)} n'existe plus dans ce cahier`, "warn", 3000);
     } catch (e) {
       toast(`Cet endroit n'existe plus : ${(e as Error).message}`, "warn", 4000);
     }
@@ -556,9 +622,9 @@ export class App {
     this.rememberTab(tab);
     if (this.screen !== "notebook") return;
     for (const t of this.tabs) t.host.classList.toggle("focused", this.shown(t) && t.id === id);
-    const bar = this.main.querySelector(".dividers");
-    void this.repo.listDividers(tab.notebook).then((ds) => {
-      if (this.focusedId === id && bar?.isConnected) bar.replaceWith(this.buildDividerBar(tab, ds));
+    const bar = this.main.querySelector(".divider-strip");
+    void this.repo.listDividerTree(tab.notebook).then((tree) => {
+      if (this.focusedId === id && bar?.isConnected) bar.replaceWith(this.buildDividerBar(tab, tree));
     });
     this.paintToolbar();
     this.paintTabs();
@@ -587,7 +653,8 @@ export class App {
    */
   async openNotebook(dir: string, divider?: string, page?: number): Promise<Tab | undefined> {
     const meta = await this.repo.readMeta(dir);
-    const dividers = await this.repo.listDividers(dir);
+    const tree = await this.repo.listDividerTree(dir);
+    const dividers = flattenTree(tree);
     if (dividers.length === 0) dividers.push(await this.repo.createDivider(dir, "Cours"));
     const wanted = divider && dividers.includes(divider) ? divider : undefined;
     // Intercalaire demande disparu (renomme, a la corbeille) : sa page ne
@@ -609,7 +676,10 @@ export class App {
       // Premier onglet de ce cahier : l'autre PC l'a-t-il ouvert ? Avant le
       // montage, pour qu'une vue en lecture seule ne cree meme pas de page.
       if (!mine.length) await this.enterNotebook(dir);
-      const target = wanted ?? this.positions.dividerFor(dir, dividers, meta.lastPosition) ?? dividers[0];
+      // Faute de position, le premier intercalaire qui a des pages (pas un
+      // groupe de rangement, qui n'en montrerait aucune).
+      const target = wanted ?? this.positions.dividerFor(dir, dividers, meta.lastPosition)
+        ?? openableDividers(tree)[0] ?? dividers[0];
       tab = this.makeTab(dir, meta, target);
       this.tabs.push(tab);
       await this.mountView(tab, page ?? this.positions.pageFor(dir, target, meta.lastPosition));
@@ -639,8 +709,8 @@ export class App {
       getWidth: () => this.width,
       touchRole: () => this.touchRole(),
       onRegionDone: () => this.restoreTool(),
-      requestRecognition: (key, kind, strokes, auto) => this.enqueue(key, kind, strokes, auto),
-      resumeRecognition: (key, kind, strokes) => this.resume(key, kind, strokes),
+      requestRecognition: (key, kind, strokes, auto, partial) => this.enqueue(key, kind, strokes, auto, partial),
+      resumeRecognition: (key, kind, strokes, partial) => this.resume(key, kind, strokes, partial),
       cancelRecognition: (key) => this.cancelRecognition(key),
       onDirty: () => this.paintStatus(),
       // Seule la vue du panneau vise pilote l'indicateur de la colonne.
@@ -650,6 +720,8 @@ export class App {
         }
       },
       openLink: (target) => void this.followLink(target),
+      // Feuille d'un groupe sans pages : un appui ouvre l'un de ses intercalaires.
+      openDivider: (d) => void this.switchDividerAndRender(tab, d),
       onTrashed: (entry) => this.offerRestore(entry),
       rememberPage: (nb, d, n) => this.positions.record(nb, d, n),
       onConflictsChanged: () => this.paintConflictBadges(),
@@ -683,6 +755,8 @@ export class App {
     // La page quittee est retenue : on y revient en recliquant l'intercalaire.
     this.rememberTab(tab);
     tab.divider = divider;
+    // La sous-bande suit l'intercalaire ouvert.
+    tab.expanded = undefined;
     const legacy = page == null ? (await this.repo.readMeta(tab.notebook)).lastPosition : undefined;
     await this.mountView(tab, page ?? this.positions.pageFor(tab.notebook, divider, legacy));
     this.rememberTab(tab);
@@ -741,7 +815,9 @@ export class App {
         draggable: "true",
       },
         el("span", { class: "dot", style: { background: tab.color } }),
-        el("span", { class: "label" }, `${tab.title} · ${tab.divider}`),
+        // Le dernier niveau seulement : le chemin complet est dans l'infobulle.
+        el("span", { class: "label", title: `${tab.title} · ${dividerLabel(tab.divider)}` },
+          `${tab.title} · ${leafName(tab.divider)}`),
         el("button", {
           class: "close",
           title: titleOf("Fermer l'onglet", "closeTab"),
@@ -807,13 +883,13 @@ export class App {
     if (this.splitId && !other) this.splitId = null;
     if (other && !other.view) await this.mountView(other, this.positions.pageFor(other.notebook, other.divider));
     const focused = this.focusedTab() ?? tab;
-    const dividers = await this.repo.listDividers(focused.notebook);
+    const tree = await this.repo.listDividerTree(focused.notebook);
     // Outils a gauche, calculatrice a droite : la hauteur de l'ecran reste
     // a la feuille.
     const tools = this.buildToolbar();
     const calcSide = el("aside", { class: "side-calc closed" });
     const work = el("div", { class: "work" });
-    this.main.append(this.buildDividerBar(focused, dividers), work);
+    this.main.append(this.buildDividerBar(focused, tree), work);
     this.calcSlot = { side: calcSide, work };
     // Fermee par defaut (D6) : mathjs n'est charge qu'au premier Ctrl+L.
     if (this.settings.calcOpen || this.calculator) {
@@ -850,7 +926,7 @@ export class App {
     if (this.splitId) pane.append(el("div", { class: "pane-head" },
       el("span", { class: "dot", style: { background: tab.color, width: "9px", height: "9px", borderRadius: "50%" } }),
       el("strong", {}, tab.title),
-      el("span", { class: "muted" }, tab.divider),
+      el("span", { class: "muted" }, dividerLabel(tab.divider)),
       el("div", { class: "spacer" }),
       // Les deux commandes du split, une seule fois, sur le panneau droit.
       isRight
@@ -904,36 +980,161 @@ export class App {
     });
   }
 
-  private buildDividerBar(tab: Tab, dividers: string[]): HTMLElement {
-    const bar = el("div", { class: "dividers", dataset: { notebook: tab.notebook } });
-    for (const d of dividers) {
+  /**
+   * Bande d'intercalaires (D4, palier 2) : le premier niveau, puis, quand
+   * un groupe est ouvert (E3A, S1), une sous-bande : fil d'Ariane, pages
+   * du groupe lui-meme s'il en a, ses intercalaires et « + ». Deux rangees
+   * au plus, quel que soit le niveau : la feuille garde sa hauteur.
+   * Clavier : Tab, Entree, fleches (← → dans une rangee, ↓ vers la
+   * sous-bande, ↑ vers la bande).
+   */
+  private buildDividerBar(tab: Tab, tree: DividerNode[]): HTMLElement {
+    const strip = el("div", { class: "divider-strip", dataset: { notebook: tab.notebook } });
+    let open = tab.expanded === undefined ? defaultExpanded(tree, tab.divider) : tab.expanded;
+    // Groupe disparu ou vide (renomme dans l'explorateur) : celui par defaut.
+    if (open && !findNode(tree, open)?.children.length) open = defaultExpanded(tree, tab.divider);
+    if (open && !findNode(tree, open)?.children.length) open = null;
+
+    const addNode = (row: HTMLElement, n: DividerNode, sibs: string[]) => {
+      const group = n.children.length > 0;
+      const opened = group && !!open && isUnder(open, n.path);
+      const active = tab.divider === n.path || (group && isUnder(tab.divider, n.path));
       const node = el("button", {
-        class: `divider-tab${d === tab.divider ? " active" : ""}`,
-        dataset: { divider: d },
-        title: "Glisser pour déplacer (au doigt ou au stylet : appui long puis glisser). "
-          + "Appui long ou clic droit : ouvrir à droite, renommer, déplacer, supprimer",
-        onclick: () => void this.switchDividerAndRender(tab, d),
-      }, d);
-      this.wireDividerDrag(bar, node, tab, d, dividers);
-      bar.append(node);
-    }
-    bar.append(el("button", {
+        class: `divider-tab${active ? " active" : ""}${group ? " group" : ""}${opened ? " open" : ""}`,
+        dataset: { divider: n.path, sib: "1", ...(group ? { group: "1" } : {}) },
+        "aria-expanded": group ? String(opened) : null,
+        title: (group
+          ? `Groupe ${n.name} : un appui montre ses intercalaires. `
+          : "")
+          + "Glisser pour déplacer (au doigt ou au stylet : appui long puis glisser). "
+          + "Appui long ou clic droit : ouvrir à droite, renommer, ranger dans un groupe, supprimer",
+        onclick: (e: MouseEvent) => {
+          if (group) this.toggleGroup(tab, n.path, opened, e.detail === 0);
+          else void this.switchDividerAndRender(tab, n.path);
+        },
+      }, n.name, group ? el("span", { class: "chev", "aria-hidden": "true" }, opened ? "▾" : "▸") : null);
+      this.wireDividerDrag(row, node, tab, n.path, sibs);
+      row.append(node);
+    };
+
+    const top = el("div", { class: "dividers" });
+    const topSibs = tree.map((n) => n.path);
+    for (const n of tree) addNode(top, n, topSibs);
+    top.append(el("button", {
       class: "divider-tab",
       title: titleOf("Nouvel intercalaire", "newDivider"),
       "aria-label": "Nouvel intercalaire",
-      onclick: () => void this.newDivider(tab),
+      onclick: () => void this.newDivider(tab, ""),
     }, "+"));
+    strip.append(top);
+
+    if (open) {
+      const group = findNode(tree, open)!;
+      const sub = el("div", { class: "dividers sub", "aria-label": `Intercalaires de ${dividerLabel(open)}` });
+      // Fil d'Ariane : le dernier niveau referme la sous-bande, un autre y remonte.
+      for (const g of expandedChain(open)) {
+        const last = g === open;
+        sub.append(el("button", {
+          class: `divider-crumb${last ? " current" : ""}`,
+          title: last ? `Refermer ${leafName(g)}` : `Revenir à ${leafName(g)}`,
+          onclick: (e: MouseEvent) => this.toggleGroup(tab, g, last, e.detail === 0),
+        }, leafName(g), el("span", { class: "chev", "aria-hidden": "true" }, "›")));
+      }
+      // Le groupe a aussi ses propres pages : elles restent un intercalaire.
+      if (group.pages) {
+        sub.append(el("button", {
+          class: `divider-tab own${tab.divider === open ? " active" : ""}`,
+          dataset: { divider: open },
+          title: `Pages rangées directement dans ${group.name}`,
+          onclick: () => void this.switchDividerAndRender(tab, open!),
+        }, `Pages de ${group.name}`));
+      }
+      const sibs = group.children.map((c) => c.path);
+      for (const c of group.children) addNode(sub, c, sibs);
+      if (depthOf(open) < MAX_DEPTH) {
+        sub.append(el("button", {
+          class: "divider-tab",
+          title: `Nouvel intercalaire dans ${dividerLabel(open)}`,
+          "aria-label": `Nouvel intercalaire dans ${dividerLabel(open)}`,
+          onclick: () => void this.newDivider(tab, open!),
+        }, "+"));
+      }
+      strip.append(sub);
+    }
+    strip.addEventListener("keydown", (e) => this.dividerKeys(e, strip));
     // Pastilles des copies de conflit, une fois la bande a l'ecran.
-    queueMicrotask(() => { if (bar.isConnected) this.paintConflictBadges(); });
-    return bar;
+    queueMicrotask(() => { if (strip.isConnected) this.paintConflictBadges(); });
+    return strip;
   }
 
-  /** « + » de la bande ou Ctrl+T : un intercalaire de plus, ouvert aussitot. */
-  private async newDivider(tab: Tab): Promise<void> {
+  /** Fleches dans la bande d'intercalaires : sans souris ni doigt. */
+  private dividerKeys(e: KeyboardEvent, strip: HTMLElement): void {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>("button");
+    const row = btn?.parentElement;
+    if (!btn || !row || !row.classList.contains("dividers")) return;
+    const rows = [...strip.querySelectorAll<HTMLElement>(":scope > .dividers")];
+    const items = [...row.querySelectorAll<HTMLElement>(":scope > button")];
+    const i = items.indexOf(btn);
+    let next: HTMLElement | undefined;
+    if (e.key === "ArrowRight") next = items[i + 1];
+    else if (e.key === "ArrowLeft") next = items[i - 1];
+    else if (e.key === "ArrowDown") {
+      const below = rows[rows.indexOf(row) + 1];
+      // Groupe ferme : ↓ l'ouvre et donne le focus a son premier intercalaire.
+      if (btn.dataset.group && btn.getAttribute("aria-expanded") !== "true") { btn.click(); e.preventDefault(); return; }
+      next = below?.querySelector<HTMLElement>(".divider-tab.active, .divider-tab[data-divider]") ?? undefined;
+    } else if (e.key === "ArrowUp") {
+      const above = rows[rows.indexOf(row) - 1];
+      next = above?.querySelector<HTMLElement>(".divider-tab.open, .divider-tab.active") ?? undefined;
+    } else return;
+    e.preventDefault();
+    next?.focus();
+  }
+
+  /**
+   * Ouvre ou referme la sous-bande d'un groupe, sans changer de page.
+   * Au clavier, le premier intercalaire du groupe prend le focus.
+   */
+  private toggleGroup(tab: Tab, path: string, opened: boolean, keyboard = false): void {
+    tab.expanded = opened ? (parentPath(path) || null) : path;
+    void this.repo.listDividerTree(tab.notebook).then((tree) => {
+      const strip = this.main.querySelector(".divider-strip");
+      if (!strip?.isConnected || (this.focusedTab() ?? this.activeTab()) !== tab) return;
+      const next = this.buildDividerBar(tab, tree);
+      strip.replaceWith(next);
+      if (!keyboard) return;
+      const target = opened
+        ? next.querySelector<HTMLElement>(`[data-divider="${CSS.escape(path)}"]`)
+        : next.querySelector<HTMLElement>(".dividers.sub .divider-tab[data-divider]");
+      target?.focus();
+    });
+  }
+
+  /**
+   * « + » de la bande ou Ctrl+T : un intercalaire de plus, ouvert aussitot,
+   * dans le groupe `parent` ("" = premier niveau). Un nom de groupe
+   * facultatif le range dans un nouveau groupe (S1 → Chapitre 1).
+   */
+  private async newDivider(tab: Tab, parent = ""): Promise<void> {
     if (this.refuseLocked(tab.notebook) || document.querySelector(".backdrop")) return;
-    const name = await askText("Nouvel intercalaire", "Nom", "");
-    if (!name) return;
-    const d = await this.repo.createDivider(tab.notebook, name);
+    const fields: DialogField[] = [{ name: "name", label: "Nom", value: "" }];
+    if (depthOf(parent) + 2 <= MAX_DEPTH) {
+      fields.push({
+        name: "group", label: "Dans un nouveau groupe (facultatif)", value: "",
+        placeholder: "ex. S1 : crée le dossier S1 qui le contient",
+      });
+    }
+    const r = await askFields(parent ? `Nouvel intercalaire dans ${dividerLabel(parent)}` : "Nouvel intercalaire", fields, "Créer");
+    if (!r || !r.name?.trim()) return;
+    let d: string;
+    try {
+      const where = r.group?.trim() ? await this.repo.createDivider(tab.notebook, r.group, parent) : parent;
+      d = await this.repo.createDivider(tab.notebook, r.name, where);
+    } catch (e) {
+      toast(`Création impossible : ${(e as Error).message}`, "warn", 5000);
+      return;
+    }
     await this.switchDividerAndRender(tab, d);
   }
 
@@ -951,7 +1152,8 @@ export class App {
     } | null = null;
     /** Le clic qui suit un glisser ou un menu ne change pas d'intercalaire. */
     let swallow = false;
-    const tabs = () => [...bar.querySelectorAll<HTMLElement>(".divider-tab[data-divider]")];
+    // Seulement les voisins de la meme rangee (meme groupe).
+    const tabs = () => [...bar.querySelectorAll<HTMLElement>(":scope > .divider-tab[data-sib]")];
     const from = () => dividers.indexOf(d);
     const target = (x: number) => {
       const centers = tabs().map((t) => { const r = t.getBoundingClientRect(); return r.left + r.width / 2; });
@@ -1048,7 +1250,7 @@ export class App {
   /** Intercalaire glisse a une autre place ; l'ordre est ecrit dans cahier.json. */
   private async reorderDivider(tab: Tab, d: string, index: number): Promise<void> {
     if (this.refuseLocked(tab.notebook)) return;
-    const order = moveTo(await this.repo.listDividers(tab.notebook), d, index);
+    const order = moveAmongSiblings(await this.repo.listDividers(tab.notebook), d, index);
     try {
       await this.repo.reorderDividers(tab.notebook, order);
     } catch (e) {
@@ -1058,34 +1260,50 @@ export class App {
     await this.renderNotebookScreen();
   }
 
-  /** Menu d'un intercalaire : a droite, renommer, deplacer, supprimer. */
+  /**
+   * Menu d'un intercalaire : a droite, renommer, deplacer parmi ses voisins,
+   * ranger dans un groupe ou l'en sortir (D4), supprimer.
+   */
   private async dividerMenu(tab: Tab, d: string, dividers: string[]): Promise<void> {
     const i = dividers.indexOf(d);
     const holder = this.tabs.find((t) => t.notebook === tab.notebook && t.divider === d);
     const left = this.activeTab();
+    const node = findNode(await this.repo.listDividerTree(tab.notebook), d);
+    const isGroup = !!node?.children.length;
     const options: { value: string; label: string }[] = [];
     // Cours a gauche, Exos a droite (section 5) : pas pour l'intercalaire
-    // deja a gauche, ni pour celui deja a droite.
-    if (holder?.id !== left?.id && (!holder || holder.id !== this.splitId)) {
+    // deja a gauche, ni pour celui deja a droite, ni pour un simple groupe.
+    if ((!isGroup || node?.pages) && holder?.id !== left?.id && (!holder || holder.id !== this.splitId)) {
       options.push({ value: "right", label: "Ouvrir à droite" });
     }
     options.push({ value: "rename", label: "Renommer" });
     if (i > 0) options.push({ value: "left", label: "Déplacer à gauche" });
     if (i >= 0 && i < dividers.length - 1) options.push({ value: "next", label: "Déplacer à droite" });
-    options.push({ value: "delete", label: "Supprimer l'intercalaire" });
-    const choice = await pick(d, options);
+    if (isGroup && depthOf(d) < MAX_DEPTH) options.push({ value: "add", label: `Nouvel intercalaire dans ${node!.name}` });
+    options.push({ value: "group", label: "Ranger dans un groupe…" });
+    if (parentPath(d)) options.push({ value: "out", label: `Sortir de ${leafName(parentPath(d))}` });
+    options.push({ value: "delete", label: isGroup ? "Supprimer le groupe" : "Supprimer l'intercalaire" });
+    const choice = await pick(dividerLabel(d), options);
     if (choice && choice !== "right" && this.refuseLocked(tab.notebook)) return;
     if (choice === "right") {
       await this.openRight(tab.notebook, d);
     } else if (choice === "rename") {
-      const next = await askText("Renommer l'intercalaire", "Nouveau nom", d);
+      const next = await askText(isGroup ? "Renommer le groupe" : "Renommer l'intercalaire", "Nouveau nom", leafName(d));
       if (next) await this.renameDivider(tab, d, next);
     } else if (choice === "left" || choice === "next") {
-      await this.moveDivider(tab, d, choice === "left" ? -1 : 1);
+      await this.moveDivider(tab, d, choice === "left" ? -1 : 1, dividers);
+    } else if (choice === "add") {
+      await this.newDivider(tab, d);
+    } else if (choice === "group") {
+      await this.chooseGroupFor(tab, d);
+    } else if (choice === "out") {
+      await this.moveDividerTo(tab, d, parentPath(parentPath(d)));
     } else if (choice === "delete") {
+      const inside = node ? flattenTree(node.children).length : 0;
       const ok = await confirmDialog(
-        "Supprimer l'intercalaire",
-        `${d} et toutes ses pages partent à la corbeille (dossier ESEO/.corbeille). `
+        isGroup ? "Supprimer le groupe" : "Supprimer l'intercalaire",
+        `${dividerLabel(d)} et toutes ses pages${inside ? `, avec ${inside} intercalaire${inside > 1 ? "s" : ""} rangé${inside > 1 ? "s" : ""} dedans,` : ""} `
+          + "partent à la corbeille (dossier ESEO/.corbeille). "
           + "Le bouton « Annuler » du message qui suit le remet en place.",
         "Supprimer",
       );
@@ -1093,9 +1311,11 @@ export class App {
     }
   }
 
-  /** Change l'intercalaire de place ; l'ordre est ecrit dans cahier.json. */
-  private async moveDivider(tab: Tab, d: string, delta: number): Promise<void> {
-    const order = moveItem(await this.repo.listDividers(tab.notebook), d, delta);
+  /** Change l'intercalaire de place parmi ses voisins ; l'ordre est ecrit dans cahier.json. */
+  private async moveDivider(tab: Tab, d: string, delta: number, siblings: string[]): Promise<void> {
+    const i = siblings.indexOf(d);
+    if (i < 0) return;
+    const order = moveAmongSiblings(await this.repo.listDividers(tab.notebook), d, i + delta);
     try {
       await this.repo.reorderDividers(tab.notebook, order);
     } catch (e) {
@@ -1103,6 +1323,81 @@ export class App {
       return;
     }
     await this.renderNotebookScreen();
+  }
+
+  /**
+   * « Ranger dans un groupe » : les groupes ou il peut aller (3 niveaux au
+   * plus), un nouveau groupe a son niveau, ou le premier niveau.
+   */
+  private async chooseGroupFor(tab: Tab, d: string): Promise<void> {
+    const tree = await this.repo.listDividerTree(tab.notebook);
+    const node = findNode(tree, d);
+    if (!node) return;
+    const height = subtreeHeight(node);
+    const options: { value: string; label: string }[] = flattenTree(tree)
+      .filter((p) => findNode(tree, p)!.children.length && !moveRefusal(d, p, height))
+      .map((p) => ({ value: `g:${p}`, label: dividerLabel(p) }));
+    if (depthOf(d) + height <= MAX_DEPTH) options.push({ value: "new", label: "Nouveau groupe…" });
+    if (parentPath(d)) options.push({ value: "top", label: "Premier niveau de la matière" });
+    if (!options.length) {
+      toast(`Aucun groupe possible : au plus ${MAX_DEPTH} niveaux sous la matière`, "warn", 4000);
+      return;
+    }
+    const choice = await pick(`Ranger ${leafName(d)} dans…`, options);
+    if (!choice) return;
+    if (choice === "top") { await this.moveDividerTo(tab, d, ""); return; }
+    if (choice.startsWith("g:")) { await this.moveDividerTo(tab, d, choice.slice(2)); return; }
+    const name = await askText("Nouveau groupe", `Nom du groupe qui contiendra ${leafName(d)}`, "");
+    if (!name?.trim()) return;
+    let group: string;
+    try {
+      group = await this.repo.createDivider(tab.notebook, name, parentPath(d));
+    } catch (e) {
+      toast(`Création impossible : ${(e as Error).message}`, "warn", 5000);
+      return;
+    }
+    await this.moveDividerTo(tab, d, group);
+  }
+
+  /**
+   * Range l'intercalaire (ou le groupe) dans `toParent` : le dossier reel
+   * est deplace. Ce qui attend d'etre ecrit l'est d'abord, puis les vues
+   * concernees sont remontees sur le nouveau chemin.
+   */
+  private async moveDividerTo(tab: Tab, d: string, toParent: string): Promise<void> {
+    if (this.refuseLocked(tab.notebook)) return;
+    if (!(await this.settle(tab.notebook, d, "déplacement annulé", true))) return;
+    let applied: string;
+    try {
+      applied = await this.repo.moveDivider(tab.notebook, d, toParent);
+    } catch (e) {
+      toast(`Déplacement impossible : ${(e as Error).message}`, "warn", 5000);
+      return;
+    }
+    await this.retarget(tab.notebook, d, applied);
+    for (const t of this.tabs) if (t.notebook === tab.notebook) t.expanded = undefined;
+    // On voit ou il est arrive.
+    tab.expanded = toParent || undefined;
+    toast(`${leafName(d)} rangé dans ${toParent ? dividerLabel(toParent) : "le premier niveau"}`, "info", 2500);
+    await this.renderNotebookScreen();
+  }
+
+  /**
+   * Un intercalaire (et tout son contenu) a change de chemin : onglets,
+   * vues, positions et historique suivent.
+   */
+  private async retarget(notebook: string, from: string, to: string): Promise<void> {
+    for (const t of this.tabs.filter((x) => x.notebook === notebook)) {
+      if (t.expanded) t.expanded = renamePrefix(t.expanded, from, to);
+      if (!isUnder(t.divider, from)) continue;
+      const next = renamePrefix(t.divider, from, to);
+      // Une ecriture tardive de l'ancienne vue va dans le nouveau dossier.
+      if (t.view) t.view.divider = next;
+      t.divider = next;
+      await this.mountView(t, t.view?.pageNumber);
+    }
+    this.positions.renameDivider(notebook, from, to);
+    this.nav.renameDivider(notebook, from, to);
   }
 
   /**
@@ -1140,7 +1435,7 @@ export class App {
    * recreait l'ancien dossier et y partait.
    */
   private async renameDivider(tab: Tab, d: string, next: string): Promise<void> {
-    if (!(await this.settle(tab.notebook, d, "renommage annulé"))) return;
+    if (!(await this.settle(tab.notebook, d, "renommage annulé", true))) return;
     let applied: string;
     try {
       applied = await this.repo.renameDivider(tab.notebook, d, next);
@@ -1151,18 +1446,11 @@ export class App {
     if (applied === d) {
       const wanted = safeName(next);
       if (wanted.startsWith(".") || wanted.toLowerCase() === "assets") toast("Ce nom est réservé", "warn");
-      else if (wanted !== d) toast("Un intercalaire porte déjà ce nom", "warn");
+      else if (wanted !== leafName(d)) toast("Un intercalaire porte déjà ce nom à cet endroit", "warn");
       return;
     }
-    // Tous les onglets sur cet intercalaire (gauche et droite).
-    for (const t of this.tabs.filter((x) => x.notebook === tab.notebook && x.divider === d)) {
-      // Une ecriture tardive de l'ancienne vue va dans le nouveau dossier.
-      if (t.view) t.view.divider = applied;
-      t.divider = applied;
-      await this.mountView(t, t.view?.pageNumber);
-    }
-    this.positions.renameDivider(tab.notebook, d, applied);
-    this.nav.renameDivider(tab.notebook, d, applied);
+    // Tous les onglets sur cet intercalaire ou dans ce groupe (gauche et droite).
+    await this.retarget(tab.notebook, d, applied);
     await this.renderNotebookScreen();
   }
 
@@ -1172,7 +1460,7 @@ export class App {
    * tardive ne recree le dossier.
    */
   private async deleteDivider(tab: Tab, d: string): Promise<void> {
-    for (const v of this.holders(tab.notebook, d)) {
+    for (const v of this.holders(tab.notebook, d, true)) {
       await v.flush();
       v.discard();
     }
@@ -1186,8 +1474,13 @@ export class App {
     const nb = tab.notebook;
     this.positions.dropDivider(nb, d);
     this.nav.drop(nb, d);
-    const rest = await this.repo.listDividers(nb);
-    for (const t of this.tabs.filter((x) => x.notebook === nb && x.divider === d)) {
+    const restTree = await this.repo.listDividerTree(nb);
+    // D'abord un intercalaire qui a des pages (pas un simple groupe).
+    const rest = [...new Set([...openableDividers(restTree), ...flattenTree(restTree)])];
+    for (const t of this.tabs.filter((x) => x.notebook === nb)) {
+      if (t.expanded && isUnder(t.expanded, d)) t.expanded = undefined;
+    }
+    for (const t of this.tabs.filter((x) => x.notebook === nb && isUnder(x.divider, d))) {
       // Un intercalaire qu'aucun autre onglet ne montre ; sinon l'onglet part.
       const free = rest.find((x) => !this.tabs.some((o) => o.notebook === nb && o.divider === x));
       if (free || this.tabs.filter((o) => o.notebook === nb).length === 1) {
@@ -1207,8 +1500,8 @@ export class App {
   private offerRestore(entry: TrashEntry): void {
     const what = entry.kind === "notebook" ? `Matière ${entry.dir} mise à la corbeille`
       : entry.page != null
-        ? `Page ${entry.page} de ${entry.divider} mise à la corbeille`
-        : `Intercalaire ${entry.divider} mis à la corbeille`;
+        ? `Page ${entry.page} de ${dividerLabel(entry.divider)} mise à la corbeille`
+        : `Intercalaire ${dividerLabel(entry.divider)} mis à la corbeille`;
     // Restaurer passe par le disque, depuis n'importe quel ecran : le
     // message survit au retour au menu.
     toast(what, "info", 8000, { label: "Annuler", run: () => void this.restore(entry) }, `${APP_TOAST}trash-${Date.now()}`);
@@ -1240,7 +1533,7 @@ export class App {
       if (!(await this.settle(entry.dir, entry.divider, "restauration annulée"))) return;
       try {
         const n = await this.repo.restorePage(entry);
-        toast(`Page ${n} de ${entry.divider} restaurée`);
+        toast(`Page ${n} de ${dividerLabel(entry.divider)} restaurée`);
       } catch (e) {
         toast(`Restauration impossible : ${(e as Error).message}. La page reste dans ESEO/.corbeille.`, "err", 8000);
       }
@@ -1253,8 +1546,16 @@ export class App {
       toast(`Restauration impossible : ${(e as Error).message}. L'intercalaire reste dans ESEO/.corbeille.`, "err", 8000);
       return;
     }
-    toast(`Intercalaire ${name} restauré`);
-    if (tab && this.screen === "notebook") await this.switchDividerAndRender(tab, name);
+    toast(`Intercalaire ${dividerLabel(name)} restauré`);
+    if (!tab || this.screen !== "notebook") return;
+    // Un groupe sans pages propres : sa sous-bande s'ouvre, la page reste.
+    const node = findNode(await this.repo.listDividerTree(tab.notebook), name);
+    if (node && !node.pages) {
+      tab.expanded = name;
+      await this.renderNotebookScreen();
+    } else {
+      await this.switchDividerAndRender(tab, name);
+    }
   }
 
   /**
@@ -1772,7 +2073,7 @@ export class App {
       await this.renderNotebookScreen();
       return;
     }
-    const d = pickSplitDivider(await this.repo.listDividers(left.notebook), left.divider);
+    const d = pickSplitDivider(openableDividers(await this.repo.listDividerTree(left.notebook)), left.divider);
     if (!d) {
       toast("Un seul intercalaire : crée-en un second (+) ou ouvre une autre matière pour le split", "warn", 4000);
       return;
@@ -1813,7 +2114,7 @@ export class App {
    * pour une zone, 1,5 s au fil de la plume (D14), ou chaque envoi porte
    * toute la page. Dix fois moins d'allers-retours, et de la batterie.
    */
-  private enqueue(key: string, kind: "math" | "text", strokes: Stroke[], auto = false): void {
+  private enqueue(key: string, kind: "math" | "text", strokes: Stroke[], auto = false, partial = false): void {
     if (!this.queueState.backendReady && !this.warnedNoKeys) {
       this.warnedNoKeys = true;
       toast(
@@ -1826,15 +2127,15 @@ export class App {
     if (running) clearTimeout(running);
     this.debounceTimers.set(key, setTimeout(() => {
       this.debounceTimers.delete(key);
-      this.queue.enqueue({ key, kind, strokes });
+      this.queue.enqueue(jobOf(key, kind, strokes, partial));
     }, auto ? AUTO_DEBOUNCE_MS : SEND_DEBOUNCE_MS));
   }
 
   /** Bloc reste en attente : en file tout de suite, s'il n'y est pas deja. */
-  private resume(key: string, kind: "math" | "text", strokes: Stroke[]): void {
+  private resume(key: string, kind: "math" | "text", strokes: Stroke[], partial = false): void {
     if (this.queue.has(key) || this.debounceTimers.has(key)) return;
     this.remember(key, kind);
-    this.queue.enqueue({ key, kind, strokes });
+    this.queue.enqueue(jobOf(key, kind, strokes, partial));
   }
 
   private cancelRecognition(key: string): boolean {
@@ -1929,9 +2230,11 @@ export class App {
       if (!b || !isPending(b) || (b.type !== "math" && b.type !== "ink")) { this.forget(key); continue; }
       // Le fond de page ne part qu'en conversion au fil de la plume.
       if (b.type === "ink" && !b.rect && !this.autoConvert) continue;
-      const strokes = b.strokes.filter((st) => st.tool === "pen");
+      // Fond de page : seules les lignes pas encore lues repartent (reco-3).
+      const main = b.type === "ink" && !b.rect;
+      const strokes = main ? planIncremental(b).all : b.strokes.filter((st) => st.tool === "pen");
       if (!strokes.length) { this.forget(key); continue; }
-      this.resume(key, kind, strokes);
+      this.resume(key, kind, strokes, main);
     }
   }
 
@@ -1950,13 +2253,15 @@ export class App {
   /* ---------------- liens ---------------- */
 
   private async followLink(target: string): Promise<void> {
-    const [path, blockId] = target.split("#");
-    const parts = path.split("/");
-    if (parts.length < 3) { toast("Lien invalide", "warn"); return; }
-    const [nb, div, num] = parts;
+    const hash = target.indexOf("#");
+    const path = hash < 0 ? target : target.slice(0, hash);
+    const blockId = hash < 0 ? "" : target.slice(hash + 1);
+    // Intercalaire sur un ou plusieurs niveaux (« Elec/E3A/S1/TP 4/0003 », D4).
+    const ref = parsePagePath(path);
+    if (!ref) { toast("Lien invalide", "warn"); return; }
     this.noteJump();
-    const tab = await this.openNotebook(nb, div, Number(num));
-    if (blockId) await tab?.view?.focusBlock(Number(num), blockId);
+    const tab = await this.openNotebook(ref.notebook, ref.divider, ref.number);
+    if (blockId) await tab?.view?.focusBlock(ref.number, blockId);
   }
 
   /* ---------------- raccourcis ---------------- */
@@ -2046,7 +2351,7 @@ export class App {
     // Menu : Entree reprend, des lettres filtrent les matieres, fleches.
     if (this.screen === "menu" && this.menuKeys?.(e)) { e.preventDefault(); return; }
 
-    if (e.key === "Escape" && (this.screen === "search" || this.screen === "flags" || this.screen === "probe")) {
+    if (e.key === "Escape" && (this.screen === "search" || this.screen === "flags" || this.screen === "probe" || this.screen === "review")) {
       e.preventDefault();
       this.leaveAux();
       return;
@@ -2057,6 +2362,9 @@ export class App {
     if (e.key === "PageDown") { e.preventDefault(); void view?.next(); return; }
     if (e.key === "PageUp") { e.preventDefault(); void view?.prev(); return; }
 
+    // Entree ou Espace sur un intercalaire (navigation au clavier) : c'est
+    // le bouton qui la prend, pas le texte de la page.
+    if ((e.key === "Enter" || e.key === " ") && (e.target as HTMLElement | null)?.closest?.(".divider-strip button")) return;
     // Taper n'importe ou : le clavier va au texte de la page, sans cliquer
     // ni inserer de zone. La touche continue sa route vers le texte.
     if (!e.altKey && (e.key.length === 1 || e.key === "Enter" || e.key === "Backspace")) {
@@ -2133,6 +2441,7 @@ export class App {
     switch (cmd) {
       case "menu": void (this.screen === "menu" ? this.backToWork() : this.showMenu()); return true;
       case "search": void this.showSearch(); return true;
+      case "review": void this.showReview({}); return true;
       case "calc": void this.toggleCalculator(); return true;
       case "sendCalc":
         if (!this.calculator) toast("Rien à envoyer : ouvre la calculatrice (Ctrl+L)", "warn");
@@ -2162,7 +2471,8 @@ export class App {
         return true;
       case "newDivider": {
         const tab = this.focusedTab();
-        if (notebook && tab) void this.newDivider(tab);
+        // A cote de l'intercalaire ouvert, dans son groupe (D4).
+        if (notebook && tab) void this.newDivider(tab, parentPath(tab.divider));
         return true;
       }
       case "convert": this.setAutoConvert(!this.autoConvert); return true;
@@ -2220,7 +2530,7 @@ export class App {
     const pages = (await this.repo.scanDivider(view.notebook, view.divider)) ?? [];
     const nums = pages.map((p) => p.n);
     const n = await pageListDialog({
-      title: view.divider,
+      title: dividerLabel(view.divider),
       current: view.pageNumber,
       typeNumber,
       pages: pages.map((p) => ({
@@ -2237,8 +2547,10 @@ export class App {
   private async switchDividerBy(delta: number): Promise<void> {
     const tab = this.focusedTab();
     if (!tab) return;
-    const dividers = await this.repo.listDividers(tab.notebook);
-    const next = dividers[dividers.indexOf(tab.divider) + delta];
+    // Ordre de lecture des intercalaires qui ont des pages, groupes traverses (D4).
+    const dividers = openableDividers(await this.repo.listDividerTree(tab.notebook));
+    const at = dividers.indexOf(tab.divider);
+    const next = at < 0 && delta > 0 ? dividers[0] : dividers[at + delta];
     if (!next) {
       toast(delta > 0 ? "Dernier intercalaire" : "Premier intercalaire", "info", 1500);
       return;
@@ -2453,16 +2765,18 @@ export class App {
   }
 
   /** Vues qui tiennent des pages de cet intercalaire. */
-  private holders(notebook: string, divider: string): PageView[] {
-    return this.views().filter((v) => v.notebook === notebook && v.divider === divider);
+  /** `under` : aussi celles des intercalaires ranges dans ce groupe (D4). */
+  private holders(notebook: string, divider: string, under = false): PageView[] {
+    return this.views().filter((v) => v.notebook === notebook
+      && (under ? isUnder(v.divider, divider) : v.divider === divider));
   }
 
   /**
    * Avant de renommer ou de renumeroter un intercalaire : tout ce qui
    * l'attend est ecrit. Faux (et un message) si une page reste refusee.
    */
-  private async settle(notebook: string, divider: string, cancelled: string): Promise<boolean> {
-    const held = this.holders(notebook, divider);
+  private async settle(notebook: string, divider: string, cancelled: string, under = false): Promise<boolean> {
+    const held = this.holders(notebook, divider, under);
     for (const v of held) await v.flush();
     if (!held.some((v) => v.hasUnsaved)) return true;
     toast(`Une page n'est pas encore enregistrée : ${cancelled} pour ne rien écraser. `
@@ -2743,14 +3057,17 @@ export class App {
    * Faite apres coup : la bande s'affiche sans attendre le disque.
    */
   private paintConflictBadges(): void {
-    const bar = this.main.querySelector<HTMLElement>(".dividers");
+    const bar = this.main.querySelector<HTMLElement>(".divider-strip");
     const dir = bar?.dataset.notebook;
     if (!bar || !dir) return;
     void this.repo.countConflicts(dir).then((counts) => {
       if (!bar.isConnected) return;
       for (const node of bar.querySelectorAll<HTMLElement>(".divider-tab[data-divider]")) {
         node.querySelector(".conflict-dot")?.remove();
-        const n = counts.get(node.dataset.divider!) ?? 0;
+        // Un groupe compte aussi les copies des intercalaires qu'il contient.
+        const path = node.dataset.divider!;
+        let n = 0;
+        for (const [d, c] of counts) if (node.dataset.group ? isUnder(d, path) : d === path) n += c;
         if (!n) continue;
         node.append(el("span", {
           class: "conflict-dot",
@@ -2760,6 +3077,14 @@ export class App {
       }
     }, () => undefined);
   }
+}
+
+/**
+ * Job de reconnaissance. `partial` : envoi par bandes du fond de page, le
+ * resultat ne vaut que pour ces traits (RecoResult.scope, bands.ts).
+ */
+function jobOf(key: string, kind: "math" | "text", strokes: Stroke[], partial: boolean): RecoJob {
+  return partial ? { key, kind, strokes, scope: strokes.map((s) => s.id) } : { key, kind, strokes };
 }
 
 /* ---------------- stockage local de la reconnaissance ---------------- */

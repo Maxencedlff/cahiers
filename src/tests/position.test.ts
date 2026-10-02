@@ -55,6 +55,18 @@ describe("derniere position par intercalaire (nav-3, D8)", () => {
     expect(m.Maths).toBeUndefined();
   });
 
+  it("un groupe renomme, deplace ou supprime emmene ses intercalaires (D4)", () => {
+    let m = recordPosition({}, "Elec", "E3A/S10", 2, T1);
+    m = recordPosition(m, "Elec", "E3A/S1/Chapitre 1", 4, T1);
+    m = renameDividerIn(m, "Elec", "E3A/S1", "E3A/Semestre 1");
+    expect(m.Elec.divider).toBe("E3A/Semestre 1/Chapitre 1");
+    expect(startPage(m, "Elec", "E3A/Semestre 1/Chapitre 1")).toBe(4);
+    expect(startPage(m, "Elec", "E3A/S10")).toBe(2);
+    m = dropDividerIn(m, "Elec", "E3A/Semestre 1");
+    expect(m.Elec.divider).toBe("E3A/S10");
+    expect(startPage(m, "Elec", "E3A/Semestre 1/Chapitre 1")).toBeUndefined();
+  });
+
   it("suit le renommage d'une matiere", () => {
     const m = renameNotebookIn(recordPosition({}, "Elec", "Cours", 3, T1), "Elec", "Électronique");
     expect(startPage(m, "Électronique", "Cours")).toBe(3);

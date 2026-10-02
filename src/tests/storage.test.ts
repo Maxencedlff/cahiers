@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryFs } from "../core/storage/fs";
-import { Repo, safeName, trashStamp, TRASH_DIR, serializePage } from "../core/storage/repo";
+import { Repo, safeName, trashStamp, TRASH_DIR, serializePage, migratePage } from "../core/storage/repo";
 import { searchAll, listFlags, normalize } from "../core/storage/search";
 import { pageFileName, parsePageNumber } from "../core/types";
 import { uuid, nowIso } from "../core/id";
@@ -151,7 +151,7 @@ describe("fichiers de page", () => {
     await repo.createPage(nb, "Cours");
     const raw = await fs.readText(`${nb}/Cours/0001.page.json`);
     expect(raw).toContain("\n");
-    expect(JSON.parse(raw).version).toBe(1);
+    expect(JSON.parse(raw).version).toBe(2);
   });
 
   it("les points d'un trait tiennent sur une ligne, sans rien perdre", () => {
@@ -162,7 +162,8 @@ describe("fichiers de page", () => {
         strokes: [{ id: "s1", color: "normal" as const, width: 2.2, tool: "pen" as const, points: pts }] }],
     };
     const raw = serializePage(page);
-    expect(JSON.parse(raw)).toEqual(page);
+    // Format v2 : la page relue (migratePage) est la meme, en version 2.
+    expect(migratePage(JSON.parse(raw))).toEqual({ ...page, version: 2 });
     expect(raw).toContain("\n");
     // Un seul point par ligne indentee aurait donne 50 x 6 lignes.
     expect(raw.split("\n").length).toBeLessThan(40);
@@ -551,10 +552,167 @@ describe("matieres et cahier.json (nav-10, nav-13, donnees-14)", () => {
     const nb = await repo.createNotebook("Maths", "#000");
     await repo.createDivider(nb, "Cours");
     const n = await repo.createPage(nb, "Cours");
-    const future = JSON.stringify({ version: 2, id: "x", created: "", modified: "", blocks: [], nouveau: true });
+    const future = JSON.stringify({ version: 3, id: "x", created: "", modified: "", blocks: [], nouveau: true });
     await fs.writeText(`${nb}/Cours/0001.page.json`, future);
     const page = await repo.readPage(nb, "Cours", n);
     await expect(repo.writePage(nb, "Cours", n, page)).rejects.toThrow(/plus récente/);
     expect(await fs.readText(`${nb}/Cours/0001.page.json`)).toBe(future);
+  });
+});
+
+describe("arborescence a 3 niveaux (D4, palier 2)", () => {
+  /** Electronique/E3A/S1/Chapitre 1 comme sur le disque de Maxence. */
+  async function elec(): Promise<string> {
+    const nb = await repo.createNotebook("Elec", "#000");
+    await fs.mkdir("Elec/E3A/S1/Chapitre 1");
+    await fs.mkdir("Elec/E3A/S1/Chapitre 2");
+    await fs.mkdir("Elec/E3A/S2/TD");
+    await fs.mkdir("Elec/E3A/S1/Chapitre 1/assets");
+    await fs.mkdir("Elec/E3A/S1/.cache");
+    await fs.mkdir("Elec/EON");
+    await repo.createPage(nb, "E3A/S1/Chapitre 1");
+    await repo.createPage(nb, "E3A/S1/Chapitre 1");
+    await repo.createPage(nb, "E3A/S2/TD");
+    return nb;
+  }
+
+  it("lit les pages a 3 niveaux sous la matiere", async () => {
+    const nb = await elec();
+    expect(await repo.listDividers(nb)).toEqual([
+      "E3A", "E3A/S1", "E3A/S1/Chapitre 1", "E3A/S1/Chapitre 2", "E3A/S2", "E3A/S2/TD", "EON",
+    ]);
+    expect(await repo.listPageNumbers(nb, "E3A/S1/Chapitre 1")).toEqual([1, 2]);
+    const s = await repo.summary(nb);
+    expect(s.pageCount).toBe(3);
+    expect(await fs.exists("Elec/E3A/0001.page.json")).toBe(false);
+  });
+
+  it("au-dela de 3 niveaux, rien n'est lu ; un depot git n'est pas un intercalaire", async () => {
+    const nb = await elec();
+    await fs.mkdir("Elec/E3A/S2/TD/Projet/src");
+    await fs.mkdir("Elec/Code/.git");
+    const all = await repo.listDividers(nb);
+    expect(all).not.toContain("E3A/S2/TD/Projet");
+    expect(all).not.toContain("Code");
+  });
+
+  it("un dossier avec pages ET sous-dossiers reste un intercalaire", async () => {
+    const nb = await elec();
+    await repo.createPage(nb, "E3A");
+    const tree = await repo.listDividerTree(nb);
+    const e3a = tree.find((n) => n.path === "E3A")!;
+    expect(e3a.pages).toBe(true);
+    expect(e3a.children.map((c) => c.path)).toEqual(["E3A/S1", "E3A/S2"]);
+    expect(e3a.children[0].pages).toBe(false);
+  });
+
+  it("une matiere dont les pages sont au 3e niveau est bien une matiere", async () => {
+    await fs.mkdir("Maths2/S1/Chap/Cours");
+    await fs.writeText("Maths2/S1/Chap/Cours/0001.page.json", "{}");
+    await fs.mkdir("Maths3/A/B");
+    await fs.writeText("Maths3/A/B/0001.page.json", "{}");
+    const { notebooks } = await new Repo(fs).classifyRoot();
+    expect(notebooks).toContain("Maths3");
+  });
+
+  it("cree un groupe et un intercalaire dedans ; ordre par niveau dans cahier.json", async () => {
+    const nb = await repo.createNotebook("Maths", "#000");
+    await repo.createDivider(nb, "Cours");
+    const s1 = await repo.createDivider(nb, "S1");
+    expect(await repo.createDivider(nb, "Chapitre 2", s1)).toBe("S1/Chapitre 2");
+    expect(await repo.createDivider(nb, "Chapitre 1", s1)).toBe("S1/Chapitre 1");
+    expect(await repo.createDivider(nb, "chapitre 1", s1)).toBe("S1/Chapitre 1");
+    expect(await repo.listDividers(nb)).toEqual(["Cours", "S1", "S1/Chapitre 2", "S1/Chapitre 1"]);
+    await expect(repo.createDivider(nb, "X", "S1/Chapitre 1/Y")).rejects.toThrow(/niveaux/);
+    const meta = JSON.parse(await fs.readText("Maths/cahier.json"));
+    expect(meta.dividers).toEqual(["Cours", "S1", "S1/Chapitre 2", "S1/Chapitre 1"]);
+  });
+
+  it("renommer un groupe emmene son contenu, ses modes et ses fonds", async () => {
+    const nb = await elec();
+    await repo.setViewMode(nb, "E3A/S1/Chapitre 1", "scroll");
+    await repo.setPaper(nb, "E3A/S1/Chapitre 1", "seyes");
+    await repo.reorderDividers(nb, ["E3A", "E3A/S1", "E3A/S1/Chapitre 2", "E3A/S1/Chapitre 1"]);
+    expect(await repo.renameDivider(nb, "E3A/S1", "Semestre 1")).toBe("E3A/Semestre 1");
+    expect(await repo.listPageNumbers(nb, "E3A/Semestre 1/Chapitre 1")).toEqual([1, 2]);
+    const meta = await repo.readMeta(nb);
+    expect(meta.viewMode).toEqual({ "E3A/Semestre 1/Chapitre 1": "scroll" });
+    expect(meta.paper).toEqual({ "E3A/Semestre 1/Chapitre 1": "seyes" });
+    expect((await repo.listDividers(nb)).slice(0, 4))
+      .toEqual(["E3A", "E3A/Semestre 1", "E3A/Semestre 1/Chapitre 2", "E3A/Semestre 1/Chapitre 1"]);
+    // Nom deja pris au meme niveau : refuse ; ailleurs : libre.
+    expect(await repo.renameDivider(nb, "E3A/Semestre 1/Chapitre 2", "chapitre 1")).toBe("E3A/Semestre 1/Chapitre 2");
+    expect(await repo.renameDivider(nb, "E3A/S2/TD", "Chapitre 1")).toBe("E3A/S2/Chapitre 1");
+  });
+
+  it("deplace un intercalaire dans un groupe et l'en ressort", async () => {
+    const nb = await elec();
+    await repo.setViewMode(nb, "EON", "scroll");
+    await repo.createPage(nb, "EON");
+    expect(await repo.moveDivider(nb, "EON", "E3A/S2")).toBe("E3A/S2/EON");
+    expect(await repo.listPageNumbers(nb, "E3A/S2/EON")).toEqual([1]);
+    expect((await repo.readMeta(nb)).viewMode).toEqual({ "E3A/S2/EON": "scroll" });
+    expect(await repo.moveDivider(nb, "E3A/S2/EON", "")).toBe("EON");
+    expect(await repo.listDividers(nb)).toContain("EON");
+    await expect(repo.moveDivider(nb, "E3A", "E3A/S1")).rejects.toThrow(/lui-même/);
+    await expect(repo.moveDivider(nb, "E3A/S1", "E3A/S2")).rejects.toThrow(/niveaux/);
+    await fs.mkdir("Elec/E3A/S1/TD");
+    await expect(repo.moveDivider(nb, "E3A/S2/TD", "E3A/S1")).rejects.toThrow(/existe déjà/);
+  });
+
+  it("corbeille et restauration d'un intercalaire imbrique, a sa place", async () => {
+    const nb = await elec();
+    const entry = await repo.deleteDivider(nb, "E3A/S1/Chapitre 1");
+    expect(await repo.listDividers(nb)).not.toContain("E3A/S1/Chapitre 1");
+    expect(await fs.exists(`${entry.bin}/Elec/E3A/S1/Chapitre 1/0002.page.json`)).toBe(true);
+    expect(await repo.restoreDivider(entry)).toBe("E3A/S1/Chapitre 1");
+    expect(await repo.listPageNumbers(nb, "E3A/S1/Chapitre 1")).toEqual([1, 2]);
+    expect((await repo.listDividers(nb)).indexOf("E3A/S1/Chapitre 1"))
+      .toBeLessThan((await repo.listDividers(nb)).indexOf("E3A/S1/Chapitre 2"));
+    // Meme nom recree entre temps : le restaure prend « (restauré) » dans son groupe.
+    const again = await repo.deleteDivider(nb, "E3A/S2/TD");
+    await repo.createDivider(nb, "TD", "E3A/S2");
+    expect(await repo.restoreDivider(again)).toBe("E3A/S2/TD (restauré)");
+  });
+
+  it("pages, suppression de page et copies de conflit dans un intercalaire imbrique", async () => {
+    const nb = await elec();
+    const div = "E3A/S1/Chapitre 1";
+    await fs.writeText(`Elec/${div}/0002.page-LAPTOP.json`, JSON.stringify({ version: 1, id: "c", created: "", modified: "", blocks: [] }));
+    expect((await repo.countConflicts(nb)).get(div)).toBe(1);
+    const entry = await repo.deletePage(nb, div, 1);
+    expect(await repo.listPageNumbers(nb, div)).toEqual([1]);
+    expect((await repo.listConflicts(nb, div))[0].page).toBe(1);
+    expect(await repo.restorePage(entry)).toBe(1);
+    expect(await repo.listPageNumbers(nb, div)).toEqual([1, 2]);
+    expect(repo.pagePath(nb, div, 2)).toBe("Elec/E3A/S1/Chapitre 1/0002.page.json");
+  });
+
+  it("recherche et reperes vont dans les intercalaires imbriques", async () => {
+    const nb = await elec();
+    const div = "E3A/S1/Chapitre 2";
+    const n = await repo.createPage(nb, div);
+    const page = await repo.readPage(nb, div, n);
+    page.blocks.push({ id: "t", type: "text", content: "Théorème de Thévenin" });
+    page.blocks.push({ id: "f", type: "flag", note: "revoir Norton" } as never);
+    await repo.writePage(nb, div, n, page);
+    const hits = await searchAll(repo, "thevenin");
+    expect(hits.map((h) => [h.notebook, h.divider, h.page])).toEqual([["Elec", div, 1]]);
+    const flags = await listFlags(repo);
+    expect(flags.some((f) => f.divider === div)).toBe(true);
+  });
+
+  it("un ancien cahier.json a 2 niveaux reste lu tel quel", async () => {
+    await fs.mkdir("Maths/Cours");
+    await fs.mkdir("Maths/TD");
+    await fs.writeText("Maths/cahier.json", JSON.stringify({
+      version: 1, title: "Maths", color: "#000", dividers: ["TD", "Cours"], viewMode: { TD: "scroll" }, futur: 1,
+    }));
+    expect(await repo.listDividers("Maths")).toEqual(["TD", "Cours"]);
+    await repo.renameDivider("Maths", "TD", "Exos");
+    const meta = JSON.parse(await fs.readText("Maths/cahier.json"));
+    expect(meta.dividers).toEqual(["Exos", "Cours"]);
+    expect(meta.viewMode).toEqual({ Exos: "scroll" });
+    expect(meta.futur).toBe(1);
   });
 });

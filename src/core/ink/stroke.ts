@@ -72,6 +72,104 @@ export function roundPoint(p: InkPoint): InkPoint {
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* Format disque des traits (schema v2)                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * En memoire, un trait garde ses points en objets {x, y, p, t} : tout le
+ * code (rendu, gomme, selection, reconnaissance, fusion) les lit ainsi.
+ * Sur le disque (v2), ils deviennent des tableaux plats, lisibles a la main
+ * mais 3 a 4 fois plus legers (voir CLAUDE.md section 2) :
+ *   "pts":  [x0, y0, x1, y1, ...]   au dixieme d'unite de page
+ *   "p":    [p0, p1, ...]           pression au centieme ; un seul nombre si
+ *                                   elle est constante ; absent si nulle
+ *   "t":    [t0, d1, d2, ...]       ms : t0 puis l'ecart avec le point d'avant ;
+ *                                   absent si tous les temps sont nuls
+ *   "tilt": [tx0, ty0, ...]         inclinaison, seulement si le stylet en donne
+ * La conversion se fait seulement a l'ecriture (encodeStroke) et a la
+ * lecture (decodeStroke) : ces deux fonctions sont le seul acces au format.
+ */
+export interface DiskStroke extends Omit<Stroke, "points"> {
+  pts: number[];
+  p?: number | number[];
+  t?: number[];
+  tilt?: number[];
+}
+
+const r1 = (v: number): number => Math.round(v * 10) / 10 || 0;
+const rp = (v: number): number => (v > 0 ? Math.max(0.01, Math.round(v * 100) / 100) : 0);
+
+/** Trait memoire -> trait disque v2. Les champs inconnus sont gardes. */
+export function encodeStroke(s: Stroke): DiskStroke {
+  const { points, ...rest } = s;
+  const n = points.length;
+  const pts = new Array<number>(2 * n);
+  const press = new Array<number>(n);
+  const times = new Array<number>(n);
+  let tilt: number[] | null = null;
+  let prevT = 0;
+  for (let i = 0; i < n; i++) {
+    const q = points[i];
+    pts[2 * i] = r1(q.x);
+    pts[2 * i + 1] = r1(q.y);
+    press[i] = rp(q.p);
+    // Ecarts entre temps deja arrondis : pas de derive au fil du trait.
+    const t = Math.round(q.t) || 0;
+    times[i] = i === 0 ? t : t - prevT;
+    prevT = t;
+    if ((q.tiltX || q.tiltY) && !tilt) tilt = new Array<number>(2 * n).fill(0);
+    if (tilt) { tilt[2 * i] = Math.round(q.tiltX ?? 0) || 0; tilt[2 * i + 1] = Math.round(q.tiltY ?? 0) || 0; }
+  }
+  const out: DiskStroke = { ...rest, pts };
+  if (n && press.some((v) => v !== press[0])) out.p = press;
+  else if (n && press[0] !== 0) out.p = press[0];
+  if (times.some((v) => v !== 0)) out.t = times;
+  if (tilt) out.tilt = tilt;
+  return out;
+}
+
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+/**
+ * Trait lu sur le disque -> trait memoire. Accepte les deux formats : v2
+ * (`pts`) et v1 (`points` en objets), pour lire une page ancienne, une copie
+ * de conflit ou un fichier de la corbeille quelle que soit sa version. Ne
+ * leve jamais : un tableau abime donne des valeurs nulles, pas un trait perdu.
+ */
+export function decodeStroke(raw: unknown): Stroke {
+  const s = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  if (!Array.isArray(s.pts)) {
+    return (Array.isArray(s.points) ? s : { ...s, points: [] }) as unknown as Stroke;
+  }
+  const { pts, p, t, tilt, points: _old, ...rest } = s;
+  void _old;
+  const flat = pts as unknown[];
+  const n = Math.floor(flat.length / 2);
+  const press = Array.isArray(p) ? p : null;
+  const constP = num(p);
+  const times = Array.isArray(t) ? t : [];
+  const tl = Array.isArray(tilt) ? tilt : null;
+  const points: InkPoint[] = new Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc += num(times[i]);
+    const q: InkPoint = { x: num(flat[2 * i]), y: num(flat[2 * i + 1]), p: press ? num(press[i]) : constP, t: acc };
+    if (tl) {
+      const tx = num(tl[2 * i]), ty = num(tl[2 * i + 1]);
+      if (tx || ty) { q.tiltX = tx; q.tiltY = ty; }
+    }
+    points[i] = q;
+  }
+  return { ...rest, points } as unknown as Stroke;
+}
+
+/** Vrai pour un trait en memoire (objet avec un id et des points). */
+export function isMemoryStroke(v: unknown): v is Stroke {
+  return !!v && typeof v === "object" && typeof (v as Stroke).id === "string"
+    && Array.isArray((v as Stroke).points);
+}
+
 export function unionBounds(list: Bounds[]): Bounds {
   const real = list.filter((b) => b.w > 0 || b.h > 0);
   if (real.length === 0) return { x: 0, y: 0, w: 0, h: 0 };

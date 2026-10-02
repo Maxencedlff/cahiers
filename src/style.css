@@ -185,6 +185,21 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .divider-tab.dragging { position: relative; z-index: 2; opacity: .9; cursor: grabbing; box-shadow: 0 6px 18px rgba(16, 20, 30, .22); }
 .divider-tab.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
 .divider-tab.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+/* Intercalaires imbriques (D4) : groupe a chevron, sous-bande du groupe
+   ouvert avec son fil d'Ariane. Deux rangees au plus. */
+.divider-strip { flex: none; display: flex; flex-direction: column; }
+.divider-tab .chev { margin-left: 6px; color: var(--muted); font-size: 12px; }
+.divider-tab.group.open { background: var(--accent-soft); }
+.dividers.sub { padding-top: 3px; background: #f9fafb; align-items: center; }
+.dividers.sub .divider-tab { height: var(--touch); }
+.divider-tab.own { font-style: italic; }
+.divider-crumb {
+  height: var(--touch); padding: 0 6px 0 10px; border: none; background: none; color: var(--muted);
+  white-space: nowrap; cursor: pointer; display: inline-flex; align-items: center; flex: none;
+}
+.divider-crumb.current { color: inherit; font-weight: 600; }
+.divider-crumb .chev { margin-left: 6px; }
+.divider-strip button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .toolbar {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
@@ -909,6 +924,8 @@ kbd {
 .sheet.folder-sheet h2 { margin: 0; font-size: 21px; }
 .sheet.folder-sheet p { margin: 0; max-width: 620px; line-height: 1.5; }
 .folder-list { margin: 0; padding-left: 22px; columns: 2; max-width: 620px; }
+.folder-open { display: flex; flex-wrap: wrap; gap: 8px; max-width: 620px; }
+.folder-open button { min-height: var(--touch); }
 
 /* Page d'une version plus recente : visible, jamais modifiable ici. */
 .sheet.readonly { pointer-events: none; }
@@ -941,3 +958,66 @@ kbd {
 .page-row .line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page-row .line.title { font-weight: 600; }
 .page-row.current .pn::after { content: " ●"; color: var(--accent); font-size: 10px; vertical-align: middle; }
+
+/* ---------------- revision par couleur (lot 11, src/ui/review.ts) ---------------- */
+
+.review-screen:focus { outline: none; }
+.review-filters { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 10px; }
+.review-filter { display: flex; align-items: flex-start; gap: 10px; }
+.review-filter[hidden] { display: none; }
+.review-filter-label { flex: 0 0 92px; padding-top: 13px; font-size: 13px; color: var(--muted); }
+.review-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.review-chip { border-radius: 22px; padding: 0 14px; }
+.review-chip.on { background: var(--accent-soft); border-color: var(--accent); color: #1b3fa8; font-weight: 600; }
+.review-chip[style*="--c"].on { background: color-mix(in srgb, var(--c) 12%, #fff); border-color: var(--c); color: var(--ink); }
+.review-chip-in { display: inline-flex; align-items: center; gap: 7px; }
+.review-chip .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.review-count { font-size: 12px; color: var(--muted); font-weight: 400; }
+.review-info { min-height: 28px; margin-bottom: 8px; }
+.review-list h2.review-nb { margin: 22px 0 6px; }
+.review-page { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.review-where {
+  align-self: flex-start; border: none; background: transparent; padding: 0 6px;
+  color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px;
+}
+.review-where:hover { background: var(--accent-soft); }
+.review-item {
+  text-align: left; width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  border: 1px solid var(--line); border-left: 5px solid var(--c, var(--accent)); border-radius: 8px;
+  background: var(--panel); padding: 10px 14px; min-height: 56px; height: auto;
+}
+.review-item:hover { background: #fafbfc; }
+.review-item:focus-visible, .review-where:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.review-tag { font-size: 12px; font-weight: 600; color: var(--c, var(--muted)); }
+.review-tag .muted { font-weight: 400; }
+.review-text { font-size: 16px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.review-text .katex { font-size: 1.08em; }
+.review-tex .katex { font-size: 1.3em; }
+.review-ink-slot { max-width: 100%; }
+.review-ink { display: block; max-width: 100%; height: auto; }
+.review-caption { font-size: 13px; color: var(--muted); }
+.review-mark {
+  position: absolute; border: 2px solid #2563eb; background: rgba(37, 99, 235, .10);
+  border-radius: 6px; pointer-events: none; z-index: 3;
+}
+@media print {
+  body.printing .print-host.review-print { width: 680px; padding: 12mm 0; font-size: 14px; }
+  .review-print h1 { font-size: 20px; margin: 0 0 10px; }
+  .review-print h2 { font-size: 17px; margin: 16px 0 6px; }
+  .review-print .review-page { break-inside: auto; margin-bottom: 10px; }
+  .review-print .review-where { color: #444; text-decoration: none; padding: 0; }
+  .review-print .review-item { break-inside: avoid; min-height: 0; border-color: #ccc; border-left-color: var(--c); }
+}
+.search-review { align-items: center; margin: 0 0 8px; }
+.search-review .review-chip { min-height: var(--touch); }
+
+/* ---------------- pagination automatique (core/paginate.ts) ---------------- */
+/* Ancienne page plus longue qu'une A4 : fins de feuille en pointille. Jamais
+   imprimes (l'export clone le texte et les blocs, pas ces reperes). */
+.page-breaks { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.page-break { position: absolute; left: 0; right: 0; border-top: 2px dashed #9aa7bd; }
+.page-break span {
+  position: absolute; right: 8px; top: 2px; font: 600 11px/1.4 system-ui, sans-serif;
+  color: #6b7487; background: rgba(255, 255, 255, .9); padding: 0 6px; border-radius: 4px;
+}
+.long-note button { min-height: 44px; }
