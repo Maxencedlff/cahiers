@@ -1,7 +1,7 @@
 import { MathfieldElement } from "mathlive";
 import "mathlive/fonts.css";
 import katex from "katex";
-import { el, toast } from "./dom";
+import { askText, el, toast } from "./dom";
 import { colorOf } from "../core/palette";
 import type { ColorKey } from "../core/types";
 import {
@@ -16,6 +16,8 @@ import {
 import { recordLatex } from "../core/symbols";
 import { linesToReach } from "../core/textlayout";
 import { BLOCK_MAX_H } from "../core/paginate";
+import { cleanHint, linkUrl, parseLinkMarkdown, pagePathOf, type LinkCandidate } from "../core/links";
+import { pickLink } from "./linkpicker";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
 // fonctionne hors ligne et en amphi.
@@ -84,6 +86,24 @@ export interface DocImages {
   /** Appui sur un bloc vivant : la calculatrice le rouvre (« Mettre à jour »). */
   openLive?: (id: string) => void;
 }
+
+/**
+ * Liens entre pages (core/links.ts) : ce que la page sait faire d'un lien
+ * pose dans le texte. Absent : les liens s'affichent sans rien faire.
+ */
+export interface DocLinks {
+  /** Suit le lien (App : id de page, puis corbeille, puis chemin). */
+  follow: (link: DocLinkRef) => void;
+  /** Choix du selecteur `[[` (toutes les pages, lues a la demande). */
+  candidates: () => Promise<LinkCandidate[]>;
+  /** Id de la page de ce texte : on ne la propose pas. */
+  pageId?: () => string | undefined;
+  /** Etat des cibles, pour griser un lien vers une page supprimee. */
+  check?: (links: DocLinkRef[]) => Promise<("ok" | "trash" | "missing")[]>;
+}
+
+/** Un lien du texte tel que l'affiche la page. */
+export interface DocLinkRef { href: string; hint?: string; label: string }
 
 /**
  * Photo plus haute qu'une page : reduite a la hauteur de page (largeur
@@ -262,6 +282,7 @@ export class TextDoc {
     content: string,
     private onChange: (content: string) => void,
     private images?: DocImages,
+    private links?: DocLinks,
   ) {
     this.root = el("div", {
       class: "text-doc",
@@ -300,6 +321,11 @@ export class TextDoc {
       }
       this.emit();
     });
+    // "[[" : selecteur de lien (core/links.ts), avant la frappe en couleur.
+    this.root.addEventListener("beforeinput", (e) => {
+      if (this.field || e.inputType !== "insertText" || e.data !== "[" || !this.links) return;
+      if (this.openPicker()) { e.preventDefault(); e.stopImmediatePropagation(); }
+    });
     // Frappe dans la couleur choisie : si le curseur n'est pas deja dans un
     // texte de cette couleur, le caractere part dans un nouveau segment.
     this.root.addEventListener("beforeinput", (e) => {
@@ -318,8 +344,24 @@ export class TextDoc {
     this.root.addEventListener("pointerdown", () => { this.lastAuto = null; this.lastLine = null; });
     this.root.addEventListener("focusin", () => { lastDoc = this; });
     this.root.addEventListener("click", (e) => {
+      const link = (e.target as HTMLElement).closest?.(".doc-link");
+      if (link instanceof HTMLElement && this.root.contains(link)) {
+        e.preventDefault();
+        this.followLink(link);
+        return;
+      }
       const eq = (e.target as HTMLElement).closest?.(".eq");
       if (eq instanceof HTMLElement && this.root.contains(eq)) this.editEq(eq, "end");
+    });
+    // Lien au stylet ou au doigt : un appui le suit, sans laisser d'encre
+    // (le stylet ne part pas a la page). Le doigt qui glisse fait defiler.
+    this.root.addEventListener("pointerdown", (e) => this.onLinkDown(e));
+    // Clic droit (ou appui long) sur un lien : renommer son libelle.
+    this.root.addEventListener("contextmenu", (e) => {
+      const link = (e.target as HTMLElement).closest?.(".doc-link");
+      if (!(link instanceof HTMLElement) || !this.root.contains(link)) return;
+      e.preventDefault();
+      void this.renameLink(link);
     });
     document.addEventListener("selectionchange", this.onSelectionChange);
     // Fichier image depose depuis l'Explorateur (dragDropEnabled: false
@@ -367,6 +409,9 @@ export class TextDoc {
       }
       const internal = dt?.getData(CLIP_TYPE) || docFromHtml(dt?.getData("text/html") ?? "");
       if (internal) { this.insertTokens(parseDoc(internal)); return; }
+      // Lien copie depuis la recherche (« Copier le lien ») : une puce.
+      const plainText = dt?.getData("text/plain") ?? "";
+      if (parseLinkMarkdown(plainText)) { this.insertTokens(parseDoc(plainText.trim())); return; }
       this.insertPlain((dt?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n"));
     });
   }
@@ -388,6 +433,7 @@ export class TextDoc {
     // Sans <br> final, une derniere ligne vide ne s'affiche pas.
     if (tokens[tokens.length - 1]?.kind === "br") this.root.append(el("br"));
     this.renumber(tokens);
+    this.checkLinks();
   }
 
   /** Noeuds du texte pour des jetons (page entiere ou morceau colle). */
@@ -420,6 +466,9 @@ export class TextDoc {
         into.appendChild(anchor());
       } else if (t.kind === "image") {
         into.appendChild(this.makeImage(t.id));
+        into.appendChild(anchor());
+      } else if (t.kind === "link") {
+        into.appendChild(makeLink(t));
         into.appendChild(anchor());
       } else {
         let node: Node = document.createTextNode(t.text);
@@ -461,6 +510,11 @@ export class TextDoc {
         if (!(child instanceof HTMLElement)) continue;
         if (child.classList.contains("doc-img")) {
           out.push({ kind: "image", id: child.dataset.id ?? "" });
+          continue;
+        }
+        if (child.classList.contains("doc-link")) {
+          const d = child.dataset;
+          if (d.href) out.push({ kind: "link", label: d.label ?? child.textContent ?? "", href: d.href, ...(d.hint ? { hint: d.hint } : {}) });
           continue;
         }
         if (child.classList.contains("eq")) {
@@ -643,6 +697,136 @@ export class TextDoc {
     r.selectNodeContents(span);
     sel.addRange(r);
     this.emit();
+  }
+
+  /* ---------------- liens (core/links.ts) ---------------- */
+
+  /**
+   * Deuxieme "[" tape juste apres un "[" : le premier est retire et le
+   * selecteur s'ouvre au curseur. Vrai si c'est le cas.
+   */
+  private openPicker(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed || !this.links) return false;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    const before = (node.textContent ?? "").slice(0, r.startOffset);
+    if (!before.endsWith("[")) return false;
+    // Retire le premier "[" (annulable comme une frappe).
+    const del = document.createRange();
+    del.setStart(node, r.startOffset - 1);
+    del.setEnd(node, r.startOffset);
+    sel.removeAllRanges();
+    sel.addRange(del);
+    this.quiet = true;
+    try { if (!document.execCommand("delete")) del.deleteContents(); } finally { this.quiet = false; }
+    const at = sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    if (!at) return true;
+    const rect = caretRect(at, this.root);
+    const links = this.links;
+    void pickLink(rect, links.candidates, links.pageId?.()).then((res) => {
+      this.root.focus({ preventScroll: true });
+      const s = document.getSelection();
+      if (s && this.root.contains(at.startContainer)) { s.removeAllRanges(); s.addRange(at); }
+      if (res.kind === "pick") {
+        const c = res.candidate;
+        this.insertLink({ label: c.label, href: linkUrl(c.ref), hint: cleanHint(pagePathOf(c.spot)) });
+      } else if (res.kind === "back") {
+        this.insertTextAtCaret("[");
+        this.emit();
+      } else {
+        this.insertTextAtCaret("[[" + res.typed);
+        this.emit();
+      }
+    });
+    return true;
+  }
+
+  /** Pose un lien au curseur (selecteur `[[`). */
+  insertLink(link: DocLinkRef): void {
+    this.insertTokens([{ kind: "link", label: link.label, href: link.href, ...(link.hint ? { hint: link.hint } : {}) }]);
+    this.checkLinks();
+  }
+
+  /** Lien colle au curseur (juste avant ou juste apres), s'il y en a un. */
+  private linkAtCaret(): HTMLElement | null {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer)) return null;
+    for (const forward of [false, true]) {
+      const n = neighbour(r, forward);
+      if (n instanceof HTMLElement && n.classList.contains("doc-link")) return n;
+    }
+    return null;
+  }
+
+  private refOf(link: HTMLElement): DocLinkRef {
+    const d = link.dataset;
+    return { href: d.href ?? "", label: d.label ?? link.textContent ?? "", ...(d.hint ? { hint: d.hint } : {}) };
+  }
+
+  private followLink(link: HTMLElement): void {
+    if (!this.links || !link.dataset.href) return;
+    this.links.follow(this.refOf(link));
+  }
+
+  /**
+   * Stylet ou doigt sur un lien : un appui sans glisser le suit. Le stylet
+   * n'ecrit pas (l'evenement ne va pas a l'encre) ; le doigt garde le
+   * defilement (PageView le recoit toujours).
+   */
+  private onLinkDown(e: PointerEvent): void {
+    const link = (e.target as HTMLElement).closest?.(".doc-link");
+    if (!(link instanceof HTMLElement) || !this.root.contains(link)) return;
+    // Souris : le clic suit le lien (ecouteur click), quel que soit l'outil.
+    if (e.pointerType === "mouse") { if (e.button === 0) e.stopImmediatePropagation(); return; }
+    if (e.pointerType === "pen") { e.preventDefault(); e.stopImmediatePropagation(); }
+    const x0 = e.clientX, y0 = e.clientY, t0 = performance.now(), id = e.pointerId;
+    const up = (u: PointerEvent) => {
+      if (u.pointerId !== id) return;
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", cancel, true);
+      if (Math.hypot(u.clientX - x0, u.clientY - y0) < 12 && performance.now() - t0 < 700) this.followLink(link);
+    };
+    const cancel = (c: PointerEvent) => {
+      if (c.pointerId !== id) return;
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", cancel, true);
+    };
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", cancel, true);
+  }
+
+  /** Nouveau libelle d'un lien (la cible ne change pas). */
+  private async renameLink(link: HTMLElement): Promise<void> {
+    const next = await askText("Lien", "Texte affiché", link.dataset.label ?? link.textContent ?? "");
+    const label = next?.replace(/\s+/g, " ").trim();
+    if (!label || !link.isConnected) return;
+    link.dataset.label = label;
+    link.querySelector(".doc-link-label")!.textContent = label;
+    this.emit();
+  }
+
+  /** Grise les liens dont la page a disparu (corbeille ou introuvable). */
+  private checkSeq = 0;
+  checkLinks(): void {
+    const check = this.links?.check;
+    if (!check) return;
+    const nodes = [...this.root.querySelectorAll<HTMLElement>(".doc-link")];
+    if (!nodes.length) return;
+    const seq = ++this.checkSeq;
+    void check(nodes.map((n) => this.refOf(n))).then((states) => {
+      if (seq !== this.checkSeq) return;
+      nodes.forEach((n, i) => {
+        const st = states[i] ?? "ok";
+        n.classList.toggle("dead", st !== "ok");
+        if (st === "ok") delete n.dataset.state; else n.dataset.state = st;
+        n.title = st === "trash" ? "Page supprimée : toucher pour la restaurer"
+          : st === "missing" ? "Page introuvable" : linkTitle(n);
+      });
+    }, () => undefined);
   }
 
   /* ---------------- photos ---------------- */
@@ -2643,6 +2827,17 @@ export class TextDoc {
       }
       if (!["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) this.lastLine = null;
     }
+    // Ctrl+Entree sur un lien : le suivre. F2 : renommer son libelle.
+    if ((e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.altKey) || (e.key === "F2" && !e.ctrlKey && !e.altKey)) {
+      const link = this.linkAtCaret();
+      if (link) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === "F2") void this.renameLink(link);
+        else this.followLink(link);
+        return;
+      }
+    }
     // Retour a la ligne simple : pas de <div> par ligne, le texte reste plat
     // et se relit sans surprise. Seuls les titres et les puces ont un bloc.
     if (e.key === "Enter") {
@@ -2719,6 +2914,21 @@ export class TextDoc {
       }
     }
   }
+}
+
+/** Lien dans le texte : une puce cliquable, son libelle seul a l'ecran (et a l'export). */
+function makeLink(t: { label: string; href: string; hint?: string }): HTMLElement {
+  const link = el("span", {
+    class: "doc-link", contenteditable: "false", role: "link", tabindex: "-1",
+    dataset: { href: t.href, label: t.label, ...(t.hint ? { hint: t.hint } : {}) },
+  }, el("span", { class: "doc-link-label" }, t.label || "lien"));
+  link.title = linkTitle(link);
+  return link;
+}
+
+function linkTitle(link: HTMLElement): string {
+  const where = link.dataset.hint ? ` (${link.dataset.hint.replace(/\/0*(\d+)$/, " p. $1")})` : "";
+  return `Ouvrir${where} · Ctrl+Entrée · clic droit pour renommer`;
 }
 
 /** Formule figee dans le texte : un seul bloc pour le curseur et la gomme. */
@@ -2846,7 +3056,8 @@ type Spot = { node: Text; offset: number; len: number } | { el: HTMLElement };
 /** Texte simple de jetons : formules relues, photos omises. */
 function plainOf(tokens: DocToken[]): string {
   return tokens.map((t) =>
-    t.kind === "br" ? "\n" : t.kind === "math" ? texToPlain(t.latex) : t.kind === "text" ? t.text : "").join("");
+    t.kind === "br" ? "\n" : t.kind === "math" ? texToPlain(t.latex) : t.kind === "text" ? t.text
+      : t.kind === "link" ? t.label : "").join("");
 }
 
 /**

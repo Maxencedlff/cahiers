@@ -10,6 +10,7 @@ import { filterByTitle, gridStep } from "../core/nav";
 import { dividerLabel } from "../core/dividers";
 import type { Spot } from "../core/position";
 import type { Block, ColorKey } from "../core/types";
+import { linkMarkdown, pagePathOf, type LinkRef } from "../core/links";
 
 export interface MenuHost {
   repo: Repo;
@@ -649,7 +650,11 @@ export function buildSearchView(
           `${h.notebookTitle} · ${dividerLabel(h.divider)} p.${h.page} · ${BLOCK_LABEL[h.blockType] ?? h.blockType}`),
       );
       row.addEventListener("mouseenter", () => select(i));
-      results.append(row);
+      const copy = h.pageId ? el("button", {
+        class: "copy-link", title: "Copier le lien vers cet endroit, puis Ctrl+V dans une page (Ctrl+Maj+C)",
+        onclick: () => void copyHitLink(h),
+      }, "Copier le lien") : null;
+      results.append(copy ? el("div", { class: "hit-row" }, row, copy) : row);
     });
     select(0);
     return true;
@@ -677,6 +682,11 @@ export function buildSearchView(
       return;
     }
     if (e.key === "Escape") { e.preventDefault(); onBack(); }
+    // Ctrl+Maj+C : lien vers le resultat choisi, a coller dans une page.
+    if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && hits[sel]) {
+      e.preventDefault();
+      void copyHitLink(hits[sel]);
+    }
   });
 
   // Puces de couleur : la vue Reviser sur cette couleur, dans le cahier
@@ -716,6 +726,41 @@ export function buildSearchView(
   setTimeout(() => { input.focus(); input.select(); }, 40);
   if (input.value.trim()) void run();
   return el("div", { class: "screen" }, inner);
+}
+
+/**
+ * « Copier le lien » d'un resultat : le lien en markdown (core/links.ts),
+ * qu'un Ctrl+V dans le texte d'une page colle en puce. Texte tape : la page
+ * (son titre en libelle) ; formule, zone, photo : ce bloc (son extrait).
+ */
+async function copyHitLink(h: SearchHit): Promise<void> {
+  if (!h.pageId) return;
+  const path = pagePathOf({ notebook: h.notebook, divider: h.divider, number: h.page });
+  const toPage = h.blockType === "text";
+  const ref: LinkRef = toPage ? { pageId: h.pageId, path } : { pageId: h.pageId, blockId: h.blockId, path };
+  const label = (toPage ? h.pageTitle : h.excerpt.replace(/…/g, "").trim()) || `${dividerLabel(h.divider)} p. ${h.page}`;
+  try {
+    await writeClipboard(linkMarkdown(label.slice(0, 80).trim(), ref));
+    toast(`Lien copié : « ${label.slice(0, 50)} ». Ctrl+V dans une page le colle.`, "info", 3000, undefined, "link-copied");
+  } catch {
+    toast("Impossible d'écrire dans le presse-papiers", "warn", 3000);
+  }
+}
+
+/** Presse-papiers : l'API asynchrone, sinon l'ancienne copie par selection. */
+async function writeClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* repli ci-dessous */ }
+  }
+  const area = el("textarea", { style: { position: "fixed", left: "-9999px", top: "0" } });
+  area.value = text;
+  const back = document.activeElement as HTMLElement | null;
+  document.body.append(area);
+  area.select();
+  const ok = document.execCommand("copy");
+  area.remove();
+  back?.focus?.();
+  if (!ok) throw new Error("copie refusee");
 }
 
 function debounce<T extends (...a: any[]) => void>(fn: T, ms: number): T & { cancel: () => void } {

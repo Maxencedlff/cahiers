@@ -15,7 +15,7 @@ export type Command =
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
-  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review";
+  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -95,6 +95,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("0", false, "zoomReset", "Zoom à 100 % (aussi un appui sur « 150 % » en bas du panneau)", "Pages et intercalaires"),
   ctrl("p", false, "exportPage", "Exporter la page en PDF", "Pages et intercalaires"),
   ctrl("p", true, "exportAll", "Exporter tout l'intercalaire en PDF", "Pages et intercalaires"),
+  ctrl("e", false, "exportWord", "Exporter la page en Word (.docx) : titres, listes, équations Word éditables, encre en images", "Pages et intercalaires"),
+  ctrl("e", true, "exportWordAll", "Exporter tout l'intercalaire en Word (un saut de page entre deux pages)", "Pages et intercalaires"),
+  ctrl("o", false, "importPdf", "Importer un PDF (sujet de TD, poly, datasheet) après la page courante, pour l'annoter ; aussi : déposer un .pdf sur la page", "Pages et intercalaires"),
 
   { keys: "Alt+E", label: "Stylo", group: "Outils et couleurs" },
   { keys: "Alt+H", label: "Surligneur", group: "Outils et couleurs" },

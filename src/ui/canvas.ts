@@ -156,6 +156,14 @@ export class InkSurface {
    * sous les traits, dans la seule zone sale.
    */
   private paper: PaperKind = "uni";
+  /**
+   * Page de PDF importee, peinte en fond (sur le papier, sous l'encre) dans
+   * la zone `rect` (unites de page). `img` = rendu pdf.js deja a la taille
+   * de cette zone dans le canvas : chaque repeinte n'en copie qu'un
+   * morceau. Un rendu d'une autre taille (zoom en cours) est etire en
+   * attendant le rendu net. `rect` sans `img` : cadre seul (rendu a venir).
+   */
+  private backdrop: { img: CanvasImageSource | null; w: number; h: number; rect: Bounds } | null = null;
   /** Defilement au doigt, pris en charge ici faute de geste natif. */
   private pan: {
     pointerId: number; startX: number; startY: number; startLeft: number; startScroll: number;
@@ -249,6 +257,20 @@ export class InkSurface {
 
   /** Densite actuelle (pixels physiques par pixel CSS). */
   get density(): number { return this.dpr; }
+
+  /**
+   * Pose (ou retire) la page de PDF peinte en fond. `img` de `w`×`h` pixels ;
+   * null = pas encore rendue, ou liberee (page hors de la vue).
+   */
+  setBackdrop(rect: Bounds | null, img: CanvasImageSource | null = null, w = 0, h = 0): void {
+    const old = this.backdrop;
+    this.backdrop = rect ? { img: img && w > 0 && h > 0 ? img : null, w, h, rect } : null;
+    if (old) this.markDirty(padBounds(old.rect, 2));
+    if (rect) this.markDirty(padBounds(rect, 2));
+  }
+
+  /** Largeur du canvas en pixels physiques (le rendu du PDF s'y cale). */
+  get pixelWidth(): number { return this.canvas.width; }
 
   /** Change le fond de page et repeint (une fois, pas a chaque frame). */
   setPaper(kind: PaperKind): void {
@@ -795,6 +817,7 @@ export class InkSurface {
     ctx.rect(x, y, w, h);
     ctx.clip();
     if (this.paper !== "uni") this.drawPaper(ctx, x, y, w, h, k);
+    if (this.backdrop) this.drawBackdrop(ctx, x, y, w, h, k);
     ctx.scale(k, k);
 
     // Surligneurs d'abord, stylos ensuite : le surlignage passe sous
@@ -926,6 +949,32 @@ export class InkSurface {
       ctx.fillStyle = DOT_STYLE.color;
       for (const d of dots) ctx.fillRect(Math.round(d.x * k - sz / 2), Math.round(d.y * k - sz / 2), sz, sz);
     }
+  }
+
+  /**
+   * Page de PDF dans la zone sale (x, y, w, h en pixels du canvas) : seul le
+   * morceau du rendu qui la recouvre est copie. Fond blanc + filet gris
+   * autour de la page : on voit ou finit le document (page paysage).
+   */
+  private drawBackdrop(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, k: number): void {
+    const bd = this.backdrop!;
+    const rx = bd.rect.x * k, ry = bd.rect.y * k, rw = bd.rect.w * k, rh = bd.rect.h * k;
+    const ix = Math.max(x, rx), iy = Math.max(y, ry);
+    const ax = Math.min(x + w, rx + rw), ay = Math.min(y + h, ry + rh);
+    if (ax > ix && ay > iy) {
+      if (bd.img) {
+        const sx = bd.w / rw, sy = bd.h / rh;
+        ctx.drawImage(bd.img, (ix - rx) * sx, (iy - ry) * sy, (ax - ix) * sx, (ay - iy) * sy,
+          ix, iy, ax - ix, ay - iy);
+      } else {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(ix, iy, ax - ix, ay - iy);
+      }
+    }
+    const lw = Math.max(1, Math.round(this.dpr));
+    ctx.strokeStyle = "rgba(100,110,130,.35)";
+    ctx.lineWidth = lw;
+    ctx.strokeRect(Math.round(rx) - lw / 2, Math.round(ry) - lw / 2, Math.round(rw) + lw, Math.round(rh) + lw);
   }
 
   /** Trace un seul segment de stylo, sans toucher au reste de la page. */

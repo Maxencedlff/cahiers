@@ -176,6 +176,27 @@ describe("pagination : planFlow", () => {
     expect(p.textLines).toBe(4);
   });
 
+  it("schema pousse entre deux paragraphes : sur la page d'arrivee, le texte qui le suivait reste dessous, jamais dessus", () => {
+    // Texte rangees 0-20, schema sous le texte (rangees 26 a 35, pousse
+    // au-dela du bord), texte qui le suit rangees 36-37.
+    const r = [...rows(21), ...rows(2, 36)];
+    const top = TEXT_TOP + 26 * LINE + 3, bottom = TEXT_TOP + 35 * LINE + 30;
+    const s = [vline("a", 150, top, TEXT_TOP + 30 * LINE), vline("b", 500, top + 40, bottom)];
+    const p = planFlow(r, [ink(s)])!;
+    expect(p.strokeIds.sort()).toEqual(["a", "b"]);
+    expect(p.firstRow).toBe(21);
+    const inkBottom = cachedBounds(s[1]).y + cachedBounds(s[1]).h + p.dy;
+    const textTop = TEXT_TOP + p.lead * LINE;
+    expect(cachedBounds(s[0]).y + p.dy).toBeGreaterThanOrEqual(TEXT_TOP - 1e-6);
+    // Le texte qui suivait le schema arrive sous lui (rangee entiere), pas dessus.
+    expect(textTop).toBeGreaterThanOrEqual(inkBottom - 1e-6);
+    expect(textTop - inkBottom).toBeCloseTo(row(36).top - (bottom + 1) - 4, 0);
+    // Le texte deja present sur la page d'arrivee passe sous l'encre et le texte deplaces.
+    const c = composeFlowText("suite 1\nsuite 2", p.lead, "ancien", p.textLines, p.inkLines);
+    expect(c.shift).toBeGreaterThanOrEqual(inkBottom - TEXT_TOP - 1e-6);
+    expect(c.shift).toBeGreaterThanOrEqual(p.textLines * LINE - 1e-6);
+  });
+
   it("reperes sous la coupe : ils partent", () => {
     const flag: FlagBlock = { id: "f", type: "flag", note: "?", rect: { x: 850, y: TEXT_TOP + 33 * LINE, w: 30, h: 30 } };
     const flag2: FlagBlock = { id: "g", type: "flag", note: "?", rect: { x: 850, y: 200, w: 30, h: 30 } };

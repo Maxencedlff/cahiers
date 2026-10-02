@@ -261,6 +261,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   padding: 5px 0 8px; letter-spacing: .3px;
 }
 .page-sep { border-top: 1px dashed var(--line); margin: 0 auto 12px; max-width: 900px; }
+/* Defilement virtualise (donnees-12) : page pas encore construite, a sa
+   hauteur (PageView.sizeSlot), feuille blanche et numero. */
+.page-wrap.page-slot { display: flex; flex-direction: column; }
+.page-slot > .slot-sheet { flex: 1 1 auto; min-height: 0; }
 .sheet {
   background: var(--page-bg); border: 1px solid var(--line); border-radius: 4px;
   box-shadow: var(--shadow); position: relative; overflow: hidden;
@@ -842,6 +846,7 @@ kbd {
    en-tetes (URL, date, pagination) ; la marge vient du padding. */
 .print-host { position: fixed; left: -10000px; top: 0; width: 720px; }
 .print-host .page-wrap.print-src { display: none; }
+.print-host .page-wrap.page-slot { display: none; }
 .print-host .print-slice .sheet { overflow: hidden; }
 @media print {
   @page { size: A4; margin: 0; }
@@ -1021,3 +1026,63 @@ kbd {
   color: #6b7487; background: rgba(255, 255, 255, .9); padding: 0 6px; border-radius: 4px;
 }
 .long-note button { min-height: 44px; }
+
+/* ---------------- liens entre pages (core/links.ts) ---------------- */
+/* Puce de lien dans le texte : libelle souligne, couleur d'accent, un appui la suit. */
+.text-doc .doc-link {
+  display: inline; color: #1d4ed8; cursor: pointer; border-radius: 4px;
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+  padding: 0 2px; margin: 0 1px; user-select: none; -webkit-user-select: none;
+}
+.text-doc .doc-link::before { content: "↗"; font-size: .78em; margin-right: 2px; text-decoration: none; display: inline-block; }
+.text-doc .doc-link:hover { background: rgba(37, 99, 235, .10); }
+/* Page supprimee ou introuvable : grise, barre, motif apres le libelle. */
+.text-doc .doc-link.dead { color: #8a8f98; text-decoration: line-through; }
+.text-doc .doc-link.dead::after { content: " · page supprimée"; font-size: .8em; text-decoration: none; display: inline-block; }
+.text-doc .doc-link.dead[data-state="missing"]::after { content: " · page introuvable"; }
+/* Export PDF : le libelle seul, sans fleche ni etat. */
+body.printing .doc-link { color: inherit; }
+body.printing .doc-link::before, body.printing .doc-link::after { content: none; }
+
+/* Selecteur [[ : liste flottante pres du curseur. */
+.link-picker {
+  position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel, #fff); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(10, 14, 25, .18); padding: 8px; overflow: hidden;
+}
+.link-picker-input { min-height: var(--touch, 44px); font-size: 15px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; }
+.link-picker-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; flex: 1; }
+.link-pick {
+  text-align: left; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  min-height: var(--touch, 44px); padding: 5px 10px; border: 0; border-radius: 6px; background: transparent; cursor: pointer;
+}
+.link-pick.sel { background: rgba(37, 99, 235, .12); }
+.link-pick-label { font-size: 14px; }
+.link-pick-where { font-size: 12px; color: var(--muted); }
+.link-picker-hint { font-size: 12px; color: var(--muted); padding: 0 4px; }
+
+/* « Mentionne dans… » sous la page citee (retroliens, jamais stockes). */
+.backlinks {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -2px auto 10px;
+  font-size: 13px; color: var(--muted);
+}
+.backlinks-title { font-weight: 600; margin-right: 2px; }
+.backlink {
+  display: inline-flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; text-align: left;
+  min-height: var(--touch, 44px); padding: 4px 12px; border: 1px solid var(--line); border-radius: 22px;
+  background: var(--panel, #fff); cursor: pointer;
+}
+.backlink-where { color: #1d4ed8; }
+.backlink-title { color: var(--text, #222); }
+.backlink-labels { font-size: 12px; }
+body.printing .backlinks { display: none; }
+
+/* Recherche : « Copier le lien » a cote de chaque resultat. */
+.hit-row { display: flex; gap: 6px; align-items: stretch; }
+.hit-row .hit { flex: 1; }
+.hit-row .copy-link { min-width: 96px; font-size: 13px; }
+
+/* Export Word : option « Remplacer l'écriture reconnue » (cible 44 px). */
+.docx-option { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; padding: 6px 0; cursor: pointer; }
+.docx-option input[type="checkbox"] { width: 22px; height: 22px; min-height: 0; padding: 0; margin: 2px 0 0; flex: none; border: 0; box-shadow: none; accent-color: var(--accent); }
+.docx-option-note { display: block; margin-top: 4px; }

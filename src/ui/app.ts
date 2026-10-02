@@ -24,7 +24,13 @@ import {
   isUnder, leafName, moveAmongSiblings, moveRefusal, openableDividers, parentPath, parsePagePath,
   renamePrefix, subtreeHeight, type DividerNode,
 } from "../core/dividers";
-import { searchAll, type FlagHit } from "../core/storage/search";
+import { collectLinkPages, searchAll, type FlagHit } from "../core/storage/search";
+import {
+  blockLinkRef, indexById, linkCandidates, parseLinkUrl, resolveLink, spotExists, backlinksTo,
+  type LinkPage, type LinkRef,
+} from "../core/links";
+import type { PageLinks } from "./linkpicker";
+import type { DocLinkRef } from "./textdoc";
 import type { FsAdapter } from "../core/storage/fs";
 import {
   RecognitionQueue, SEND_DEBOUNCE_MS, AUTO_DEBOUNCE_MS, MyScriptBackend, NoBackend, testKeys,
@@ -40,6 +46,7 @@ import {
 } from "../core/ink/usage";
 import type { Block, NotebookMeta, Stroke } from "../core/types";
 import { isPhotoImportKey, PHOTO_IMPORT_KEYS } from "../core/image/photo";
+import { isPdfFile } from "../core/pdf/pdf";
 import { PAPERS } from "../core/paper";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import {
@@ -125,6 +132,12 @@ export class App {
   private positions: Positions;
   /** Endroits quittes par un saut : Alt+← y revient. */
   private nav = new NavHistory();
+  /**
+   * Pages vues par les liens (id, titres, liens poses), relues au plus une
+   * fois toutes les 2,5 s : une page en defilement, ses retroliens et ses
+   * liens a griser ne relancent pas chacun un parcours des cahiers.
+   */
+  private linkScan: { at: number; pages: Promise<LinkPage[]> } | null = null;
   /** Clavier du menu (Entree reprend, lettres filtrent, fleches). */
   private menuKeys: ((e: KeyboardEvent) => boolean) | null = null;
   /**
@@ -251,6 +264,23 @@ export class App {
         if (type === "drop") toast("Déposez l'image sur une page ouverte.", "warn");
       });
     }
+    // Un .pdf depose sur un cahier ouvert : importe dans le panneau vise,
+    // apres sa page courante. En capture, avant le depot d'images du texte.
+    window.addEventListener("dragover", (e) => {
+      const dt = e.dataTransfer;
+      if (this.screen !== "notebook" || !dt) return;
+      if (!Array.from(dt.items ?? []).some((i) => i.kind === "file" && i.type === "application/pdf")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dt.dropEffect = "copy";
+    }, true);
+    window.addEventListener("drop", (e) => {
+      const pdf = Array.from(e.dataTransfer?.files ?? []).find((f) => isPdfFile(f));
+      if (!pdf || this.screen !== "notebook") return;
+      e.preventDefault();
+      e.stopPropagation();
+      void this.importPdf(pdf, e.target);
+    }, true);
     document.addEventListener("keydown", (e) => this.onKey(e));
     // Un appui entre deux Echap : le second ne va plus au menu.
     window.addEventListener("pointerdown", () => { this.lastEsc = false; }, true);
@@ -719,7 +749,8 @@ export class App {
           this.pageLabelEl.textContent = pageLabel(n, total);
         }
       },
-      openLink: (target) => void this.followLink(target),
+      openLink: (target, pageId) => void this.followLink(target, pageId),
+      links: this.pageLinks,
       // Feuille d'un groupe sans pages : un appui ouvre l'un de ses intercalaires.
       openDivider: (d) => void this.switchDividerAndRender(tab, d),
       onTrashed: (entry) => this.offerRestore(entry),
@@ -1965,6 +1996,8 @@ export class App {
       panel.replaceChildren(actions, settings);
       actions.append(
         action("Photo du tableau", `Photos redressées et lues, posées dans le texte (${PHOTO_IMPORT_KEYS})`, () => void this.importImage()),
+        action("Importer un PDF", titleOf("Sujet de TD, poly, datasheet : pages insérées après la page courante, à annoter", "importPdf"),
+          () => void this.importPdf()),
         action(calcShown ? "Fermer la calculatrice" : "Calculatrice", titleOf("Calculatrice", "calc"),
           () => void this.toggleCalculator()),
         action("Insérer une page ici", titleOf("Insérer une page après la page courante", "insertPage"),
@@ -1975,6 +2008,10 @@ export class App {
           () => void view()?.exportPdf("current")),
         action("Exporter l'intercalaire (PDF)", titleOf("Toutes les pages de l'intercalaire", "exportAll"),
           () => void view()?.exportPdf("all")),
+        action("Exporter la page (Word)", titleOf("Document Word éditable : titres, listes, équations, encre en images", "exportWord"),
+          () => void this.exportWord(view(), "current")),
+        action("Exporter l'intercalaire (Word)", titleOf("Toutes les pages dans un document Word, une page par page", "exportWordAll"),
+          () => void this.exportWord(view(), "all")),
         el("div", { class: "sep" }),
         action("Raccourcis clavier", "Fiche des raccourcis (F1)", () => showShortcuts()),
         action("Sonde stylet (diagnostic)", "Ce que renvoie l'écran : type de pointeur, pression, points",
@@ -2034,6 +2071,38 @@ export class App {
    * redressement, OCR, un dialogue par photo. Chaque photo validee est
    * posee aussitot dans la page du panneau vise.
    */
+  /**
+   * Import d'un PDF (priorite 3) dans le panneau vise (ou celui sous le
+   * depot) : pages choisies, inserees apres la page courante.
+   */
+  private async importPdf(file?: File, at?: EventTarget | null): Promise<void> {
+    const pane = at instanceof Element ? at.closest(".pages") : null;
+    const view = (pane && this.tabs.find((t) => t.view?.root === pane)?.view) || this.focusedTab()?.view;
+    if (!view) return;
+    if (this.refuseLocked(view.notebook)) return;
+    const { importPdf } = await import("./pdf-import");
+    await importPdf(this.repo, view, file);
+  }
+
+  /**
+   * Export Word (.docx) de la page courante ou de tout l'intercalaire.
+   * Module charge a la demande : rien au demarrage (batterie, memoire).
+   */
+  private async exportWord(view: PageView | null | undefined, scope: "current" | "all"): Promise<void> {
+    if (!view) return;
+    try {
+      const [{ exportDividerDocx }, src, meta] = await Promise.all([
+        import("./docx-export"), view.docxSources(), this.repo.readMeta(view.notebook).catch(() => null),
+      ]);
+      await exportDividerDocx({
+        repo: this.repo, notebook: view.notebook, notebookTitle: meta?.title || view.notebook,
+        divider: view.divider, scope, current: src.current, shown: src.pages,
+      });
+    } catch (e) {
+      toast(`Export Word impossible : ${(e as Error).message ?? e}`, "err", 6000);
+    }
+  }
+
   private async importImage(): Promise<void> {
     const view = this.focusedTab()?.view;
     if (!view) return;
@@ -2252,16 +2321,77 @@ export class App {
 
   /* ---------------- liens ---------------- */
 
-  private async followLink(target: string): Promise<void> {
-    const hash = target.indexOf("#");
-    const path = hash < 0 ? target : target.slice(0, hash);
-    const blockId = hash < 0 ? "" : target.slice(hash + 1);
+  /** Ancien bloc `link` : par son id de page s'il l'a, sinon par son chemin. */
+  private async followLink(target: string, pageId?: string): Promise<void> {
     // Intercalaire sur un ou plusieurs niveaux (« Elec/E3A/S1/TP 4/0003 », D4).
-    const ref = parsePagePath(path);
-    if (!ref) { toast("Lien invalide", "warn"); return; }
-    this.noteJump();
-    const tab = await this.openNotebook(ref.notebook, ref.divider, ref.number);
-    if (blockId) await tab?.view?.focusBlock(ref.number, blockId);
+    const ref = blockLinkRef({ target, label: "", ...(pageId ? { pageId } : {}) });
+    if (!ref.pageId && !parsePagePath(ref.path)) { toast("Lien invalide", "warn"); return; }
+    await this.followRef(ref);
+  }
+
+  /** Pages vues par les liens, depuis le cache de session de Repo.scanDivider. */
+  private linkPages(fresh = false): Promise<LinkPage[]> {
+    const now = performance.now();
+    if (!fresh && this.linkScan && now - this.linkScan.at < 2500) return this.linkScan.pages;
+    const pages = collectLinkPages(this.repo).then((p) => p ?? []);
+    this.linkScan = { at: now, pages };
+    pages.catch(() => { if (this.linkScan?.pages === pages) this.linkScan = null; });
+    return pages;
+  }
+
+  /** Ce que les pages savent faire de leurs liens (PageViewHost.links). */
+  private readonly pageLinks: PageLinks = {
+    follow: (link: DocLinkRef) => {
+      const ref = parseLinkUrl(link.href, link.hint);
+      if (!ref) { toast("Lien invalide", "warn"); return; }
+      void this.followRef(ref);
+    },
+    candidates: async () => linkCandidates(await this.linkPages(true)),
+    check: async (links) => {
+      const pages = await this.linkPages();
+      const byId = indexById(pages);
+      return links.map((l) => {
+        const ref = parseLinkUrl(l.href, l.hint);
+        if (!ref) return "missing";
+        if (byId.has(ref.pageId)) return "ok";
+        // Pas a la corbeille ici (lecture a la demande, au clic) : grise.
+        return "trash";
+      });
+    },
+    backlinks: async (pageId) => backlinksTo(pageId, await this.linkPages()),
+    openBacklink: (b) => void this.openAt(b.notebook, b.divider, b.number, ""),
+  };
+
+  /**
+   * Suit un lien : par l'id de la page (survit aux renumerotations), sinon
+   * page a la corbeille (« Restaurer »), sinon par le chemin, sinon rien.
+   * La position quittee va dans NavHistory (Alt+← revient).
+   */
+  private async followRef(ref: LinkRef): Promise<void> {
+    let pages = await this.linkPages();
+    if (ref.pageId && !indexById(pages).has(ref.pageId)) pages = await this.linkPages(true);
+    const byId = indexById(pages);
+    const trashed = ref.pageId && !byId.has(ref.pageId) ? await this.repo.findTrashedPage(ref.pageId).catch(() => null) : null;
+    const res = resolveLink(ref, byId, { trashed: !!trashed, pathExists: (s) => spotExists(pages, s) });
+    if (res.kind === "trash" && trashed) {
+      toast(`Page supprimée (${dividerLabel(trashed.divider)} p. ${trashed.page}), elle est dans la corbeille`, "warn", 8000, {
+        label: "Restaurer",
+        run: () => void this.restore(trashed).then(() => { this.linkScan = null; return this.followRef(ref); }),
+      });
+      return;
+    }
+    if (res.kind !== "page") { toast("Lien cassé : la page visée n'existe plus", "warn", 4000); return; }
+    const { notebook, divider, number } = res.page;
+    if (res.via === "path") toast("Page retrouvée par son ancien numéro : vérifie que c'est la bonne", "info", 3000);
+    if (ref.blockId) { await this.openAt(notebook, divider, number, ref.blockId); return; }
+    if (ref.heading) {
+      const target = pages.find((p) => p.id === ref.pageId);
+      const body = target ? await this.repo.readPage(notebook, divider, number).then(
+        (p) => p.blocks.find((b) => b.type === "text" && !b.rect)?.id, () => undefined) : undefined;
+      await this.openAt(notebook, divider, number, body ?? "", body ? `"${ref.heading.replace(/"/g, "")}"` : undefined);
+      return;
+    }
+    await this.openAt(notebook, divider, number, "");
   }
 
   /* ---------------- raccourcis ---------------- */
@@ -2486,6 +2616,9 @@ export class App {
       case "prevDivider": if (notebook) void this.switchDividerBy(-1); return true;
       case "exportPage": if (notebook) void view?.exportPdf("current"); return true;
       case "exportAll": if (notebook) void view?.exportPdf("all"); return true;
+      case "exportWord": if (notebook) void this.exportWord(view, "current"); return true;
+      case "exportWordAll": if (notebook) void this.exportWord(view, "all"); return true;
+      case "importPdf": if (notebook) void this.importPdf(); return true;
       case "closeTab": { const t = this.focusedTab(); if (t) void this.closeTab(t.id); return true; }
       case "nextTab": this.cycleTab(1); return true;
       case "prevTab": this.cycleTab(-1); return true;

@@ -174,11 +174,26 @@ export interface ImageBlock extends BlockBase {
 /** Point d'une photo, en pixels. */
 export interface ImagePoint { x: number; y: number }
 
+/**
+ * Page d'un PDF importe (priorite 3), en fond de la page de l'appli : une
+ * page de l'appli par page du PDF. `src` = le PDF entier, copie une seule
+ * fois dans assets/ ; `page` = numero dans ce PDF (1-based) ; `rect` = sa
+ * place sur la feuille (A4, page paysage ajustee en largeur). L'encre, le
+ * surlignage et le texte tapes par-dessus sont ceux de la page (bloc `ink`
+ * de fond, texte) : ils restent lies a cette page du PDF. `annotations` reste
+ * lu et affiche (format prevu des la v1), l'appli n'y ecrit pas.
+ */
 export interface PdfBlock extends BlockBase {
   type: "pdf";
   src: string;
   page: number;
   annotations: Stroke[];
+  /** Texte de la page extrait a l'import (recherche Ctrl+K). Optionnel. */
+  text?: string;
+  /** Nom du fichier importe (« TD3 filtres.pdf »), pour l'afficher. Optionnel. */
+  name?: string;
+  /** Taille de la page dans le PDF (points, rotation comprise). Optionnel. */
+  size?: { w: number; h: number };
 }
 
 /** Mode d'angle d'un calcul (meme valeur que core/calc/engine). */
@@ -214,9 +229,14 @@ export interface GraphBlock extends BlockBase {
 
 export interface LinkBlock extends BlockBase {
   type: "link";
-  /** "Maths/Cours/0012#<blockId>" */
+  /** "Maths/Cours/0012#<blockId>" : chemin lisible au moment de la pose, repli seulement. */
   target: string;
   label: string;
+  /**
+   * Id de la page visee (rech-10) : le lien la retrouve apres une
+   * renumerotation ou un renommage (core/links.ts). Absent : ancien bloc.
+   */
+  pageId?: string;
 }
 
 export interface FlagBlock extends BlockBase {

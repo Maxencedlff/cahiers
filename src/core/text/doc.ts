@@ -6,6 +6,8 @@
  *   **gras**, *italique*, $formule LaTeX$, retour a la ligne = "\n",
  *   ![](img:<id>) = photo posee dans le texte (bloc image de meme id),
  *   [texte en couleur]{.theoreme} = une des 5 couleurs de la palette,
+ *   [libellé](cahiers:<pageId>#<blockId> "Maths/Cours/0012") = lien vers
+ *   une page (core/links.ts : cible par id de page, chemin lisible en repli),
  *   en debut de ligne (D11) : "# ", "## ", "### " = titres, "- " = puce,
  *   "1. " = liste numerotee, deux espaces devant par niveau de liste.
  * Les caracteres speciaux du texte (\ $ * [ ]) sont echappes par un
@@ -37,6 +39,11 @@ export type DocToken =
   | { kind: "text"; text: string; bold?: boolean; italic?: boolean; color?: ColorKey }
   | { kind: "math"; latex: string; color?: ColorKey }
   | { kind: "image"; id: string }
+  /**
+   * Lien vers une page (core/links.ts) : `href` = « cahiers:<pageId>… »,
+   * `hint` = chemin lisible « Maths/Cours/0012 » au moment de la pose.
+   */
+  | { kind: "link"; label: string; href: string; hint?: string }
   | { kind: "br" }
   | ({ kind: "line" } & LineFormat);
 
@@ -151,8 +158,7 @@ export function docTitle(tokens: DocToken[]): string {
     if (!f || f.style[0] !== "h") continue;
     const r = Number(f.style[1]);
     if (r >= rank) continue;
-    const text = line.tokens.map((t) =>
-      t.kind === "math" ? texToPlain(t.latex) : t.kind === "text" ? t.text : "").join("").replace(/\s+/g, " ").trim();
+    const text = lineText(line.tokens);
     if (!text) continue;
     best = text;
     rank = r;
@@ -160,7 +166,31 @@ export function docTitle(tokens: DocToken[]): string {
   return best;
 }
 
+/** Texte lisible d'une ligne : formules relues, liens par leur libelle. */
+function lineText(tokens: DocToken[]): string {
+  return tokens.map((t) =>
+    t.kind === "math" ? texToPlain(t.latex) : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "")
+    .join("").replace(/\s+/g, " ").trim();
+}
+
+/** Tous les titres # du texte, dans l'ordre (cibles de liens, selecteur `[[`). */
+export function docHeadings(tokens: DocToken[]): string[] {
+  const out: string[] = [];
+  for (const line of docLines(tokens)) {
+    if (!line.format || line.format.style[0] !== "h") continue;
+    const text = lineText(line.tokens);
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+/** Liens poses dans le texte. */
+export function docLinks(tokens: DocToken[]): Extract<DocToken, { kind: "link" }>[] {
+  return tokens.filter((t): t is Extract<DocToken, { kind: "link" }> => t.kind === "link");
+}
+
 const IMG_OPEN = "![](img:";
+const LINK_OPEN = "](cahiers:";
 
 const ESCAPED = /[\\$*[\]]/g;
 const COLOR_KEYS = new Set<string>(PALETTE.map((p) => p.key));
@@ -201,6 +231,13 @@ function serializePlain(tokens: DocToken[]): string {
     if (t.kind === "br") { out += "\n"; continue; }
     if (t.kind === "line") continue;
     if (t.kind === "image") { out += `${IMG_OPEN}${t.id})`; continue; }
+    if (t.kind === "link") {
+      // href deja encode par core/links.ts : ni blanc, ni parenthese, ni guillemet.
+      const href = t.href.replace(/[\s()"]/g, encodeURIComponent);
+      const hint = t.hint ? ` "${t.hint.replace(/["\n\r]/g, "")}"` : "";
+      out += `[${t.label.replace(ESCAPED, (c) => `\\${c}`)}](${href}${hint})`;
+      continue;
+    }
     // Le LaTeX passe tel quel : un $ n'y apparait jamais seul, toujours en \$.
     if (t.kind === "math") { out += `$${t.latex.replace(/(^|[^\\])\$/g, "$1\\$")}$`; continue; }
     // Les retours a la ligne d'un texte deviennent des jetons br a la lecture.
@@ -245,6 +282,14 @@ function parseFrom(src: string, lineStart: boolean): DocToken[] {
     if (c === "\\" && i + 1 < src.length) { buf += src[++i]; continue; }
     if (c === "\n") { flush(); out.push({ kind: "br" }); continue; }
     if (c === "[") {
+      // Lien d'abord : son "]" n'est jamais suivi de {.couleur}.
+      const link = linkAt(src, i);
+      if (link) {
+        flush();
+        out.push(link.token);
+        i = link.end - 1;
+        continue;
+      }
       const group = colorGroup(src, i);
       if (group) {
         flush();
@@ -291,6 +336,23 @@ function parseFrom(src: string, lineStart: boolean): DocToken[] {
   }
   flush();
   return normalizeTokens(out);
+}
+
+/** Lien [libellé](cahiers:…) ou [libellé](cahiers:… "chemin") ouvert en `start`. */
+function linkAt(src: string, start: number): { token: DocToken; end: number } | null {
+  let label = "";
+  let j = start + 1;
+  for (; j < src.length; j++) {
+    const c = src[j];
+    if (c === "\\" && j + 1 < src.length) { label += src[++j]; continue; }
+    if (c === "]" || c === "[" || c === "\n") break;
+    label += c;
+  }
+  if (src[j] !== "]" || !src.startsWith(LINK_OPEN, j)) return null;
+  const m = /^\]\((cahiers:[^\s)"]+)(?: "([^"\n]*)")?\)/.exec(src.slice(j, j + 600));
+  if (!m) return null;
+  const token: DocToken = { kind: "link", label, href: m[1], ...(m[2] ? { hint: m[2] } : {}) };
+  return { token, end: j + m[0].length };
 }
 
 /**
@@ -341,6 +403,11 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
       continue;
     }
     if (t.kind === "line") { out.push({ kind: "line", ...lineFormatOf(t) }); continue; }
+    if (t.kind === "link") {
+      if (!t.href) continue;
+      out.push({ kind: "link", label: t.label, href: t.href, ...(t.hint ? { hint: t.hint } : {}) });
+      continue;
+    }
     out.push(t);
   }
   return out;
@@ -354,7 +421,8 @@ export function docImageIds(src: string): string[] {
 /** Texte brut pour la recherche : les formules gardent leur LaTeX. */
 export function docPlainText(src: string): string {
   return parseDoc(src).map((t) =>
-    t.kind === "br" ? "\n" : t.kind === "math" ? t.latex : t.kind === "text" ? t.text : "").join("");
+    t.kind === "br" ? "\n" : t.kind === "math" ? t.latex : t.kind === "text" ? t.text
+      : t.kind === "link" ? t.label : "").join("");
 }
 
 /**
@@ -402,7 +470,7 @@ export function docClipboardText(tokens: DocToken[]): string {
   const lines = docLines(tokens);
   const nums = listNumbers(lines.map((l) => l.format));
   return lines.map((line, k) => (line.format ? lineMarker(line.format, nums[k]) : "") + line.tokens.map((t) =>
-    t.kind === "math" ? `$${t.latex}$` : t.kind === "text" ? t.text : "").join("")).join("\n");
+    t.kind === "math" ? `$${t.latex}$` : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "").join("")).join("\n");
 }
 
 /** Commandes LaTeX relues en texte : lettres grecques par leur nom, relations en ASCII. */

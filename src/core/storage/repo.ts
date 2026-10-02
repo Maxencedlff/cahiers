@@ -765,6 +765,45 @@ export class Repo {
     return target;
   }
 
+  /**
+   * Page d'id `pageId` dans la corbeille (lien vers une page supprimee) :
+   * de quoi la restaurer, ou null. Lit les pages de la corbeille, du plus
+   * recent au plus ancien ; seulement a la demande (un clic sur un lien).
+   */
+  async findTrashedPage(pageId: string): Promise<TrashEntry | null> {
+    if (!pageId || !(await this.fs.exists(TRASH_DIR))) return null;
+    const bins = (await this.fs.listDirs(TRASH_DIR)).sort().reverse();
+    const walk = async (bin: string, rel: string, depth: number): Promise<TrashEntry | null> => {
+      const segs = rel.split("/");
+      if (segs.length >= 2) {
+        for (const name of await this.fs.listFiles(joinPath(bin, rel))) {
+          const n = parsePageNumber(name);
+          if (n === null) continue;
+          try {
+            const raw = await this.fs.readText(joinPath(bin, rel, name));
+            if (!raw.includes(pageId) || (JSON.parse(raw) as Page).id !== pageId) continue;
+          } catch { continue; }
+          return { bin, dir: segs[0], divider: segs.slice(1).join("/"), page: n };
+        }
+      }
+      if (depth <= 0) return null;
+      for (const d of await this.fs.listDirs(joinPath(bin, rel))) {
+        if (d === ASSETS_DIR) continue;
+        const hit = await walk(bin, rel ? joinPath(rel, d) : d, depth - 1);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    for (const b of bins) {
+      const bin = joinPath(TRASH_DIR, b);
+      try {
+        const hit = await walk(bin, "", MAX_DEPTH + 1);
+        if (hit) return hit;
+      } catch { /* dossier de corbeille illisible : le suivant */ }
+    }
+    return null;
+  }
+
   /** Un dossier de corbeille par suppression, date a la milliseconde. */
   private async newBin(): Promise<string> {
     const stamp = trashStamp(new Date());
@@ -928,6 +967,13 @@ export class Repo {
 
   async readAsset(dir: string, divider: string, src: string): Promise<string> {
     return this.fs.readDataUrl(joinPath(dir, divider, src));
+  }
+
+  /** Fichiers de assets/ de l'intercalaire (dedoublonnage des PDF importes). Vide s'il n'existe pas. */
+  async listAssets(dir: string, divider: string): Promise<string[]> {
+    const rel = joinPath(dir, divider, ASSETS_DIR);
+    if (!(await this.fs.exists(rel))) return [];
+    return this.fs.listFiles(rel).catch(() => []);
   }
 
   async ensureRootLayout(): Promise<void> {

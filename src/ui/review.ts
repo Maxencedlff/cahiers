@@ -83,7 +83,7 @@ export function drawVignette(item: ReviewItem, density = window.devicePixelRatio
   return canvas;
 }
 
-function paintStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
+export function paintStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
   const pts = pointsOf(s);
   if (!pts.length) return;
   ctx.strokeStyle = colorOf(s.color, s.tool);
@@ -190,11 +190,13 @@ export function buildReviewView(host: ReviewHost, onBack: () => void, state: Rev
   const inner = el("div", { class: "screen-inner review" });
   const screen = el("div", { class: "screen review-screen" }, inner);
   const exportBtn = el("button", { title: "Exporter cette fiche de révision en PDF" }, "Exporter en PDF");
+  const wordBtn = el("button", { title: "Exporter cette fiche de révision en document Word (équations éditables)" }, "Exporter en Word");
   inner.append(el("div", { class: "row" },
     el("button", { onclick: onBack, title: "Retour (Échap)" }, "Retour"),
     el("h1", { style: { margin: "0 0 0 8px" } }, "Réviser"),
     el("div", { class: "spacer" }),
     exportBtn,
+    wordBtn,
   ));
   const nbRow = el("div", { class: "review-chips", role: "group", "aria-label": "Matière" });
   const colorRow = el("div", { class: "review-chips", role: "group", "aria-label": "Couleurs" });
@@ -378,6 +380,7 @@ export function buildReviewView(host: ReviewHost, onBack: () => void, state: Rev
     info.textContent = `${found.count} extrait${found.count > 1 ? "s" : ""}${where} · ${found.pages} page${found.pages > 1 ? "s" : ""} lue${found.pages > 1 ? "s" : ""} en ${ms} ms`
       + " · ↑↓ pour choisir, Entrée ouvre, 1 à 5 : couleurs, Alt+← revient ici";
     exportBtn.disabled = !found.count;
+    wordBtn.disabled = !found.count;
     if (restore) {
       restore = false;
       const target = state.focusKey ? list.querySelector<HTMLElement>(`[data-key="${CSS.escape(state.focusKey)}"]`) : null;
@@ -391,6 +394,16 @@ export function buildReviewView(host: ReviewHost, onBack: () => void, state: Rev
     const nbTitle = state.notebook ? notebooks.find((n) => n.dir === state.notebook)?.title ?? state.notebook : "Toutes les matières";
     const title = `Révision · ${nbTitle}${state.divider ? ` · ${state.divider.replace(/\//g, " › ")}` : ""} · ${colorsTitle(state.colors)}`;
     void printReview(result, title, !state.notebook);
+  });
+
+  wordBtn.addEventListener("click", () => {
+    if (!result?.count) return;
+    const found = result;
+    const nbTitle = state.notebook ? notebooks.find((n) => n.dir === state.notebook)?.title ?? state.notebook : "Toutes les matières";
+    const title = `Révision · ${nbTitle}${state.divider ? ` · ${state.divider.replace(/\//g, " › ")}` : ""} · ${colorsTitle(state.colors)}`;
+    // Module charge a la demande : rien au demarrage.
+    void import("./docx-export").then((m) => m.exportReviewDocx(found, title, !state.notebook))
+      .catch((e) => toast(`Export Word impossible : ${(e as Error).message ?? e}`, "err", 6000));
   });
 
   // Sur le document : une puce repeinte perd le clavier, la vue le garde.

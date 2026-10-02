@@ -21,7 +21,8 @@
     "iink-ts": "^3.1.0",
     "katex": "^0.16.11",
     "mathjs": "^13.2.0",
-    "mathlive": "^0.110.0"
+    "mathlive": "^0.110.0",
+    "pdfjs-dist": "^6.3.289"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",

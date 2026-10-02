@@ -125,6 +125,14 @@ les deux PC.
 - Un appui sur « p. 4 / 12 » (ou `Ctrl+G`) : liste des pages avec date et
   premiere ligne. `Alt+←` (ou le bouton retour de la souris) revient d'avant un
   saut : recherche, repere, lien, liste des pages.
+- Liens entre pages : taper `[[` dans le texte ouvre un selecteur (titres de
+  pages, titres #, formules ; matiere et intercalaire filtrent), `Entree` pose
+  le lien. Dans la recherche (`Ctrl+K`), « Copier le lien » (`Ctrl+Maj+C`) puis
+  `Ctrl+V` dans une page. Un clic, un appui au doigt ou au stylet (sans encre)
+  ou `Ctrl+Entree` suit le lien ; clic droit ou `F2` change son texte. Le lien
+  vise l'id de la page : il survit aux insertions et a la pagination. Page a la
+  corbeille : lien grise, « Restaurer ». « Mentionne dans… » sous une page
+  liste celles qui la citent.
 
 ## Organisation du code
 
@@ -222,6 +230,44 @@ coupée sur plusieurs feuilles A4, entre deux lignes, jamais au milieu d'une
 photo ou d'une formule. L'encre est rendue en haute densité et découpée par
 feuille.
 
+## Export Word
+
+`Ctrl+E` (la page) ou `Ctrl+Maj+E` (l'intercalaire, un saut de page Word entre
+deux pages), aussi dans le menu « ⋯ », et « Exporter en Word » dans la vue
+Réviser. Nom proposé : « Matière - Intercalaire - p.N.docx ». Le document est
+éditable : titres en styles Titre 1 à 3 (volet de navigation), puces et listes
+numérotées Word avec leurs niveaux, gras, italique, couleurs, formules en vraies
+équations Word (Cambria Math), photos, courbes en image, calculs en équation.
+L'écriture manuscrite part en images nettes, une par zone, à sa place entre les
+lignes du texte. Si la page porte de l'écriture reconnue, une case « Remplacer
+l'écriture reconnue par du texte » la convertit en texte et en équations. A4,
+marges normales, Calibri, langue française pour le correcteur.
+
+Limites : l'encre posée sur du texte tapé (soulignement, flèche) part en image
+à côté de la ligne, pas par-dessus ; dans une ligne de texte, Word affiche les
+fractions en petit (équation en ligne) ; les PDF importés ne sont pas exportés.
+
+## Import et annotation de PDF
+
+Sujets de TD, polys, datasheets : menu « ⋯ » → « Importer un PDF », `Ctrl+O`,
+ou déposer le fichier `.pdf` sur la page. On choisit les pages (« toutes »,
+« 1-3, 5 », « 6- ») ; elles arrivent après la page courante, une page de
+l'appli par page du PDF, à l'échelle A4 (une page paysage est ajustée en
+largeur, avec de la place dessous pour les notes). Le PDF est copié une seule
+fois dans `assets/` de l'intercalaire (`<nom>-<empreinte>.pdf`) : l'importer
+de nouveau ne le recopie pas.
+
+On écrit, surligne, tape du texte et des formules par-dessus exactement comme
+sur une page normale (lasso, gomme, `Ctrl+Z` compris) ; le PDF reste un fond,
+jamais modifié. Une page de PDF ne déborde jamais : le texte tapé s'arrête au
+bas de la feuille. Le texte du PDF est indexé : `Ctrl+K` retrouve un mot du
+poly et l'encadre sur la page. L'export PDF de l'intercalaire rend le document
+d'origine avec les annotations par-dessus (rendu en haute densité).
+
+Limites : un PDF scanné (sans texte) n'est pas lu par l'OCR ; un PDF protégé
+par mot de passe est refusé ; les polices non embarquées sont remplacées par
+celles de Windows.
+
 ## Reconnaissance manuscrite
 
 Elle passe par MyScript iink, dont le service est **distant**. Consequence
@@ -316,6 +362,8 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Alt+←` | revenir d'avant un saut (aussi le bouton retour de la souris) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | zoom avant, arrière (50 à 300 %), retour à 100 % ; aussi Ctrl+molette et pinch à deux doigts, chaque panneau le sien |
 | `Ctrl+P` / `Ctrl+Maj+P` | exporter en PDF la page, tout l'intercalaire |
+| `Ctrl+E` / `Ctrl+Maj+E` | exporter en Word (.docx) la page, tout l'intercalaire |
+| `Ctrl+O` | importer un PDF apres la page courante, pour l'annoter (aussi : deposer un .pdf sur la page) |
 | `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |
 | `Ctrl+K` | recherche globale |

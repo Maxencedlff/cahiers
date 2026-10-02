@@ -35,6 +35,7 @@ import {
   type InkClip, type Pt as InkPt, type Transform,
 } from "../core/ink/selection";
 import { TextDoc } from "./textdoc";
+import { buildBacklinks, type PageLinks } from "./linkpicker";
 import { snapLines } from "./linesnap";
 import { LINE, TEXT_TOP, clearOfInk, rowAt, rowBottom, type InkBox } from "../core/textlayout";
 import { absorbTextBoxes } from "../core/text/doc";
@@ -55,8 +56,15 @@ import {
   type FlowPlan, type FlowSelection,
 } from "../core/paginate";
 import { measureRows, rowStart, type MeasuredRows } from "./pagebreak";
+import {
+  SizeMemo, anchorIndex, anchoredScroll, estimateSize, isFastScroll, measureSize, pageAt, planWindow,
+  slotHeight, visibleRange, type SlotSize,
+} from "../core/virtual";
 import { parseDoc } from "../core/text/doc";
 import { emptyPage } from "../core/types";
+import { PdfLayer } from "./pdflayer";
+import { bytesOfDataUrl } from "./pdf";
+import { pdfBlockOf } from "../core/pdf/pdf";
 
 /**
  * Largeur de feuille minimale hors zoom : le texte (21 px a 900 de large)
@@ -103,7 +111,10 @@ export interface PageViewHost {
   onDirty: () => void;
   /** La page en vue a change (navigation, defilement, ajout, suppression). */
   onPageChange?: (n: number, total: number) => void;
-  openLink: (target: string) => void;
+  /** Ancien bloc `link` : chemin lisible, et id de la page s'il l'a (rech-10). */
+  openLink: (target: string, pageId?: string) => void;
+  /** Liens du texte tape : suivre, selecteur `[[`, pages grisees, retroliens. */
+  links?: PageLinks;
   /** Ouvre un intercalaire de la meme matiere (sous-dossier d'un groupe, D4). */
   openDivider?: (divider: string) => void;
   /** Une page vient de partir a la corbeille : l'appli propose « Annuler ». */
@@ -239,6 +250,31 @@ interface FlowUndo {
 const PRE_EDIT_MS = 2000;
 
 /**
+ * Emplacement d'une page en mode defilement virtualise (donnees-12,
+ * core/virtual.ts). La page est montee (`loaded`, vrai DOM : texte, canvas,
+ * blocs) pres de l'ecran ; ailleurs, un emplacement vide (`ph`) de la meme
+ * hauteur la remplace, avec son numero.
+ */
+interface Slot {
+  number: number;
+  /** Emplacement vide, dans la vue tant que la page n'est pas montee. */
+  ph: HTMLElement;
+  loaded: LoadedPage | null;
+  /** Page illisible : la feuille d'erreur tient la place. */
+  broken: HTMLElement | null;
+  /** Lecture en cours (montage). */
+  loading: boolean;
+  size: SlotSize;
+}
+
+/**
+ * Hauteurs des pages vues pendant la seance (unites de page), par cahier,
+ * intercalaire et numero : une ancienne page longue revue n'est plus
+ * estimee a une A4. Commune aux vues (split, onglets rouverts).
+ */
+const sizeMemo = new SizeMemo();
+
+/**
  * Vue d'un intercalaire. La page reste l'unite de base dans les deux modes
  * (section 5) : en defilement les pages sont simplement empilees, separees
  * par un trait discret, et gardent leur numero.
@@ -307,6 +343,13 @@ export class PageView {
   private merged = new Set<string>();
   /** Fond de page de l'intercalaire (D12), lu dans cahier.json. */
   private paperKind: PaperKind = "uni";
+  /** Pages de PDF importees, peintes en fond des feuilles (src/ui/pdflayer.ts). */
+  /** Texte d'une page de PDF en train d'etre remis (pdfPageFull). */
+  private pdfReverting = false;
+  private pdfLayer = new PdfLayer({
+    key: (src) => `${this.notebook}/${this.divider}/${src}`,
+    read: async (src) => bytesOfDataUrl(await this.host.repo.readAsset(this.notebook, this.divider, src)),
+  });
   /**
    * Zoom de la vue (lot 11), propre a chaque panneau, en memoire seulement.
    * Il multiplie la largeur affichee des feuilles ; les traits restent en
@@ -333,6 +376,25 @@ export class PageView {
   private pinch: { ids: [number, number]; start: [Pt, Pt] } | null = null;
   /** Defilement au doigt hors de la feuille (marges, bandeaux, numeros). */
   private rootPan: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | null = null;
+  /*
+   * Defilement virtualise (donnees-12) : un emplacement par page, dans
+   * l'ordre ; `this.list` ne tient que les pages montees.
+   */
+  private slots: Slot[] = [];
+  /** Largeur des feuilles au dernier relayout (px), pour monter une page a la bonne taille. */
+  private sheetWidth = 0;
+  /** Derniere page A4 mesuree : estimation des pages pas encore vues. */
+  private typical: SlotSize | null = null;
+  private windowRaf = 0;
+  private windowTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Premiere page a l'ecran a l'image precedente (defilement rapide). */
+  private lastFirst: number | null = null;
+  /**
+   * Compteur des acces disque qui changent une page hors de la vue
+   * (debordement, resultat de reconnaissance ecrit par l'appli) : une page
+   * lue avant est relue, jamais montee perimee.
+   */
+  private diskEpoch = 0;
 
   constructor(
     private host: PageViewHost,
@@ -353,6 +415,8 @@ export class PageView {
     this.root.addEventListener("scroll", () => {
       if (this.root.isConnected && !this.restore) this.savedScroll = this.root.scrollTop;
     }, { passive: true });
+    // Defilement virtualise : pages montees et demontees a l'image suivante.
+    this.root.addEventListener("scroll", () => this.scheduleWindow(), { passive: true });
     this.zoomChip = el("button", {
       class: "zoom-chip",
       title: titleOf("Revenir à 100 %", "zoomReset"),
@@ -437,12 +501,14 @@ export class PageView {
     if (!r || !this.root.isConnected || !this.root.clientWidth) return;
     this.restore = null;
     if ("page" in r) {
-      const p = this.list.find((x) => x.number === r.page);
-      if (p) this.root.scrollTop += p.wrap.getBoundingClientRect().top - this.root.getBoundingClientRect().top;
+      // Page montee ou simple emplacement (defilement virtualise).
+      const node = this.nodeOf(r.page);
+      if (node) this.root.scrollTop += node.getBoundingClientRect().top - this.root.getBoundingClientRect().top;
     } else {
       this.root.scrollTop = r.top;
     }
     this.savedScroll = this.root.scrollTop;
+    this.scheduleWindow();
   }
 
   /**
@@ -488,13 +554,23 @@ export class PageView {
   /** Detache les pages affichees et libere leur memoire (canvas, ecouteurs). */
   private teardown(): void {
     this.clearSelection();
-    for (const p of this.list) {
-      p.dead = true;
-      p.ro?.disconnect();
-      p.doc.dispose();
-      p.surface?.dispose();
-    }
+    for (const p of this.list) this.releasePage(p);
     this.list = [];
+    this.slots = [];
+    this.lastFirst = null;
+  }
+
+  /**
+   * Libere une page quittee (changement de page, rendu, demontage en
+   * defilement) : ecouteurs, observateur, canvas, fond PDF. Ce qu'elle
+   * contenait est deja ecrit ou attend dans la file (pendingSave).
+   */
+  private releasePage(p: LoadedPage): void {
+    p.dead = true;
+    p.ro?.disconnect();
+    p.doc.dispose();
+    this.pdfLayer.drop(p);
+    p.surface?.dispose();
   }
 
   /* ---------------- rendu ---------------- */
@@ -530,9 +606,13 @@ export class PageView {
       return;
     }
     this.host.onPageChange?.(this.current, this.total);
-    const visible = this.viewMode === "pages"
-      ? nums.filter((n) => n === this.current)
-      : nums;
+    // Defilement : un emplacement par page, seules celles pres de l'ecran
+    // sont lues et construites (donnees-12). 100 pages coutaient 2,9 s.
+    if (this.viewMode === "scroll") {
+      await this.renderSlots(nums, gen);
+      return;
+    }
+    const visible = nums.filter((n) => n === this.current);
 
     for (const n of visible) {
       let page: Page;
@@ -542,9 +622,6 @@ export class PageView {
         if (gen !== this.renderGen) return;
         // Jamais d'ecran gris muet : on dit ce qui se passe. Rien n'est
         // ecrit sous ce numero tant que la page reste illisible.
-        if (this.viewMode === "scroll" && this.root.childElementCount > 1) {
-          this.root.append(el("div", { class: "page-sep" }));
-        }
         this.root.append(this.unreadableSheet(n, e, nums));
         toast(`Page ${n} de ${dividerLabel(this.divider)} illisible : ${errorText(e)}`, "err", 6000);
         continue;
@@ -558,10 +635,6 @@ export class PageView {
       const loaded = this.buildPage(n, page);
       if (waiting) this.pendingSave.set(page.id, loaded);
       this.list.push(loaded);
-      // Separateur discret entre deux pages en mode defilement.
-      if (this.viewMode === "scroll" && this.root.childElementCount > 1) {
-        this.root.append(el("div", { class: "page-sep" }));
-      }
       this.root.append(loaded.wrap);
     }
     this.relayout();
@@ -638,6 +711,329 @@ export class PageView {
         ),
       ),
     );
+  }
+
+  /* ---------------- defilement virtualise (donnees-12, core/virtual.ts) ---------------- */
+
+  /**
+   * Defilement : un emplacement par page, a sa hauteur (mesuree ou estimee).
+   * Seules la page courante et ses voisines sont lues et construites ici ;
+   * les autres le sont en approchant de l'ecran (updateWindow).
+   */
+  private async renderSlots(nums: number[], gen: number): Promise<void> {
+    for (const n of nums) {
+      const s: Slot = {
+        number: n, ph: this.placeholder(n), loaded: null, broken: null, loading: false,
+        size: estimateSize(sizeMemo.get(this.memoKey(n)), this.typical),
+      };
+      if (this.slots.length) this.root.append(el("div", { class: "page-sep" }));
+      this.slots.push(s);
+      this.root.append(s.ph);
+    }
+    this.relayout();
+    // Export : les pages sont montees une a une par exportPdf.
+    if (this.exporting) return;
+    const i = Math.max(0, this.slotIndex(this.current));
+    if (this.root.isConnected && this.root.clientHeight) this.scrollToSlot(i);
+    await this.fillWindow(gen, i);
+  }
+
+  /** Emplacement vide d'une page pas montee : feuille blanche et numero, meme hauteur. */
+  private placeholder(n: number): HTMLElement {
+    return el("div", { class: "page-wrap page-slot", dataset: { page: String(n) } },
+      el("div", { class: "sheet slot-sheet" }),
+      el("div", { class: "page-num" }, `${dividerLabel(this.divider)} p. ${n}`));
+  }
+
+  /** Numero d'un emplacement vide (apres une renumerotation). */
+  private labelSlot(s: Slot): void {
+    s.ph.dataset.page = String(s.number);
+    const num = s.ph.lastElementChild;
+    if (num) num.textContent = `${dividerLabel(this.divider)} p. ${s.number}`;
+  }
+
+  private memoKey(n: number): string {
+    return `${this.notebook}\u0000${this.divider}\u0000${n}`;
+  }
+
+  /** Echelle des feuilles (largeur / PAGE_W) au dernier relayout. */
+  private get sheetK(): number {
+    return (this.sheetWidth || PAGE_W) / PAGE_W;
+  }
+
+  private slotIndex(n: number): number {
+    return this.slots.findIndex((s) => s.number === n);
+  }
+
+  /** Element a l'ecran pour cet emplacement : la page, sa feuille d'erreur, ou l'emplacement vide. */
+  private slotNode(s: Slot): HTMLElement {
+    return s.loaded?.wrap ?? s.broken ?? s.ph;
+  }
+
+  /** Element d'une page dans la vue (monte ou non), pour y amener le defilement. */
+  private nodeOf(n: number): HTMLElement | null {
+    const s = this.slots.find((x) => x.number === n);
+    if (s) return this.slotNode(s);
+    return this.list.find((p) => p.number === n)?.wrap ?? null;
+  }
+
+  private boxOf(i: number): { top: number; bottom: number } {
+    const r = this.slotNode(this.slots[i]).getBoundingClientRect();
+    return { top: r.top, bottom: r.bottom };
+  }
+
+  /** Amene le haut d'une page en haut de la vue (sans animation). */
+  private scrollToSlot(i: number): void {
+    const node = this.slotNode(this.slots[i]);
+    this.root.scrollTop += node.getBoundingClientRect().top - this.root.getBoundingClientRect().top;
+  }
+
+  /**
+   * Amene une page a l'ecran. `smooth` : anime seulement si elle est proche
+   * (deux ecrans) ; plus loin, on y saute, sans construire tout le chemin.
+   * Vrai si le defilement est anime (il n'est pas fini au retour).
+   */
+  private revealPage(n: number, smooth = false): boolean {
+    const node = this.nodeOf(n);
+    if (!node) return false;
+    const view = this.root.getBoundingClientRect();
+    const d = node.getBoundingClientRect().top - view.top;
+    const anim = smooth && Math.abs(d) <= 2 * view.height;
+    if (anim) this.root.scrollTo({ top: this.root.scrollTop + d, behavior: "smooth" });
+    else this.root.scrollTop += d;
+    this.scheduleWindow();
+    return anim;
+  }
+
+  /**
+   * Va a la page `n` en defilement et attend qu'elle soit construite
+   * (recherche, lien, repere : on mesure ensuite dans la page).
+   */
+  private async ensureMounted(n: number): Promise<void> {
+    if (this.viewMode !== "scroll" || !this.slots.length) return;
+    const i = this.slotIndex(n);
+    if (i < 0) return;
+    if (this.root.isConnected && this.root.clientHeight) this.scrollToSlot(i);
+    await this.fillWindow(this.renderGen, i);
+  }
+
+  /**
+   * Pages a monter et a demonter pour l'ecran actuel. Vue detachee (menu,
+   * autre onglet) : autour de l'emplacement `around`.
+   */
+  private windowPlan(around?: number): ReturnType<typeof planWindow> | null {
+    const count = this.slots.length;
+    if (!count) return null;
+    let vis: [number, number] | null = null;
+    const view = this.root.getBoundingClientRect();
+    if (this.root.isConnected && view.height > 0) {
+      vis = visibleRange(count, (i) => this.boxOf(i), view.top, view.bottom);
+    }
+    if (!vis) {
+      const c = around ?? Math.max(0, this.slotIndex(this.current));
+      vis = [c, c];
+    }
+    const mounted: number[] = [];
+    this.slots.forEach((s, i) => { if (s.loaded) mounted.push(i); });
+    return planWindow(count, vis, mounted, (i) => this.isPinned(this.slots[i]));
+  }
+
+  /** Monte tout de suite les pages a l'ecran et leurs voisines (rendu, saut). */
+  private async fillWindow(gen: number, around?: number): Promise<void> {
+    const plan = this.windowPlan(around);
+    if (!plan) return;
+    await Promise.all(plan.mount.map((i) => this.mountSlot(this.slots[i], gen)));
+    this.scheduleWindow();
+  }
+
+  /** Revoit les pages montees a l'image suivante (defilement, zoom, fin d'ecriture). */
+  private scheduleWindow(): void {
+    if (this.windowRaf || this.viewMode !== "scroll" || !this.slots.length) return;
+    this.windowRaf = requestAnimationFrame(() => {
+      this.windowRaf = 0;
+      this.updateWindow();
+    });
+  }
+
+  private retryWindow(ms: number): void {
+    if (this.windowTimer) return;
+    this.windowTimer = setTimeout(() => { this.windowTimer = null; this.scheduleWindow(); }, ms);
+  }
+
+  /**
+   * Monte ce qui approche de l'ecran, demonte ce qui s'en eloigne. Rien
+   * pendant un debordement (pages en cours d'ecriture), un geste de zoom
+   * (apercu en transformation) ou un export. Defilement rapide : on attend
+   * l'arret, sans construire les pages qui ne font que passer.
+   */
+  private updateWindow(): void {
+    if (this.viewMode !== "scroll" || !this.slots.length || this.exporting || this.gesture || this.peek) return;
+    if (!this.root.isConnected) return;
+    if (this.flowing) { this.retryWindow(200); return; }
+    const view = this.root.getBoundingClientRect();
+    if (!view.height) return;
+    const vis = visibleRange(this.slots.length, (i) => this.boxOf(i), view.top, view.bottom);
+    if (!vis) return;
+    const fast = isFastScroll(this.lastFirst, vis[0]);
+    this.lastFirst = vis[0];
+    if (fast) { this.retryWindow(120); return; }
+    const plan = this.windowPlan();
+    if (!plan) return;
+    if (plan.unmount.length) {
+      this.anchored(() => { for (const i of plan.unmount) this.unmountSlot(this.slots[i]); });
+    }
+    const gen = this.renderGen;
+    for (const i of plan.mount) void this.mountSlot(this.slots[i], gen);
+  }
+
+  /**
+   * Une page qu'on ne demonte pas : elle a le clavier, une ecriture en
+   * attente (on l'ecrit d'abord), la selection au lasso, un trait en cours
+   * ou une formule ouverte.
+   */
+  private isPinned(s: Slot): boolean {
+    const p = s.loaded;
+    if (!p) return false;
+    if (this.pendingSave.has(p.page.id) || this.sel?.loaded === p) return true;
+    if (p.surface?.busyPen || p.doc.editingFormula) return true;
+    const a = document.activeElement;
+    return !!a && a !== document.body && p.wrap.contains(a);
+  }
+
+  /**
+   * Lit et construit la page d'un emplacement. Une ecriture hors vue
+   * pendant la lecture (debordement, resultat de reconnaissance ecrit par
+   * l'appli) : la page est relue, jamais montee perimee.
+   */
+  private async mountSlot(s: Slot, gen: number): Promise<LoadedPage | null> {
+    if (s.loaded) return s.loaded;
+    if (s.broken || s.loading) return null;
+    s.loading = true;
+    let page: Page | null = null;
+    try {
+      for (let tries = 0; tries < 40; tries++) {
+        const epoch = this.diskEpoch;
+        try {
+          page = await this.host.repo.readPage(this.notebook, this.divider, s.number);
+        } catch (e) {
+          if (gen !== this.renderGen || !this.slots.includes(s)) return null;
+          if (epoch !== this.diskEpoch || this.flowing) { await new Promise((r) => setTimeout(r, 60)); continue; }
+          // Jamais d'ecran gris muet : on dit ce qui se passe. Rien n'est
+          // ecrit sous ce numero tant que la page reste illisible.
+          const broken = this.unreadableSheet(s.number, e, this.slots.map((x) => x.number));
+          this.anchored(() => { s.ph.replaceWith(broken); s.broken = broken; });
+          toast(`Page ${s.number} de ${dividerLabel(this.divider)} illisible : ${errorText(e)}`, "err", 6000);
+          return null;
+        }
+        if (gen !== this.renderGen || !this.slots.includes(s)) return null;
+        if (epoch === this.diskEpoch && !this.flowing) break;
+        page = null;
+        await new Promise((r) => setTimeout(r, 60));
+      }
+    } finally {
+      s.loading = false;
+    }
+    if (!page || s.loaded) return s.loaded;
+    // Page dont l'ecriture a echoue : la version en attente, pas celle du disque.
+    const waiting = this.pendingSave.get(page.id);
+    if (waiting) page = waiting.page;
+    const loaded = this.buildPage(s.number, page);
+    if (waiting) this.pendingSave.set(page.id, loaded);
+    this.anchored(() => {
+      s.ph.replaceWith(loaded.wrap);
+      s.loaded = loaded;
+      // this.list reste dans l'ordre des pages.
+      const after = this.list.findIndex((p) => p.number > loaded.number);
+      this.list.splice(after < 0 ? this.list.length : after, 0, loaded);
+      this.layoutPage(loaded);
+    });
+    this.noteSize(s);
+    return loaded;
+  }
+
+  /** Demonte une page loin de l'ecran : son emplacement vide reprend sa hauteur mesuree. */
+  private unmountSlot(s: Slot): void {
+    const p = s.loaded;
+    if (!p) return;
+    this.noteSize(s);
+    if (p.number > 0) s.number = p.number;
+    this.labelSlot(s);
+    this.sizeSlot(s);
+    p.wrap.replaceWith(s.ph);
+    s.loaded = null;
+    const i = this.list.indexOf(p);
+    if (i >= 0) this.list.splice(i, 1);
+    this.releasePage(p);
+  }
+
+  /** Retire l'emplacement d'une page supprimee (et la page si elle est montee). */
+  private dropSlot(n: number): void {
+    const i = this.slotIndex(n);
+    if (i < 0) return;
+    const s = this.slots[i];
+    const node = this.slotNode(s);
+    const sep = i > 0 ? node.previousElementSibling : node.nextElementSibling;
+    if (sep?.classList.contains("page-sep")) sep.remove();
+    node.remove();
+    if (s.loaded) {
+      const j = this.list.indexOf(s.loaded);
+      if (j >= 0) this.list.splice(j, 1);
+      this.releasePage(s.loaded);
+    }
+    this.slots.splice(i, 1);
+  }
+
+  /** Hauteur reelle d'une page montee, retenue pour son emplacement et la seance. */
+  private noteSize(s: Slot): void {
+    const p = s.loaded;
+    if (!p || !p.wrap.isConnected) return;
+    const sheetPx = p.sheet.offsetHeight, wrapPx = p.wrap.offsetHeight;
+    if (!sheetPx || !wrapPx) return;
+    s.size = measureSize(sheetPx, wrapPx, this.sheetK);
+    sizeMemo.set(this.memoKey(p.number || s.number), s.size.sheet);
+    // Page A4 ordinaire (ni bandeau ni retroliens) : modele des pages pas encore vues.
+    const plain = !p.long && !p.notes.childElementCount && p.wrap.childElementCount <= 3
+      && !isLongPage(p.surface?.height ?? 0);
+    if (!plain) return;
+    const before = this.typical;
+    this.typical = s.size;
+    const k = this.sheetK;
+    if (!before || Math.abs(slotHeight(before, k) - slotHeight(s.size, k)) >= 1) {
+      // Premiere mesure : les estimations suivent, sans saut a l'ecran.
+      this.anchored(() => {
+        for (const x of this.slots) {
+          if (x.size.measured) continue;
+          x.size = estimateSize(sizeMemo.get(this.memoKey(x.number)), this.typical);
+          if (!x.loaded) this.sizeSlot(x);
+        }
+      });
+    }
+  }
+
+  /** Hauteur de l'emplacement vide, a l'echelle des feuilles. */
+  private sizeSlot(s: Slot): void {
+    s.ph.style.height = `${slotHeight(s.size, this.sheetK)}px`;
+    s.ph.style.maxWidth = this.wrapMax;
+    s.ph.style.width = this.wrapW;
+  }
+
+  /**
+   * Garde a la meme place a l'ecran la page lue pendant que `change`
+   * monte, demonte ou retaille des emplacements (au-dessus d'elle surtout).
+   */
+  private anchored(change: () => void): void {
+    if (this.viewMode !== "scroll" || this.exporting || !this.root.isConnected || !this.slots.length) {
+      change();
+      return;
+    }
+    const view = this.root.getBoundingClientRect();
+    const a = anchorIndex(this.slots.length, (i) => this.boxOf(i), view.top);
+    const anchor = a >= 0 ? this.slots[a] : null;
+    const before = anchor ? this.slotNode(anchor).getBoundingClientRect().top : 0;
+    change();
+    if (!anchor || !this.slots.includes(anchor)) return;
+    const after = this.slotNode(anchor).getBoundingClientRect().top;
+    if (Math.abs(after - before) >= 0.5) this.root.scrollTop = anchoredScroll(this.root.scrollTop, before, after);
   }
 
   /* ---------------- bandeaux : lecture seule et copies de conflit ---------------- */
@@ -894,7 +1290,7 @@ export class PageView {
         };
       },
       openLive: (id) => this.openLive(loaded, id),
-    });
+    }, this.host.links && { ...this.host.links, pageId: () => page.id });
     const readOnly = isFutureVersion(page) || this.readOnly || !!copy;
     const sheet = el("div", { class: `sheet${readOnly ? " readonly" : ""}` }, canvas, doc.root, overlay);
     // Les numeros de page restent affiches dans les deux modes (section 5),
@@ -908,6 +1304,13 @@ export class PageView {
         ? `${dividerLabel(this.divider)} · copie de la p. ${n} venue de ${copy.label}`
         : `${dividerLabel(this.divider)} p. ${n}${day ? ` · ${day}` : ""}`),
     );
+    // Retroliens (« Mentionné dans… »), calcules a la volee depuis l'index.
+    const links = this.host.links;
+    if (links && !copy) {
+      void links.backlinks(page.id).then((list) => {
+        if (list.length) wrap.append(buildBacklinks(list, links.openBacklink));
+      }, () => undefined);
+    }
 
     const loaded: LoadedPage = {
       number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null, readOnly, notes,
@@ -1206,6 +1609,8 @@ export class PageView {
     const d = density ?? this.densityOf(loaded, width, h * k);
     if (force) loaded.surface?.layout(width, h, d);
     else loaded.surface?.fit(width, h, d);
+    // Page de PDF en fond : rendue a la taille du canvas (pas pendant l'export, qui l'attend lui-meme).
+    if (!this.exporting) this.pdfLayer.sync(loaded, this.viewMode === "scroll" ? this.root : null);
   }
 
   /* ---------------- pagination automatique (core/paginate.ts) ---------------- */
@@ -1317,6 +1722,8 @@ export class PageView {
     // Test rapide a chaque frappe : bas du texte (marge du bas retiree) et encre.
     const pad = (parseFloat(getComputedStyle(loaded.doc.root).paddingBottom) || 0) / k;
     if ((loaded.textH ?? 0) - pad <= TEXT_LIMIT + 0.5 && inkExtent(loaded.page.blocks) <= INK_LIMIT + 0.5) return;
+    // Page d'un PDF : elle ne deborde jamais (la suite du sujet est la page d'apres).
+    if (pdfBlockOf(loaded.page)) { this.pdfPageFull(loaded); return; }
     const m = measureRows(loaded.doc.root, loaded.sheet.getBoundingClientRect().top, k);
     const plan = planFlow(m.rows, loaded.page.blocks);
     if (!plan) return;
@@ -1419,6 +1826,15 @@ export class PageView {
     this.fitSheet(p, true);
     this.paintOverlay(p);
     for (const q of this.list) this.relabel(q);
+    // Defilement virtualise : la page creee a son emplacement, juste apres.
+    const at = this.slots.findIndex((s) => s.loaded === after);
+    if (at >= 0) {
+      this.slots.splice(at + 1, 0, {
+        number: n, ph: this.placeholder(n), loaded: p, broken: null, loading: false,
+        size: estimateSize(undefined, this.typical),
+      });
+      for (const s of this.slots) if (!s.loaded) this.labelSlot(s);
+    }
     return p;
   }
 
@@ -1433,6 +1849,8 @@ export class PageView {
    */
   private async flowOut(from: LoadedPage, plan: FlowPlan, m: MeasuredRows): Promise<LoadedPage | null> {
     this.flowing = true;
+    // Une page lue pendant le debordement est relue avant d'etre montee.
+    this.diskEpoch++;
     const now = performance.now();
     const prev = from.prevText && now - from.prevText.t < FLOW_EDIT_MS ? from.prevText : null;
     const shift = from.lastShift && now - from.lastShift.t < FLOW_EDIT_MS ? from.lastShift : null;
@@ -1568,6 +1986,7 @@ export class PageView {
       this.flowAgain.clear();
       if (shown && !again.includes(shown)) again.push(shown);
       for (const p of again) if (p.settled) this.maybeFlow(p, p.page.continues ? "settle" : undefined);
+      this.scheduleWindow();
     }
   }
 
@@ -1588,6 +2007,7 @@ export class PageView {
     this.flowUndo = null;
     if (this.locked()) return;
     this.flowing = true;
+    this.diskEpoch++;
     this.holdKeys();
     try {
       await this.flush();
@@ -1602,6 +2022,8 @@ export class PageView {
         if (check?.id === u.toId) {
           await this.serial(async () => {
             await this.host.repo.deletePage(this.notebook, this.divider, toNum);
+            // Defilement virtualise : son emplacement part avec elle (montee ou non).
+            this.dropSlot(toNum);
             for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === u.toId)) {
               p.dead = true;
               p.number = 0;
@@ -1611,10 +2033,8 @@ export class PageView {
             this.shiftNumbers(toNum + 1, -1);
           });
           this.total--;
-          if (toShown) {
-            toShown.ro?.disconnect();
-            toShown.doc.dispose();
-            toShown.surface?.dispose();
+          if (toShown && this.list.includes(toShown)) {
+            this.releasePage(toShown);
             const sep = toShown.wrap.previousElementSibling;
             if (sep?.classList.contains("page-sep")) sep.remove();
             toShown.wrap.remove();
@@ -1672,6 +2092,7 @@ export class PageView {
     } finally {
       this.flowing = false;
       this.releaseKeys();
+      this.scheduleWindow();
     }
   }
 
@@ -1746,6 +2167,7 @@ export class PageView {
     if (this.locked() || this.flowing) return;
     if (!(await this.readyToRenumber("annulation"))) return;
     this.flowing = true;
+    this.diskEpoch++;
     try {
       for (const id of [...made].reverse()) {
         const n = await this.findPageNumber(id);
@@ -1944,34 +2366,55 @@ export class PageView {
     // blocs et canvas suivent --k ; au-dela de la vue, on defile de cote.
     const z = this.effectiveZoom;
     const width = Math.round(base * z);
-    for (const p of this.list) {
-      p.wrap.style.maxWidth = `${width}px`;
-      p.wrap.style.width = z > 1 || width > avail ? `${width}px` : "";
-      p.sheet.style.height = "";
-      p.sheet.style.setProperty("--k", String(width / PAGE_W));
-      this.fitSheet(p, true);
-      // Il faut la page reellement a l'ecran pour savoir quelle ligne passe
-      // sous chaque ancienne photo : c'est le cas au premier relayout visible.
-      if (this.root.isConnected && this.root.clientWidth > 0) this.adoptFloatingImages(p);
-      this.paintOverlay(p);
-      // Pagination : une page construite hors ecran se mesure maintenant.
-      if (!p.settled && this.root.isConnected) void this.settle(p);
-    }
+    this.sheetWidth = width;
+    this.wrapMax = `${width}px`;
+    this.wrapW = z > 1 || width > avail ? `${width}px` : "";
+    for (const p of this.list) this.layoutPage(p);
+    // Defilement virtualise : les emplacements vides suivent la largeur (zoom).
+    for (const s of this.slots) if (!s.loaded) this.sizeSlot(s);
     // Le cadre est sur le canvas (unites de page), la barre en pixels : elle suit.
     if (this.sel) this.paintSelBar();
+    this.scheduleWindow();
+  }
+
+  /** Largeur de feuille du dernier relayout (styles de .page-wrap). */
+  private wrapMax = "";
+  private wrapW = "";
+
+  /** Met une page a la largeur des feuilles (relayout, page montee en defilement). */
+  private layoutPage(p: LoadedPage): void {
+    p.wrap.style.maxWidth = this.wrapMax;
+    p.wrap.style.width = this.wrapW;
+    p.sheet.style.height = "";
+    p.sheet.style.setProperty("--k", String(this.sheetK));
+    this.fitSheet(p, true);
+    // Il faut la page reellement a l'ecran pour savoir quelle ligne passe
+    // sous chaque ancienne photo : c'est le cas au premier relayout visible.
+    if (this.root.isConnected && this.root.clientWidth > 0) this.adoptFloatingImages(p);
+    this.paintOverlay(p);
+    // Pagination : une page construite hors ecran se mesure maintenant.
+    if (!p.settled && this.root.isConnected) void this.settle(p);
   }
 
   /** Repere la page en vue pour que "derniere position" reste juste. */
   private onScroll(): void {
     this.refreshDensity();
-    if (this.viewMode !== "scroll" || !this.list.length) return;
+    // Pages de PDF : rendues en approchant de l'ecran, liberees en s'eloignant.
+    if (this.viewMode === "scroll" && !this.exporting) this.pdfLayer.syncAll(this.list, this.root);
+    if (this.viewMode !== "scroll" || (!this.list.length && !this.slots.length)) return;
     // Position de chaque page par rapport au haut de la vue. offsetTop se
     // mesurait depuis le body (la vue n'est pas positionnee) : les barres du
     // haut s'y ajoutaient et l'indicateur restait une page en retard.
     const top = this.root.getBoundingClientRect().top + 80;
-    let best = this.list[0].number;
-    for (const p of this.list) {
-      if (p.wrap.getBoundingClientRect().top <= top) best = p.number;
+    let best: number;
+    if (this.slots.length) {
+      // Toutes les pages, montees ou non (emplacements virtualises).
+      best = this.slots[pageAt(this.slots.length, (i) => this.boxOf(i), top)].number;
+    } else {
+      best = this.list[0].number;
+      for (const p of this.list) {
+        if (p.wrap.getBoundingClientRect().top <= top) best = p.number;
+      }
     }
     if (best !== this.current) {
       this.current = best;
@@ -2414,6 +2857,8 @@ export class PageView {
    * sauvegarde de la vue.
    */
   runIo<T>(fn: () => Promise<T>): Promise<T> {
+    // Une page lue avant cette ecriture n'est pas montee (defilement virtualise).
+    this.diskEpoch++;
     return this.serial(fn);
   }
 
@@ -2538,7 +2983,7 @@ export class PageView {
       }
       case "link": {
         const box = el("div", { class: "block-box" },
-          el("button", { class: "ghost", onclick: () => this.host.openLink(block.target) },
+          el("button", { class: "ghost", onclick: () => this.host.openLink(block.target, block.pageId) },
             `→ ${block.label}`));
         return place(box, block.rect);
       }
@@ -3277,7 +3722,11 @@ export class PageView {
     } else {
       // Vue detachee (menu, autre onglet) : elle ira a la page au rattachement.
       if (!this.root.isConnected) this.restore = { page: n };
-      else if (scroll) this.list.find((p) => p.number === n)?.wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+      else if (scroll) {
+        // Page proche : defilement anime ; lointaine (Ctrl+G) : saut, puis la
+        // page est construite avant de rendre la main (defilement virtualise).
+        if (!this.revealPage(n, true)) await this.fillWindow(this.renderGen, this.slotIndex(n));
+      }
       this.host.onPageChange?.(n, this.total);
     }
     this.host.onDirty();
@@ -3311,13 +3760,19 @@ export class PageView {
   /** En defilement, ramene a l'ecran la page courante apres un nouveau rendu. */
   private revealCurrent(): void {
     if (this.viewMode !== "scroll") return;
-    this.list.find((p) => p.number === this.current)?.wrap.scrollIntoView({ block: "start" });
+    this.revealPage(this.current);
   }
 
   /** Decale les numeros des pages en memoire (affichees ou en file d'ecriture). */
   private shiftNumbers(from: number, delta: number): void {
     const all = new Set<LoadedPage>([...this.list, ...this.pendingSave.values()]);
     for (const p of all) if (p.number >= from) p.number += delta;
+    // Emplacements du defilement virtualise (pages montees ou non).
+    for (const s of this.slots) {
+      if (s.number < from) continue;
+      s.number += delta;
+      if (!s.loaded) this.labelSlot(s);
+    }
   }
 
   async newPage(insertHere = false): Promise<void> {
@@ -3333,6 +3788,56 @@ export class PageView {
     await this.render();
     this.revealCurrent();
     this.host.onDirty();
+  }
+
+  /**
+   * Import d'un PDF (src/ui/pdf-import.ts) : les pages arrivent apres la page
+   * courante, dans l'ordre, les suivantes sont renumerotees. Rend le numero
+   * de la premiere, ou null (lecture seule, page pas encore ecrite).
+   */
+  async insertPages(pages: Page[]): Promise<number | null> {
+    if (this.locked() || !pages.length) return null;
+    if (!(await this.readyToRenumber("import"))) return null;
+    const first = this.current + 1;
+    await this.serial(async () => {
+      for (let i = 0; i < pages.length; i++) {
+        const made = await this.host.repo.createPage(this.notebook, this.divider, first + i, pages[i]);
+        this.shiftNumbers(made, +1);
+      }
+    });
+    this.current = first;
+    this.host.rememberPage?.(this.notebook, this.divider, first);
+    await this.render();
+    this.revealCurrent();
+    this.host.onDirty();
+    return first;
+  }
+
+  /**
+   * Texte tape qui deborde d'une page de PDF : la page ne deborde jamais (la
+   * suite du sujet est sur la page d'apres). La derniere frappe est defaite
+   * et on dit pourquoi ; l'encre est deja bornee au bas de la feuille.
+   */
+  private pdfPageFull(loaded: LoadedPage): void {
+    // Le texte remis passe par setBodyText, qui revient ici : une seule fois.
+    if (this.pdfReverting) return;
+    const prev = loaded.prevText;
+    const recent = loaded.editedAt !== undefined && performance.now() - loaded.editedAt < FLOW_EDIT_MS;
+    if (prev && recent && prev.content !== (this.bodyText(loaded.page)?.content ?? "")) {
+      this.pdfReverting = true;
+      try {
+        this.setFlowText(loaded, prev.content);
+        if (prev.caret !== null) loaded.doc.setCaretOffset(prev.caret);
+      } finally {
+        this.pdfReverting = false;
+      }
+      loaded.prevText = undefined;
+      this.fitSheet(loaded);
+      this.queueSave(loaded);
+    }
+    loaded.editedAt = undefined;
+    toast("Page du PDF pleine : le texte tapé s'arrête au bas de la feuille. "
+      + "Pour continuer, insère une page après (Ctrl+Maj+N).", "warn", 4000, undefined, "pdf-full");
   }
 
   /**
@@ -3407,9 +3912,7 @@ export class PageView {
     // En lecture seule, le mode change ici sans toucher a cahier.json.
     if (!this.readOnly) await this.host.repo.setViewMode(this.notebook, this.divider, mode);
     await this.render();
-    if (mode === "scroll") {
-      this.list.find((p) => p.number === this.current)?.wrap.scrollIntoView({ block: "start" });
-    }
+    if (mode === "scroll") this.revealPage(this.current);
   }
 
   get paper(): PaperKind { return this.paperKind; }
@@ -3616,6 +4119,18 @@ export class PageView {
     root.addEventListener("pointercancel", panEnd);
   }
 
+  /**
+   * Export Word (src/ui/docx-export.ts) : ce qui attend est ecrit, puis les
+   * pages en memoire de la vue, avec leur texte a l'ecran (mesure des
+   * lignes). Les autres pages sont relues sur le disque par l'export.
+   */
+  async docxSources(): Promise<{ current: number; pages: { number: number; page: Page; root: HTMLElement; sheet: HTMLElement }[] }> {
+    await this.flush();
+    const shown = this.list.filter((p) => !p.dead && !p.copy);
+    await Promise.all(shown.map((p) => p.doc.imagesReady().catch(() => undefined)));
+    return { current: this.current, pages: shown.map((p) => ({ number: p.number, page: p.page, root: p.doc.root, sheet: p.sheet })) };
+  }
+
   /** Un export en cours : un second Ctrl+P ne relance pas l'impression. */
   private exporting = false;
 
@@ -3652,16 +4167,34 @@ export class PageView {
       this.resizeObserver.disconnect();
       // Les photos doivent etre chargees avant la mesure, sinon trous blancs
       // et hauteurs fausses (en Tauri, le src arrive apres l'IPC).
-      await Promise.all(this.list.map((p) => p.doc.imagesReady()));
-      await Promise.all([...this.root.querySelectorAll("img")].map((img) =>
-        img.src ? img.decode().catch(() => undefined) : undefined));
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      if (this.list.length > 3) toast("Préparation du PDF…", "info", 2000);
-      // Chaque page devient une ou plusieurs feuilles A4 imprimees a part
-      // (clones), l'encre rendue en densite 3 et decoupee par feuille.
-      for (const p of this.list) {
-        const sheets = await this.printSheets(p, urls);
-        p.wrap.after(...sheets);
+      const ready = async (root: ParentNode, pages: LoadedPage[]) => {
+        await Promise.all(pages.map((p) => p.doc.imagesReady()));
+        await Promise.all([...root.querySelectorAll("img")].map((img) =>
+          img.src ? img.decode().catch(() => undefined) : undefined));
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      };
+      if (Math.max(this.list.length, this.slots.length) > 3) toast("Préparation du PDF…", "info", 2000);
+      if (this.slots.length) {
+        // Defilement virtualise : chaque page est montee, mise en feuilles,
+        // puis demontee aussitot. 100 pages ne sont jamais en memoire ensemble.
+        const gen = this.renderGen;
+        for (const s of [...this.slots]) {
+          const p = await this.mountSlot(s, gen);
+          if (gen !== this.renderGen) break;
+          if (!p) continue;
+          await ready(p.wrap, [p]);
+          const sheets = await this.printSheets(p, urls);
+          p.wrap.after(...sheets);
+          this.unmountSlot(s);
+        }
+      } else {
+        await ready(this.root, this.list);
+        // Chaque page devient une ou plusieurs feuilles A4 imprimees a part
+        // (clones), l'encre rendue en densite 3 et decoupee par feuille.
+        for (const p of this.list) {
+          const sheets = await this.printSheets(p, urls);
+          p.wrap.after(...sheets);
+        }
       }
       for (const p of this.list) p.wrap.classList.add("print-src");
       document.title = scope === "current"
@@ -3682,9 +4215,7 @@ export class PageView {
       this.current = prevPage;
       this.exporting = false;
       await this.render();
-      if (prevMode === "scroll") {
-        this.list.find((p) => p.number === prevPage)?.wrap.scrollIntoView({ block: "start" });
-      }
+      if (prevMode === "scroll") this.revealPage(prevPage);
     }
   }
 
@@ -3730,6 +4261,8 @@ export class PageView {
     // la densite de l'ecran (une page en densite 3 pese ~30 Mo).
     const canvas = sheet.querySelector("canvas");
     this.fitSheet(p, true, 3);
+    // Page de PDF : rendue en densite 3 avant la copie des tranches.
+    await this.pdfLayer.ensure(p);
     const slices: Blob[] = [];
     if (canvas && canvas.height) {
       const ratio = canvas.height / H;
@@ -3746,6 +4279,8 @@ export class PageView {
       tmp.width = tmp.height = 0;
     }
     this.fitSheet(p, true);
+    // Rendu en densite 3 rendu tout de suite (100 pages d'un poly a l'export).
+    this.pdfLayer.drop(p);
 
     const n = plan.cuts.length - 1;
     const out: HTMLElement[] = [];
@@ -3800,6 +4335,8 @@ export class PageView {
    */
   async focusBlock(pageNumber: number, blockId: string, query?: string): Promise<void> {
     await this.goTo(pageNumber, false);
+    // Defilement virtualise : la page lointaine est construite d'abord.
+    await this.ensureMounted(pageNumber);
     const loaded = this.list.find((p) => p.number === pageNumber);
     if (!loaded) return;
     // La page vient d'etre rendue ou rattachee : on mesure apres sa mise en
@@ -3810,13 +4347,20 @@ export class PageView {
     const block = loaded.page.blocks.find((b) => b.id === blockId);
     const terms = query ? parseQuery(query).terms : [];
     if (block?.type === "image" && !block.rect && loaded.doc.revealImage(blockId)) return;
+    // Page de PDF : le mot cherche, retrouve dans le texte du document.
+    let pdfBox: Bounds | null = null;
+    if (block?.type === "pdf") {
+      pdfBox = await this.pdfLayer.locate(loaded.page, terms);
+      if (!pdfBox) { loaded.wrap.scrollIntoView({ block: "start" }); return; }
+    }
     if (block?.type === "text" && !block.rect && terms.length && loaded.doc.revealText(terms)) return;
-    let rect = block?.rect;
+    let rect = pdfBox ?? block?.rect;
     // Mot manuscrit reconnu : son cadre sur la page.
     if (!rect && block?.type === "ink" && terms.length) {
       rect = block.words?.find((w) => w.box && terms.some((t) => fold(w.label).text.includes(t)))?.box;
     }
-    if (!rect) { loaded.wrap.scrollIntoView({ block: "center" }); return; }
+    // Sans bloc (lien vers une page) : le haut de la page, pas son milieu.
+    if (!rect) { loaded.wrap.scrollIntoView({ block: blockId ? "center" : "start" }); return; }
     const scale = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
     const marker = el("div", {
       class: "block-box",
@@ -3972,6 +4516,8 @@ export class PageView {
         toast("Enregistrement rétabli");
       }
       this.host.onDirty();
+      // Pages ecrites : celles loin de l'ecran peuvent maintenant etre demontees.
+      this.scheduleWindow();
     });
   }
 

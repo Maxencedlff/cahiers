@@ -1,7 +1,8 @@
 import type { Repo } from "./repo";
 import type { Block, ColorKey, Page } from "../types";
 import { dividerMatches, extractReview, groupReview, type ReviewFilter, type ReviewItem, type ReviewResult, type ReviewSource } from "../review";
-import { docImageIds, docTitle, parseDoc, texToPlain } from "../text/doc";
+import { docHeadings, docLinks, docTitle, parseDoc, texToPlain, type DocToken } from "../text/doc";
+import { blockLinkRef, parseLinkUrl, type IndexedLink, type LinkAnchor, type LinkPage } from "../links";
 import {
   fold, makeExcerpt, matchesAll, notebookMatches, parseQuery, queryReady,
   type ExcerptPart,
@@ -22,6 +23,10 @@ export interface SearchHit {
   parts: ExcerptPart[];
   /** Derniere modification de la page : les resultats recents d'abord. */
   modified: string;
+  /** Id de la page (cible d'un lien, « Copier le lien »). Absent : ancien resume. */
+  pageId?: string;
+  /** Titre (ou premiere ligne) de la page : libelle du lien copie. */
+  pageTitle?: string;
 }
 
 export interface FlagHit {
@@ -75,6 +80,14 @@ export interface PageIndex {
   blocks: IndexedBlock[];
   /** Extraits en couleur (vue de revision, core/review.ts). Absent : aucun. */
   review?: ReviewItem[];
+  /** Id de la page : les liens la visent par lui (core/links.ts). */
+  id?: string;
+  /** Titres # du texte tape, dans l'ordre (selecteur `[[`). Absent : aucun. */
+  headings?: string[];
+  /** Liens poses dans la page (retroliens). Absent : aucun. */
+  links?: IndexedLink[];
+  /** Formules et zones reconnues, cibles possibles d'un lien. Absent : aucune. */
+  anchors?: LinkAnchor[];
 }
 
 /** Longueur de la premiere ligne montree dans la liste des pages. */
@@ -94,7 +107,10 @@ export function firstLineOf(text: string, max = FIRST_LINE_MAX): string {
 
 export function indexPage(page: Page): PageIndex {
   const body = page.blocks.find((b) => b.type === "text" && !b.rect);
-  const inText = new Set(body?.type === "text" ? docImageIds(body.content) : []);
+  const tokens: DocToken[] = body?.type === "text" ? parseDoc(body.content) : [];
+  const inText = new Set(tokens.flatMap((t) => (t.kind === "image" ? [t.id] : [])));
+  const links: IndexedLink[] = [];
+  const anchors: LinkAnchor[] = [];
   const blocks: IndexedBlock[] = [];
   const flags: PageFlag[] = [];
   for (const b of page.blocks) {
@@ -108,6 +124,10 @@ export function indexPage(page: Page): PageIndex {
     // Photo, calcul ou courbe retire du texte : le bloc reste (l'annulation
     // de l'editeur peut le ramener), mais il ne doit plus remonter.
     if ((b.type === "image" || b.type === "calc" || b.type === "graph") && !b.rect && !inText.has(b.id)) continue;
+    if (b.type === "link") {
+      const ref = blockLinkRef(b);
+      if (ref.pageId) links.push(indexedLink(ref, b.label));
+    }
     if (b.type === "text") {
       const { text, colors } = plainOfText(b.content, b.color);
       if (text.trim()) blocks.push({ id: b.id, type: b.type, text, ...(colors ? { colors } : {}) });
@@ -115,16 +135,36 @@ export function indexPage(page: Page): PageIndex {
     }
     const text = searchableText(b);
     if (text.trim()) blocks.push({ id: b.id, type: b.type, text });
+    // Formule, zone manuscrite reconnue : un lien peut les viser.
+    if (text.trim() && (b.type === "math" || (b.type === "ink" && b.rect))) {
+      anchors.push({ blockId: b.id, kind: b.type === "math" ? "math" : "zone", text: text.trim() });
+    }
   }
+  for (const t of docLinks(tokens)) {
+    const ref = parseLinkUrl(t.href, t.hint);
+    if (ref) links.push(indexedLink(ref, t.label));
+  }
+  const headings = docHeadings(tokens);
   // Le texte tape d'abord, puis l'ecriture reconnue, puis le reste.
   const lead = blocks.find((b) => b.id === body?.id) ?? blocks.find((b) => b.type === "ink")
     ?? blocks.find((b) => b.type !== "flag");
-  const title = body?.type === "text" ? firstLineOf(docTitle(parseDoc(body.content))) : "";
+  const title = body?.type === "text" ? firstLineOf(docTitle(tokens)) : "";
   const review = extractReview(page);
   return {
     modified: page.modified ?? "", created: page.created ?? "",
     firstLine: title || (lead ? firstLineOf(lead.text) : ""), ...(title ? { title } : {}), flags, blocks,
     ...(review.length ? { review } : {}),
+    ...(page.id ? { id: page.id } : {}),
+    ...(headings.length ? { headings } : {}),
+    ...(links.length ? { links } : {}),
+    ...(anchors.length ? { anchors } : {}),
+  };
+}
+
+function indexedLink(ref: { pageId: string; blockId?: string; heading?: string }, label: string): IndexedLink {
+  return {
+    pageId: ref.pageId, label,
+    ...(ref.blockId ? { blockId: ref.blockId } : {}), ...(ref.heading ? { heading: ref.heading } : {}),
   };
 }
 
@@ -138,8 +178,9 @@ function plainOfText(content: string, blockColor?: ColorKey): { text: string; co
   let text = "";
   const colors: Partial<Record<ColorKey, string>> = {};
   for (const t of parseDoc(content)) {
+    // Un lien se cherche par son libelle.
     const piece = t.kind === "br" ? "\n" : t.kind === "math" ? texToPlain(t.latex)
-      : t.kind === "text" ? t.text : "";
+      : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "";
     text += piece;
     const c = (t.kind === "text" || t.kind === "math") ? t.color ?? blockColor : undefined;
     if (c && piece) colors[c] = (colors[c] ? colors[c] + " " : "") + piece;
@@ -164,7 +205,8 @@ export function searchableText(b: Block): string {
     // La ligne du repere est deja dans le texte de la page : seule une note
     // ecrite a la main merite un resultat a part.
     case "flag":  return b.note === DEFAULT_FLAG_NOTE ? "" : b.note;
-    case "pdf":   return "";
+    // Texte de la page du PDF, extrait par pdf.js a l'import (core/pdf).
+    case "pdf":   return typeof b.text === "string" ? b.text : "";
   }
 }
 
@@ -211,6 +253,8 @@ export async function searchAll(repo: Repo, query: string, opts: SearchOptions =
             excerpt: parts.map((p) => p.text).join(""),
             parts,
             modified: index.modified,
+            ...(index.id ? { pageId: index.id } : {}),
+            ...(index.title || index.firstLine ? { pageTitle: index.title || index.firstLine } : {}),
           });
         }
       }
@@ -274,4 +318,34 @@ export async function collectReview(
     }
   }
   return { ...groupReview(sources, filter), pages };
+}
+
+/**
+ * Toutes les pages, telles que les liens les voient (core/links.ts) : id,
+ * endroit, titres, liens poses. Lu par Repo.scanDivider, donc depuis le
+ * cache de session tant que les fichiers n'ont pas bouge. Sert a resoudre un
+ * lien par id, aux retroliens et au selecteur `[[`. null si `isStale`.
+ */
+export async function collectLinkPages(repo: Repo, isStale?: () => boolean): Promise<LinkPage[] | null> {
+  const out: LinkPage[] = [];
+  for (const dir of await repo.listNotebookDirs()) {
+    if (isStale?.()) return null;
+    const meta = await repo.readMeta(dir);
+    for (const divider of await repo.listDividers(dir)) {
+      const scanned = await repo.scanDivider(dir, divider, isStale);
+      if (!scanned) return null;
+      for (const { n, index } of scanned) {
+        if (!index?.id) continue;
+        out.push({
+          notebook: dir, notebookTitle: meta.title, divider, number: n, id: index.id,
+          firstLine: index.firstLine, modified: index.modified,
+          ...(index.title ? { title: index.title } : {}),
+          ...(index.headings ? { headings: index.headings } : {}),
+          ...(index.links ? { links: index.links } : {}),
+          ...(index.anchors ? { anchors: index.anchors } : {}),
+        });
+      }
+    }
+  }
+  return out;
 }

@@ -145,7 +145,7 @@ export function textRuns(content: string, blockColor?: ColorKey): { color: Color
   for (const t of parseDoc(content)) {
     if (t.kind === "line") continue;
     if (t.kind === "br") { if (run) pendingBr++; continue; }
-    if (t.kind === "image") { close(); continue; }
+    if (t.kind === "image" || t.kind === "link") { close(); continue; }
     const c = t.color ?? blockColor;
     const blank = t.kind === "text" && !t.text.trim();
     if (!isSemantic(c)) {
