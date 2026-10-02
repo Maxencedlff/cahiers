@@ -2217,8 +2217,10 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer) || closestLine(r.startContainer, this.root)) return false;
+    if (!this.root.contains(r.startContainer)) return false;
     if (r.startContainer.parentElement?.closest(".eq, .raw")) return false;
+    const inLine = closestLine(r.startContainer, this.root);
+    if (inLine) return this.listToHeading(inLine, r);
     const start = lineStart(this.root, r);
     const typed = start.toString().replace(/\u200b/g, "");
     const format = markerStyle(typed);
@@ -2229,6 +2231,45 @@ export class TextDoc {
     const marker = `${typed} `;
     this.lastAuto = null;
     this.lastLine = { undo: () => this.unmark(block, marker) };
+    this.emit();
+    return true;
+  }
+
+  /**
+   * "# " tape au debut d'une puce (souvent la puce vide laissee par Entree) :
+   * la ligne devient un titre, comme dans Notion. Ctrl+Z rend la puce.
+   */
+  private listToHeading(block: HTMLElement, caret: Range): boolean {
+    const k = block.dataset.k;
+    if (k !== "ul" && k !== "ol") return false;
+    const head = document.createRange();
+    head.setStart(block, 0);
+    head.setEnd(caret.startContainer, caret.startOffset);
+    const typed = head.toString().replace(/​/g, "");
+    const format = markerStyle(typed);
+    if (!format || !/^h/.test(format.style) || head.cloneContents().querySelector?.(".eq, .doc-img")) return false;
+    const before: LineFormat = { style: k, level: Number(block.dataset.lvl ?? 0) || undefined };
+    head.deleteContents();
+    setLineFormat(block, format);
+    ensurePlaceholder(block);
+    placeCaret(block);
+    this.lastAuto = null;
+    this.lastLine = {
+      undo: () => {
+        if (!this.root.contains(block)) return false;
+        setLineFormat(block, before);
+        dropPlaceholder(block);
+        block.prepend(document.createTextNode(`${typed} `));
+        const end = document.createRange();
+        end.setStart(block.firstChild!, typed.length + 1);
+        end.collapse(true);
+        const s = document.getSelection();
+        s?.removeAllRanges();
+        s?.addRange(end);
+        this.emit();
+        return true;
+      },
+    };
     this.emit();
     return true;
   }
