@@ -1603,8 +1603,21 @@ export class PageView {
     root.style.minHeight = "0px";
     const textPx = root.scrollHeight;
     root.style.minHeight = minH;
-    if (textPx) loaded.textH = textPx / k;
-    const h = sheetHeight(loaded.page, textPx / k);
+    let textH = textPx / k;
+    // Sous l'A4, rien que du vide (curseur invisible apres une photo, marge
+    // de calage) : pas de quoi couper, la feuille reste une A4.
+    if (textH > PAGE_H) {
+      let bottom = 0;
+      for (const it of measureRows(root, loaded.sheet.getBoundingClientRect().top, k).items) {
+        const [n] = it.start();
+        if (n.nodeType === Node.TEXT_NODE && !(n.textContent ?? "").replace(/\u200b/g, "").trim()) continue;
+        bottom = Math.max(bottom, it.bottom);
+      }
+      const pad = (parseFloat(getComputedStyle(root).paddingBottom) || 0) / k;
+      textH = Math.min(textH, bottom + pad);
+    }
+    if (textPx) loaded.textH = textH;
+    const h = sheetHeight(loaded.page, textH);
     loaded.sheet.style.minHeight = `${Math.round(h * k)}px`;
     this.paintBreaks(loaded, h, k);
     const d = density ?? this.densityOf(loaded, width, h * k);
