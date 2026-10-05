@@ -28,7 +28,8 @@ import {
 import { AUTO_DEBOUNCE_MS } from "../core/ink/recognizer";
 import { confusionCandidates } from "../core/ink/confusions";
 import { askLatex } from "./mathdialog";
-import { colorOf, labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
+import { labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
+import { inkCssColor } from "../core/theme";
 import {
   PASTE_STEP, clampMove, clampSpace, copySelection, pasteClip, recolorStrokes, replaceStrokes,
   selectInLasso, selectionBounds, shiftBelow, strokesBelow, strokesById, transformBlocks,
@@ -1081,7 +1082,6 @@ export class PageView {
     } else {
       items.push(...this.conflictNotes(loaded.number));
     }
-    if (loaded.long && !keptLong(loaded.page.id)) items.push(this.longNote(loaded));
     loaded.notes.replaceChildren(...items);
   }
 
@@ -1675,22 +1675,37 @@ export class PageView {
       if (this.flowing || !isLongPage(loaded.surface?.height ?? 0)) return;
     }
     loaded.long = true;
-    this.paintNotes(loaded);
+    this.autoSplit(loaded);
   }
 
-  /** Bandeau d'une ancienne page longue : la repartir, explicitement. */
-  private longNote(loaded: LoadedPage): HTMLElement {
-    return el("div", { class: "readonly-note long-note" },
-      el("span", {}, "Page plus longue qu'une feuille A4 (pointillés : fins de feuille). "
-        + "Elle reste telle quelle tant que tu ne la répartis pas."),
-      loaded.readOnly || this.readOnly ? null : el("button", {
-        class: "small", onclick: () => void this.splitLongPage(loaded),
-      }, "Répartir sur plusieurs pages"),
-      el("button", {
-        class: "small", title: "Ne plus afficher ce message pour cette page (les pointillés restent)",
-        onclick: () => { keepLong(loaded.page.id); this.paintNotes(loaded); },
-      }, "Laisser ainsi"),
-    );
+  /** Pages longues deja reparties d'office pendant cette session (jamais deux fois). */
+  private autoSplitDone = new Set<string>();
+  private autoSplitBusy = false;
+
+  /**
+   * Toute page plus haute qu'une A4 est repartie d'office sur plusieurs
+   * pages : aucune page ne garde une taille differente des autres. Une page
+   * en lecture seule (copie de conflit, version future) reste telle quelle.
+   */
+  private autoSplit(loaded: LoadedPage, tries = 0): void {
+    if (loaded.dead || loaded.readOnly || this.readOnly || loaded.copy || this.peek || this.exporting) return;
+    if (isFutureVersion(loaded.page) || this.autoSplitDone.has(loaded.page.id)) return;
+    if (this.autoSplitBusy || this.flowing) { setTimeout(() => this.autoSplit(loaded, tries), 300); return; }
+    this.autoSplitBusy = true;
+    this.autoSplitDone.add(loaded.page.id);
+    void (async () => {
+      let ok = false;
+      try {
+        ok = await this.splitLongPage(loaded);
+      } finally {
+        this.autoSplitBusy = false;
+      }
+      // Ecriture en cours (OneDrive, antivirus) : nouvel essai un peu plus tard.
+      if (!ok && tries < 10) {
+        this.autoSplitDone.delete(loaded.page.id);
+        setTimeout(() => this.autoSplit(loaded, tries + 1), 2000);
+      }
+    })();
   }
 
   /** Apres un redimensionnement ou une image chargee : debordement verifie a la prochaine image. */
@@ -2119,10 +2134,10 @@ export class PageView {
    * Explicite, et annulable (toast « Annuler » : la page longue revient, les
    * pages creees partent a la corbeille).
    */
-  async splitLongPage(loaded: LoadedPage): Promise<void> {
-    if (this.locked() || loaded.readOnly || this.flowing) return;
-    if (!(await this.readyToRenumber("répartition"))) return;
-    const before = JSON.stringify(loaded.page.blocks);
+  private async splitLongPage(loaded: LoadedPage): Promise<boolean> {
+    if (loaded.dead || loaded.readOnly || this.readOnly || this.flowing) return false;
+    await this.flush();
+    if (this.hasUnsaved) return false;
     const pageId = loaded.page.id;
     const wasPages = this.viewMode === "pages";
     this.splitLog = [];
@@ -2133,7 +2148,7 @@ export class PageView {
         await this.render();
       }
       const first = this.list.find((p) => p.page.id === pageId);
-      if (!first) return;
+      if (!first) return false;
       for (const p of this.list) p.long = p.page.id === pageId ? false : p.long;
       first.settled = true;
       first.editedAt = performance.now();
@@ -2159,49 +2174,9 @@ export class PageView {
         this.viewMode = "pages";
         await this.render();
       }
-      if (made.length) {
-        toast(`Page répartie sur ${made.length + 1} pages`, "info", 8000, {
-          label: "Annuler", run: () => void this.unsplit(pageId, before, made),
-        });
-      }
+      if (made.length) toast(`Page plus longue qu'une A4 : répartie sur ${made.length + 1} pages`, "info", 6000);
     }
-  }
-
-  /** Annule « Répartir » : la page longue revient, les pages creees vont a la corbeille. */
-  private async unsplit(pageId: string, before: string, made: string[]): Promise<void> {
-    if (this.locked() || this.flowing) return;
-    if (!(await this.readyToRenumber("annulation"))) return;
-    this.flowing = true;
-    this.diskEpoch++;
-    try {
-      for (const id of [...made].reverse()) {
-        const n = await this.findPageNumber(id);
-        if (n === null) continue;
-        await this.serial(async () => {
-          await this.host.repo.deletePage(this.notebook, this.divider, n);
-          for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === id)) {
-            p.dead = true;
-            p.number = 0;
-            this.pendingSave.delete(p.page.id);
-          }
-          this.shiftNumbers(n + 1, -1);
-        });
-      }
-      const n = await this.findPageNumber(pageId);
-      if (n !== null) {
-        const page = await this.host.repo.readPage(this.notebook, this.divider, n);
-        page.blocks = JSON.parse(before) as Block[];
-        await this.serial(() => this.host.repo.writePage(this.notebook, this.divider, n, page));
-        this.current = n;
-      }
-    } catch (e) {
-      toast(`Annulation impossible : ${errorText(e)}`, "err", 6000);
-    } finally {
-      this.flowing = false;
-    }
-    await this.render();
-    this.revealCurrent();
-    this.host.onDirty();
+    return true;
   }
 
   /** Zoom en vigueur : 100 % pendant un export PDF (feuilles A4). */
@@ -3149,7 +3124,7 @@ export class PageView {
   private renderWords(loaded: LoadedPage, block: InkBlock, scale: number): HTMLElement {
     // Couleur du mot = celle de son ecriture, jamais d'un surlignage pose dessus.
     const pens = new Map(block.strokes.filter((st) => st.tool === "pen")
-      .map((st) => [st.id, colorOf(st.color, st.tool)]));
+      .map((st) => [st.id, inkCssColor(st.color)]));
     const placed = layoutWords(block.words!, measurer());
     loaded.placed = placed;
     const layer = el("div", { class: "word-layer" });
@@ -3164,7 +3139,7 @@ export class PageView {
         fontSize: `${p.fontSize * scale}px`,
         lineHeight: String(LINE_HEIGHT),
         fontFamily: WORD_FONT,
-        color: p.word.strokeIds.map((id) => pens.get(id)).find(Boolean) ?? "#16181d",
+        color: p.word.strokeIds.map((id) => pens.get(id)).find(Boolean) ?? inkCssColor("normal"),
       });
       layer.append(span);
     }
@@ -4638,29 +4613,4 @@ function loadImage(src: string): Promise<HTMLImageElement | null> {
     img.onerror = () => resolve(null);
     img.src = src;
   });
-}
-
-/*
- * « Laisser ainsi » sur une ancienne page longue : retenu sur cette machine
- * (stockage local), jamais ecrit dans la page ni dans OneDrive.
- */
-const KEEP_LONG_KEY = "cahiers.keepLong.v1";
-
-function keptLongIds(): string[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(KEEP_LONG_KEY) ?? "[]");
-    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function keptLong(id: string): boolean {
-  return keptLongIds().includes(id);
-}
-
-function keepLong(id: string): void {
-  const ids = keptLongIds();
-  if (ids.includes(id)) return;
-  try { localStorage.setItem(KEEP_LONG_KEY, JSON.stringify([...ids, id].slice(-500))); } catch { /* stockage plein : le bandeau reviendra */ }
 }

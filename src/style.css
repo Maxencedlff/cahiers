@@ -1,24 +1,153 @@
-/* Cahiers. Interface utilisable au doigt : cibles de 44 px minimum (section 3). */
+/* Cahiers. Interface utilisable au doigt : cibles de 44 px minimum (section 3).
+   Systeme de design : jetons ci-dessous (surfaces, texte, bordures, accent,
+   etats, rayons, ombres, espacements, tailles, durees). Le chrome n'utilise
+   que ces jetons ; la feuille, l'encre et la palette semantique gardent
+   leurs couleurs (section 8). Theme : html[data-theme] (App.applyLook),
+   teinte de feuille : .app[data-sheet] (l'export PDF, hors de .app, reste
+   toujours clair). */
 
 :root {
-  --bg: #f1f2f4;
-  --panel: #ffffff;
-  --ink: #16181d;
-  --muted: #6b7280;
-  --line: #d9dce1;
+  /* Surfaces */
+  --bg: #eceef2;            /* fond de l'appli, autour des feuilles */
+  --surface: #ffffff;       /* barres, rail, menus, dialogues */
+  --surface-2: #f6f7f9;     /* survol, sous-bandes */
+  --surface-3: #eceef2;     /* appui, segments */
+  /* Texte (AA sur --surface et --surface-2) */
+  --text: #16181d;
+  --text-2: #3d4450;
+  --muted: #5d6470;
+  /* Bordures */
+  --border: #dfe2e8;
+  --border-strong: #c9ced6;
+  /* Accent et etats */
   --accent: #2563eb;
+  --accent-hover: #1d4fd8;
   --accent-soft: #e8efff;
-  --shadow: 0 1px 2px rgba(16, 20, 30, .08), 0 8px 24px rgba(16, 20, 30, .06);
-  --radius: 10px;
+  --accent-text: #1a46b8;
+  --on-accent: #ffffff;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --warn-text: #8a4b00;
+  --warn-soft: #fff6e6;
+  --warn-border: #f2d29a;
+  --danger: #dc2626;
+  --danger-text: #a51b1b;
+  --danger-soft: #fdf0f0;
+  --danger-border: #f0c4c4;
+  --flag: #f0b429;
+  --flag-soft: #fff4e0;
+  --flag-text: #7a4700;
+  --overlay: rgba(15, 20, 32, .42);
+  --hover: rgba(16, 20, 30, .05);
+  --press: rgba(16, 20, 30, .09);
+  /* Ombres */
+  --shadow-1: 0 1px 2px rgba(16, 20, 30, .06), 0 1px 3px rgba(16, 20, 30, .05);
+  --shadow-2: 0 6px 16px rgba(16, 20, 30, .10), 0 1px 3px rgba(16, 20, 30, .06);
+  --shadow-3: 0 18px 44px rgba(10, 14, 25, .20), 0 2px 6px rgba(10, 14, 25, .08);
+  --shadow-sheet: 0 1px 2px rgba(16, 20, 30, .07), 0 6px 20px rgba(16, 20, 30, .06);
+  /* Formes et espaces */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  /* Typographie de l'interface (la feuille a la sienne, KaTeX) */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs: 14px;
+  --fs-md: 15px;
+  --fs-lg: 17px;
+  /* Mouvement : court et sobre (aucune animation en boucle, section 9) */
+  --dur-fast: 90ms;
+  --dur: 140ms;
+  --ease: cubic-bezier(.2, 0, .2, 1);
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  /* Gabarits */
   --touch: 44px;
+  --rail-w: 64px;
+  --topbar-h: 48px;
+  /* Feuille (claire par defaut, meme en sombre) */
   --page-bg: #fffffe;
+  --sheet-text: #16181d;
+  --sheet-border: #dfe2e8;
   --rule: #e3e7ef;
+  /* Anciens noms, gardes pour les regles existantes */
+  --panel: var(--surface);
+  --ink: var(--text);
+  --line: var(--border);
+  --shadow: var(--shadow-1);
+  --radius-card: 10px;
   /* "only light" interdit a la WebView d'inverser les couleurs quand Windows
-     est en theme sombre. Un cahier a un fond blanc, point. */
+     est en theme sombre : le theme sombre est le notre, pas une inversion. */
   color-scheme: only light;
 }
 
+html[data-theme="dark"] {
+  --bg: #0f1114;
+  --surface: #1a1c21;
+  --surface-2: #22252b;
+  --surface-3: #2a2e35;
+  --text: #e7e9ee;
+  --text-2: #c3c8d1;
+  --muted: #a1a8b4;
+  --border: #2f333b;
+  --border-strong: #3e434c;
+  --accent: #5b93ff;
+  --accent-hover: #78a6ff;
+  --accent-soft: #1e2c49;
+  --accent-text: #b9cfff;
+  --on-accent: #0b1220;
+  --ok: #3ccf74;
+  --warn: #f0a63a;
+  --warn-text: #f6c77d;
+  --warn-soft: #30250f;
+  --warn-border: #5c4416;
+  --danger: #f05252;
+  --danger-text: #ffa3a3;
+  --danger-soft: #3a1b1d;
+  --danger-border: #66292d;
+  --flag: #f0b429;
+  --flag-soft: #3a2c0c;
+  --flag-text: #ffd27a;
+  --overlay: rgba(0, 0, 0, .56);
+  --hover: rgba(255, 255, 255, .06);
+  --press: rgba(255, 255, 255, .10);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .45);
+  --shadow-2: 0 8px 20px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .4);
+  --shadow-3: 0 20px 48px rgba(0, 0, 0, .6), 0 2px 6px rgba(0, 0, 0, .4);
+  --shadow-sheet: 0 1px 3px rgba(0, 0, 0, .5), 0 8px 24px rgba(0, 0, 0, .35);
+  --sheet-border: #2f333b;
+  color-scheme: dark;
+}
+
+/* Teinte de la feuille, a l'ecran seulement (menu ⋯ « Feuille »). */
+.app[data-sheet="sepia"] {
+  --page-bg: #f6efe0;
+  --sheet-border: #e0d5bf;
+}
+/* Feuille sombre : texte et encre « Normal » clairs, couleurs semantiques
+   eclaircies. Valeurs = DARK_SHEET_INKS (core/theme.ts, verifiees par
+   src/tests/chrome.test.ts). Jamais dans les fichiers ni a l'export. */
+.app[data-sheet="dark"] {
+  --page-bg: #1f2126;
+  --sheet-text: #e4e6eb;
+  --sheet-border: #30343c;
+  --text-ink: #e4e6eb;
+  --ink-normal: #e4e6eb;
+  --ink-definition: #6ea8ff;
+  --ink-theoreme: #ff7b7b;
+  --ink-exemple: #3ddc97;
+  --ink-attention: #fbbf24;
+  --ink-perso: #b69cff;
+}
+
 html { color-scheme: only light; background: var(--bg); }
+html[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 
@@ -28,10 +157,11 @@ html, body, #app {
 }
 
 body {
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: 15px;
-  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--text);
   background: var(--bg);
+  -webkit-font-smoothing: antialiased;
   /* Le doigt navigue, il ne selectionne pas du texte par accident. */
   -webkit-user-select: none;
   user-select: none;
@@ -41,9 +171,9 @@ body {
 button {
   font: inherit;
   color: inherit;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius);
   min-height: var(--touch);
   min-width: var(--touch);
   padding: 0 12px;
@@ -53,75 +183,228 @@ button {
   justify-content: center;
   gap: 8px;
   touch-action: manipulation;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
-button:hover { background: #f7f8fa; }
-button:active { transform: translateY(1px); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.primary:hover { background: #1d4fd8; }
-button.on { background: var(--accent-soft); border-color: var(--accent); color: #1b3fa8; }
+button:hover { background: var(--surface-2); }
+button:active { background: var(--surface-3); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-text); }
 button.ghost { border-color: transparent; background: transparent; }
-button.ghost:hover { background: rgba(0,0,0,.05); }
+button.ghost:hover { background: var(--hover); }
 button:disabled { opacity: .45; cursor: default; }
-button.danger { color: #a51b1b; border-color: #f0c4c4; }
-button.danger:hover { background: #fdf0f0; }
+button.danger { color: var(--danger-text); border-color: var(--danger-border); }
+button.danger:hover { background: var(--danger-soft); }
 
 input, textarea, select {
   font: inherit;
   color: inherit;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   min-height: var(--touch);
   padding: 0 12px;
   -webkit-user-select: text;
   user-select: text;
 }
 textarea { padding: 10px 12px; resize: vertical; }
-input:focus, textarea:focus, button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
+input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+/* Anneau de focus clavier, sur tout element atteint par Tab. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 .app { display: flex; flex-direction: column; height: 100%; }
 .row { display: flex; align-items: center; gap: 8px; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); }
-.small { font-size: 13px; }
+.small { font-size: var(--fs-sm); }
+.icon { flex: none; display: block; }
 
-/* ---------------- barre d'onglets ---------------- */
-
-.tabbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  min-height: 52px;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ---------------- barre du haut ---------------- */
+/* Une rangee de 48 px : maison, fil d'Ariane, onglets, recherche, split,
+   aide, etat. Les cibles gardent 44 px. */
+
+.topbar {
+  display: flex; align-items: center; gap: 2px;
+  height: var(--topbar-h); padding: 0 6px; flex: none;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.topbar > .spacer { min-width: 8px; }
+.icon-btn {
+  min-width: var(--touch); width: var(--touch); padding: 0; border-color: transparent; background: transparent;
+  color: var(--text-2); border-radius: var(--radius);
+}
+.icon-btn:hover { background: var(--hover); color: var(--text); }
+.icon-btn:active { background: var(--press); }
+.icon-btn.on { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+.topbar .home-btn.on { color: var(--accent-text); }
+
+/* Fil d'Ariane : matiere › intercalaire du panneau vise. */
+.crumbs { display: flex; align-items: center; min-width: 0; flex: 0 1 auto; margin-left: 2px; }
+.crumb {
+  border-color: transparent; background: transparent; padding: 0 8px; gap: 6px;
+  font-size: var(--fs-md); color: var(--text-2); min-width: 0; max-width: 260px;
+}
+.crumb:hover { background: var(--hover); color: var(--text); }
+.crumb.current { color: var(--text); font-weight: 600; }
+.crumb .crumb-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crumb .icon { color: var(--muted); }
+.crumb-nb .dot, .fly-item .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.crumb-sep { color: var(--muted); padding: 0 1px; flex: none; }
+
+/* Onglets : plus fins (34 px visibles), cible de 44 px. */
+.tabs { display: flex; align-items: center; gap: 2px; min-width: 0; flex: 0 1 auto; overflow: hidden; margin-left: 8px; }
+.crumbs + .tabs { border-left: 1px solid var(--border); padding-left: 8px; }
 .tab {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: var(--touch);
-  padding: 0 10px 0 12px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  max-width: 240px;
-  cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  height: var(--touch); padding: 0 0 0 12px; position: relative;
+  border-radius: var(--radius); background: transparent; color: var(--text-2);
+  max-width: 220px; min-width: 0; cursor: pointer; font-size: var(--fs);
+  transition: background-color var(--dur-fast) var(--ease);
 }
-.tab.active { background: var(--accent-soft); border-color: #bcd0ff; }
-.tab .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.tab::before {
+  content: ""; position: absolute; inset: 5px 0; border-radius: var(--radius);
+  border: 1px solid transparent; pointer-events: none;
+}
+.tab:hover { background: var(--hover); }
+.tab.active { color: var(--text); font-weight: 600; }
+.tab.active::before { background: var(--accent-soft); border-color: transparent; z-index: -1; }
+.tab.shown::before { border-color: var(--border-strong); }
+.tab .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Croix de 44 px collee au bord de l'onglet : au doigt, on ferme l'onglet
    au lieu de l'activer. */
 .tab .close {
-  position: relative; min-width: var(--touch); min-height: var(--touch); width: var(--touch); height: var(--touch);
-  margin-right: -10px; border-radius: 8px; border: none; background: transparent;
-  font-size: 16px; line-height: 1; padding: 0;
+  position: relative; min-width: 36px; width: 36px; min-height: var(--touch); height: var(--touch);
+  border-radius: var(--radius); border: none; background: transparent; padding: 0; color: var(--muted);
 }
-.tab .close:hover { background: rgba(0,0,0,.1); }
+.tab .close:hover { background: transparent; color: var(--text); }
+.tab .close::after { content: ""; position: absolute; inset: 9px 4px; border-radius: var(--radius-sm); z-index: -1; }
+.tab .close:hover::after { background: var(--press); }
+.tabs { isolation: isolate; }
+
+/* Recherche : champ-bouton « Rechercher…  Ctrl+K », icone seule si etroit. */
+.search-field {
+  justify-content: flex-start; gap: 8px; width: 240px; padding: 0 8px 0 10px;
+  min-height: 36px; height: 36px; margin: 4px 4px; flex: none;
+  background: var(--surface-2); border-color: var(--border); color: var(--muted); font-size: var(--fs);
+  position: relative;
+}
+.search-field::after { content: ""; position: absolute; inset: -4px 0; }
+.search-field:hover { background: var(--surface-3); color: var(--text-2); }
+.search-field .search-ph { flex: 1; text-align: left; }
+.search-field kbd { font-size: 11px; }
+@media (max-width: 1180px) {
+  .search-field { width: var(--touch); height: var(--touch); min-height: var(--touch); margin: 0; padding: 0; justify-content: center; background: transparent; border-color: transparent; }
+  .search-field .search-ph, .search-field kbd { display: none; }
+}
+
+/* Indicateur d'etat : point vert, ou orange/rouge et un texte court. */
+.status-btn {
+  border-color: transparent; background: transparent; padding: 0 12px; gap: 8px;
+  font-size: var(--fs-sm); font-weight: 600; min-width: var(--touch); flex: none;
+}
+.status-btn:hover { background: var(--hover); }
+.led { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; display: inline-block; }
+.status-btn.ok .led { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.status-btn.warn { color: var(--warn-text); background: var(--warn-soft); }
+.status-btn.err { color: var(--danger-text); background: var(--danger-soft); }
+.status-btn.warn .led, .led.warn { background: var(--warn); }
+.status-btn.err .led, .led.err { background: var(--danger); }
+.status-panel { width: 340px; padding: 4px 4px 2px; }
+.status-lines { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 4px 8px 10px; font-size: var(--fs-sm); }
+.status-lines dt { display: flex; align-items: center; gap: 7px; color: var(--muted); white-space: nowrap; }
+.status-lines dd { margin: 0; color: var(--text); }
+.status-root {
+  margin: 0 8px 8px; font-size: var(--fs-xs); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-top: 1px solid var(--border); padding-top: 8px;
+}
+.status-actions { display: flex; justify-content: flex-end; gap: 6px; padding: 0 4px 4px; }
+
+/* Infobulle (tooltip.ts) : nom et raccourci, a la souris seulement. */
+.tip {
+  position: fixed; left: 0; top: 0; z-index: 200; pointer-events: none;
+  display: flex; align-items: center; gap: 8px; max-width: 320px;
+  padding: 6px 10px; border-radius: var(--radius-sm);
+  background: #1f2329; color: #f2f4f7; font-size: var(--fs-sm); line-height: 1.3;
+  box-shadow: var(--shadow-2); opacity: 0; transition: opacity var(--dur-fast) var(--ease);
+}
+html[data-theme="dark"] .tip { background: #f0f2f5; color: #16181d; }
+.tip.show { opacity: 1; }
+.tip kbd { background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .22); color: inherit; }
+html[data-theme="dark"] .tip kbd { background: rgba(0, 0, 0, .07); border-color: rgba(0, 0, 0, .18); }
+
+/* Volets ancres au chrome (couleur, gomme, matieres, etat). */
+.flyout {
+  position: fixed; z-index: 95; min-width: 200px; max-height: calc(100vh - 16px); overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-3); padding: 6px;
+  animation: fly-in var(--dur) var(--ease);
+}
+@keyframes fly-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.flyout.right { animation-name: fly-in-x; }
+@keyframes fly-in-x { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+.fly-list { display: flex; flex-direction: column; gap: 2px; min-width: 220px; }
+.fly-title { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); padding: 6px 10px 4px; text-transform: none; letter-spacing: .2px; }
+.fly-item {
+  justify-content: flex-start; gap: 12px; border-color: transparent; background: transparent;
+  text-align: left; padding: 0 10px; width: 100%; color: var(--text); min-height: var(--touch);
+}
+.fly-item:hover { background: var(--surface-2); }
+.fly-item.on { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+.fly-item .icon { color: var(--text-2); }
+.fly-item.on .icon { color: var(--accent-text); }
+.fly-text { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.25; padding: 5px 0; }
+.fly-hint { font-size: var(--fs-xs); color: var(--muted); }
+.fly-item.on .fly-hint { color: inherit; opacity: .8; }
+.fly-item kbd { margin-left: auto; }
+.fly-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+.swatch-dot { display: block; width: 20px; height: 20px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); }
+html[data-theme="dark"] .swatch-dot { box-shadow: 0 0 0 1px rgba(255, 255, 255, .28); }
+.fly-list.colors .fly-item.on .swatch-dot { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+
+/* ---------------- rail d'outils ---------------- */
+/* 64 px : icones de 44 px, nom et raccourci en infobulle. Tient en
+   1366x768 (et 1280x720) sans defiler. */
+
+.rail {
+  flex: none; width: var(--rail-w); display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 8px 0; background: var(--surface); border-right: 1px solid var(--border);
+  overflow-y: auto; overflow-x: hidden; scrollbar-width: none; position: relative; z-index: 3;
+}
+.rail > .spacer { flex: 1 1 0; min-height: 4px; }
+.rail-sep { width: 32px; height: 1px; background: var(--border); margin: 5px 0; flex: none; }
+.rail .icon-btn { width: 48px; min-width: 48px; height: var(--touch); flex: none; border-radius: var(--radius-lg); position: relative; }
+.rail .tool.on { background: var(--accent-soft); color: var(--accent-text); }
+.rail .tool.on::before {
+  content: ""; position: absolute; left: -8px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+/* Outil de zone verrouille : on enchaine plusieurs zones. */
+.rail .tool.locked { box-shadow: inset 0 0 0 2px var(--accent); }
+/* Sous-choix (gomme, lasso, doigt) : petit coin, comme un menu. */
+.rail .tool.has-sub::after {
+  content: ""; position: absolute; right: 5px; bottom: 5px; width: 0; height: 0;
+  border-left: 5px solid transparent; border-bottom: 5px solid currentColor; opacity: .55;
+}
+/* Fenetre basse (1280x720, barre des taches) : rail resserre, toujours sans defiler. */
+@media (max-height: 740px) {
+  .rail { gap: 0; padding: 4px 0; }
+  .rail-sep { margin: 3px 0; }
+}
+.rail .icon-btn.open { background: var(--surface-3); color: var(--text); }
+.rail .color-btn .swatch-dot { width: 22px; height: 22px; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--border-strong); }
+html[data-theme="dark"] .rail .color-btn .swatch-dot { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px #7b8494; }
+/* « Pas compris » : l'ambre des reperes, reperable sans lire. */
+.rail .flag-btn { color: var(--flag-text); background: var(--flag-soft); box-shadow: inset 0 0 0 1px var(--flag); }
+.rail .flag-btn:hover { background: color-mix(in srgb, var(--flag) 26%, var(--surface)); color: var(--flag-text); }
+.rail .maths-btn.on { background: var(--accent-soft); color: var(--accent-text); }
 
 /* ---------------- menu d'accueil ---------------- */
 
@@ -133,7 +416,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 
 .resume {
   display: flex; align-items: center; gap: 16px; justify-content: flex-start;
-  background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent);
   border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow);
   cursor: pointer; width: 100%; text-align: left; min-height: 76px;
 }
@@ -146,18 +429,18 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   gap: 14px;
 }
 .card {
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 16px; box-shadow: var(--shadow); cursor: pointer; text-align: left;
   display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
   min-height: 118px; justify-content: flex-start;
 }
-.card:hover { background: #fbfcfe; }
+.card:hover { background: var(--surface-2); border-color: var(--border-strong); }
 .card .title { font-size: 16px; font-weight: 600; }
 .card .bar { height: 5px; width: 46px; border-radius: 3px; }
 .card.add { border-style: dashed; color: var(--muted); align-items: center; justify-content: center; }
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
-  background: #fff4e5; color: #9a5b00; border: 1px solid #ffd9a8;
+  background: var(--flag-soft); color: var(--flag-text); border: 1px solid var(--warn-border);
   border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 600;
 }
 
@@ -165,81 +448,71 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 
 .notebook { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
-/* Les onglets d'intercalaire posent sur le bord bas : pas de marge dessous. */
+/* Bande d'intercalaires : onglets a soulignement, 44 px de haut, sur la
+   surface ; l'actif porte la couleur d'accent sous son nom. */
 .dividers {
-  display: flex; align-items: flex-end; gap: 6px;
-  padding: 4px 8px 0; background: var(--panel); border-bottom: 1px solid var(--line);
-  overflow-x: auto; flex: none;
+  display: flex; align-items: stretch; gap: 2px;
+  padding: 0 8px; background: var(--surface); border-bottom: 1px solid var(--border);
+  overflow-x: auto; flex: none; scrollbar-width: thin;
 }
 .divider-tab {
-  height: var(--touch); padding: 0 16px; border-radius: 8px 8px 0 0;
-  border: 1px solid var(--line); border-bottom: none; background: #f6f7f9;
-  white-space: nowrap; cursor: pointer; display: inline-flex; align-items: center; min-width: 64px;
+  height: var(--touch); padding: 0 14px; border-radius: 0; position: relative;
+  border: none; background: transparent; color: var(--text-2); font-size: var(--fs);
+  white-space: nowrap; cursor: pointer; display: inline-flex; align-items: center; min-width: 56px;
   justify-content: center;
 }
-.divider-tab.active { background: var(--panel); font-weight: 600; box-shadow: inset 0 3px 0 var(--accent); }
+.divider-tab::after {
+  content: ""; position: absolute; left: 10px; right: 10px; bottom: 0; height: 3px;
+  border-radius: 3px 3px 0 0; background: transparent; transition: background-color var(--dur-fast) var(--ease);
+}
+.divider-tab:hover { background: var(--hover); color: var(--text); }
+.divider-tab.active { color: var(--text); font-weight: 600; background: transparent; }
+.divider-tab.active::after { background: var(--accent); }
 /* Glisser un intercalaire : le doigt et le stylet sont geres par l'appli
    (appui long puis glisser ; avant, le doigt fait defiler la bande). */
 .divider-tab[data-divider] { touch-action: none; }
-.divider-tab.lifted { box-shadow: 0 4px 14px rgba(16, 20, 30, .18); }
-.divider-tab.dragging { position: relative; z-index: 2; opacity: .9; cursor: grabbing; box-shadow: 0 6px 18px rgba(16, 20, 30, .22); }
+.divider-tab.lifted { background: var(--surface-2); box-shadow: var(--shadow-2); }
+.divider-tab.dragging { z-index: 2; opacity: .92; cursor: grabbing; background: var(--surface); box-shadow: var(--shadow-3); }
 .divider-tab.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
 .divider-tab.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
 /* Intercalaires imbriques (D4) : groupe a chevron, sous-bande du groupe
    ouvert avec son fil d'Ariane. Deux rangees au plus. */
 .divider-strip { flex: none; display: flex; flex-direction: column; }
 .divider-tab .chev { margin-left: 6px; color: var(--muted); font-size: 12px; }
-.divider-tab.group.open { background: var(--accent-soft); }
-.dividers.sub { padding-top: 3px; background: #f9fafb; align-items: center; }
+.divider-tab.group.open { background: var(--accent-soft); color: var(--accent-text); }
+.dividers.sub { background: var(--surface-2); align-items: center; }
 .dividers.sub .divider-tab { height: var(--touch); }
 .divider-tab.own { font-style: italic; }
 .divider-crumb {
   height: var(--touch); padding: 0 6px 0 10px; border: none; background: none; color: var(--muted);
   white-space: nowrap; cursor: pointer; display: inline-flex; align-items: center; flex: none;
 }
-.divider-crumb.current { color: inherit; font-weight: 600; }
+.divider-crumb.current { color: var(--text); font-weight: 600; }
 .divider-crumb .chev { margin-left: 6px; }
-.divider-strip button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.divider-strip button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; box-shadow: none; }
 
-.toolbar {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 8px; background: var(--panel); border-bottom: 1px solid var(--line);
-}
-.toolbar .sep { width: 1px; height: 28px; background: var(--line); margin: 0 4px; }
+/* Pastille de couleur (barre du lasso). */
 .swatch {
-  width: var(--touch); height: var(--touch); border-radius: 8px;
-  border: 2px solid transparent; padding: 4px; background: var(--panel);
+  width: var(--touch); height: var(--touch); border-radius: var(--radius);
+  border: 2px solid transparent; padding: 4px; background: var(--surface);
   display: inline-flex; align-items: center; justify-content: center;
 }
 .swatch i { display: block; width: 22px; height: 22px; border-radius: 50%; }
-.swatch.on { border-color: var(--ink); }
-/* Sens de la couleur active, lisible sans infobulle (au doigt). */
-.swatch-legend { flex-basis: 100%; text-align: center; line-height: 1.2; margin-top: -2px; }
-/* Colonne d'outils : pastilles en grille de 4, 44 px dans les deux sens ;
-   la legende occupe les deux dernieres cases. */
-.swatches { flex: 1 1 100%; display: grid; grid-template-columns: repeat(4, minmax(44px, 1fr)); gap: 4px; }
-.swatches .swatch { width: auto; min-width: var(--touch); }
-.swatches .swatch-legend {
-  grid-column: span 2; margin: 0; display: flex; flex-direction: column; justify-content: center;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-}
-.swatches .swatch-legend > span { overflow: hidden; text-overflow: ellipsis; }
-/* Outil de zone verrouille : on enchaine plusieurs zones. */
-.toolbar button.on.locked { box-shadow: inset 0 0 0 2px var(--accent); }
+.swatch.on { border-color: var(--text); }
 
 .panes { flex: 1; display: flex; min-height: 0; }
 .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-.pane + .pane { border-left: 3px solid var(--line); }
+.pane + .pane { border-left: 3px solid var(--border); }
 /* Portrait (portable tourne) : split empile haut/bas, chaque feuille garde
    la largeur de l'ecran ; cote a cote, le texte tombait a 6-7 px. */
 @media (orientation: portrait) {
   .panes { flex-direction: column; }
   .pane { min-height: 0; }
-  .pane + .pane { border-left: none; border-top: 3px solid var(--line); }
+  .pane + .pane { border-left: none; border-top: 3px solid var(--border); }
 }
 .pane-head {
   display: flex; align-items: center; gap: 8px; padding: 4px 8px;
-  background: #fafbfc; border-bottom: 1px solid var(--line); font-size: 13px; min-height: 36px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border); font-size: 13px; min-height: 36px;
 }
 .pane.drop-target { outline: 3px dashed var(--accent); outline-offset: -3px; }
 
@@ -266,14 +539,14 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .page-wrap.page-slot { display: flex; flex-direction: column; }
 .page-slot > .slot-sheet { flex: 1 1 auto; min-height: 0; }
 .sheet {
-  background: var(--page-bg); border: 1px solid var(--line); border-radius: 4px;
-  box-shadow: var(--shadow); position: relative; overflow: hidden;
+  background: var(--page-bg); border: 1px solid var(--sheet-border); border-radius: 4px;
+  box-shadow: var(--shadow-sheet); position: relative; overflow: hidden;
 }
 .sheet.unreadable {
   aspect-ratio: auto; min-height: 420px; padding: 36px 40px; display: flex; flex-direction: column;
   gap: 12px; justify-content: center; border: 2px dashed #e7b4b4;
 }
-.sheet.unreadable h2 { margin: 0; color: #a51b1b; font-size: 22px; }
+.sheet.unreadable h2 { margin: 0; color: var(--danger-text); font-size: 22px; }
 .sheet.unreadable p { margin: 0; max-width: 620px; line-height: 1.5; }
 .sheet.unreadable code { font-size: 12px; word-break: break-all; }
 .unreadable-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
@@ -286,7 +559,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 /* Barre d'actions de la selection au lasso (encre-13) : cibles de 44 px. */
 .lasso-bar {
   position: absolute; z-index: 5; display: flex; gap: 4px; align-items: center;
-  padding: 4px; background: var(--panel, #fff); border: 1px solid var(--line); border-radius: 10px;
+  padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: var(--shadow); touch-action: none;
 }
 .lasso-bar > button { min-height: 44px; min-width: 44px; padding: 0 10px; font-size: 14px; }
@@ -299,7 +572,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   border: 1px dashed transparent; padding: 2px;
 }
 .block-box.math { border-color: #cbd5e1; background: transparent; }
-.block-box.math.clean { background: rgba(255,255,255,.94); }
+.block-box.math.clean { background: color-mix(in srgb, var(--page-bg) 94%, transparent); }
 .block-box.math.pending { border-color: #f0b429; background: rgba(255,251,240,.28); }
 .block-box.math.failed { border-color: #e7a3a3; }
 /* Bloc refuse par la reconnaissance : l'appui relance l'envoi. */
@@ -310,12 +583,12 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .block-box .tag.reco-fail::after { content: ""; position: absolute; inset: -13px -6px; }
 .block-box.text {
   -webkit-user-select: text; user-select: text;
-  border-color: transparent; background: rgba(255,255,255,.6);
+  border-color: transparent; background: color-mix(in srgb, var(--page-bg) 60%, transparent);
 }
-.block-box.text:focus-within { border-color: var(--accent); background: #fff; }
+.block-box.text:focus-within { border-color: var(--accent); background: var(--page-bg); }
 .block-box .tag {
-  position: absolute; top: -10px; left: 6px; font-size: 10px; background: var(--panel);
-  border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted);
+  position: absolute; top: -10px; left: 6px; font-size: 10px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; color: var(--muted);
   white-space: nowrap; width: max-content;
 }
 /* Mot tape pose a la place de l'encre (conversion mot a mot). */
@@ -336,13 +609,13 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 /* ---------------- calculatrice ---------------- */
 
 .calc {
-  position: fixed; width: 428px; background: var(--panel);
-  border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 18px 50px rgba(10,14,25,.28);
+  position: fixed; width: 428px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 50px rgba(10,14,25,.28);
   display: flex; flex-direction: column; z-index: 60; overflow: hidden;
 }
 .calc-head {
   display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 14px;
-  background: #f6f7f9; border-bottom: 1px solid var(--line); cursor: grab; min-height: 46px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border); cursor: grab; min-height: 46px;
 }
 .calc-head.dragging { cursor: grabbing; }
 .calc-tabs { display: flex; gap: 4px; padding: 8px 8px 0; overflow-x: auto; scrollbar-width: none; }
@@ -385,7 +658,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 .calc-read {
-  background: #f8f9fb; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
   padding: 7px 10px; font-size: 14px; min-height: 40px; overflow-x: auto;
 }
 .calc-read .lbl { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
@@ -399,15 +672,17 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .calc-screen .hist { cursor: pointer; }
 .calc-screen .hist:hover { color: #b9c6dd; }
 .calc-lu { min-height: 0; padding: 4px 10px; font-size: 13px; }
-.calc-body .warn { color: #9a5b00; }
+.calc-body .warn { color: var(--warn-text); }
 .calc-send { align-self: flex-end; }
 /* Bloc de la page rouvert : « Envoyer » devient « Mettre à jour ». */
 .calc-editing {
   display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 10px; border-radius: 8px;
-  background: #fff7e6; border: 1px solid #f0c36d; color: #7a4b00; font-size: 13px;
+  background: var(--warn-soft); border: 1px solid var(--warn-border); color: var(--warn-text); font-size: 13px;
 }
 .calc-angle { min-width: 52px; font-weight: 600; }
 /* Hauteur bornee a l'ecran : le corps defile, jamais le pave (1366x768). */
+/* Hauteur bornee a l'ecran ; le pave entier passe avant la barre du haut
+   (en 768 px, la calculatrice deplacable peut la recouvrir). */
 .calc:not(.docked) { max-height: calc(100vh - 16px); }
 .calc:not(.docked) .calc-body { max-height: none; }
 .calc-body { flex: 1 1 auto; min-height: 0; }
@@ -453,27 +728,27 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .k-eq    { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
 .k-2nd.on { background: #f0b429; border-color: #d69e2e; color: #3d2a00; }
 /* Chiffres neutres : ce sont les plus utilises, les colorer ecraserait le reste. */
-.k-num   { background: var(--panel); }
+.k-num   { background: var(--surface); }
 
-.plot-box { border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.plot-box { border: 1px solid var(--border); border-radius: 8px; background: #fff; }
 .plot-box canvas { display: block; width: 100%; height: 210px; }
-.steps { border: 1px solid var(--line); border-radius: 8px; background: #fafbfc; padding: 10px; }
+.steps { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); padding: 10px; }
 .step { border-left: 3px solid var(--accent); padding: 4px 0 4px 10px; margin: 8px 0; }
 .step .rule { font-weight: 600; font-size: 13px; }
 .step .parts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; font-size: 13px; }
 .step .kids { margin-left: 14px; border-left: 1px dotted var(--line); padding-left: 10px; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
-.tbl th, .tbl td { border: 1px solid var(--line); padding: 4px 8px; text-align: right; }
-.tbl th { background: #f6f7f9; }
+.tbl th, .tbl td { border: 1px solid var(--border); padding: 4px 8px; text-align: right; }
+.tbl th { background: var(--surface-2); }
 
 /* ---------------- dialogues et messages ---------------- */
 
 .backdrop {
-  position: fixed; inset: 0; background: rgba(15,20,32,.42);
+  position: fixed; inset: 0; background: var(--overlay);
   display: flex; align-items: center; justify-content: center; z-index: 80; padding: 20px;
 }
 .modal {
-  background: var(--panel); border-radius: 12px; box-shadow: 0 24px 60px rgba(10,14,25,.3);
+  background: var(--surface); border-radius: 12px; box-shadow: 0 24px 60px rgba(10,14,25,.3);
   width: min(560px, 100%); max-height: 84vh; display: flex; flex-direction: column; overflow: hidden;
 }
 .modal header { padding: 16px 18px 10px; font-size: 17px; font-weight: 600; }
@@ -488,74 +763,61 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .crop-view { display: block; touch-action: none; border-radius: 6px; }
 .crop-side { display: flex; flex-direction: column; gap: 6px; align-items: center; }
 .crop-body.side .crop-side { align-items: stretch; }
-.crop-preview { display: block; width: auto; height: auto; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
+.crop-preview { display: block; width: auto; height: auto; border-radius: 6px; border: 1px solid var(--border); object-fit: contain; }
 .crop-footer { flex-wrap: wrap; }
 .crop-footer button { min-height: 44px; }
 .crop-tools { display: flex; gap: 8px; margin-right: auto; }
 .crop-backdrop.busy .crop-view { opacity: .6; }
 .form-note { margin: 2px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
-  background: #fff6e5; border: 1px solid #f0d49a; color: #6b4a00; }
+  background: var(--warn-soft); border: 1px solid var(--warn-border); color: var(--warn-text); }
 .form-note[hidden] { display: none; }
 /* Correction d'une formule reconnue : champ MathLive + LaTeX source. */
 .math-dialog math-field.latex-field {
   display: block; min-height: var(--touch); font-size: 24px; padding: 6px 10px;
-  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff;
 }
 .math-dialog math-field::part(menu-toggle),
 .math-dialog math-field::part(virtual-keyboard-toggle) { display: none; }
 .math-dialog .latex-source { font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; }
 .hit .katex { font-size: 1.15em; }
 
-/* Au-dessus de la barre d'etat (35 px), jamais dessus. */
-.toast-host { position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%); z-index: 90;
-  display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+/* Messages ephemeres : en haut a droite sous la barre (en bas a droite si
+   une calculatrice detachee occupe le coin : core/chrome.ts), jamais sur
+   la zone d'ecriture centrale. Trois au plus, le plus recent en haut. */
+.toast-host {
+  position: fixed; top: 60px; right: 12px; z-index: 90; width: min(360px, calc(100vw - 24px));
+  display: flex; flex-direction: column-reverse; gap: 8px; align-items: stretch; pointer-events: none;
+}
+.toast-host.bottom { flex-direction: column; justify-content: flex-end; }
 .toast {
-  background: #16181d; color: #fff; border-radius: 8px; padding: 10px 16px;
-  box-shadow: var(--shadow); font-size: 14px; max-width: 70vw;
+  display: flex; align-items: center; gap: 4px; pointer-events: auto;
+  background: #1f2329; color: #f2f4f7; border-radius: var(--radius-lg);
+  padding: 2px 2px 2px 14px; min-height: 48px;
+  box-shadow: var(--shadow-3); font-size: var(--fs); line-height: 1.35;
+  border-left: 4px solid #6b7686;
+  animation: toast-in var(--dur) var(--ease);
 }
-.toast.warn { background: #92590a; }
-.toast.err { background: #a51b1b; }
-.toast.with-action { display: flex; align-items: center; gap: 14px; pointer-events: auto; padding: 6px 8px 6px 16px; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+html[data-theme="dark"] .toast { background: #2a2e36; border-top: 1px solid #3a3f48; border-right: 1px solid #3a3f48; border-bottom: 1px solid #3a3f48; }
+.toast.warn { border-left-color: #f0a63a; }
+.toast.err { border-left-color: #f05252; }
+.toast .toast-text { flex: 1; min-width: 0; padding: 8px 0; }
 .toast-action {
-  background: transparent; color: #9cc0ff; border-color: transparent; font-weight: 600; min-height: 44px;
+  background: transparent; color: #9cc0ff; border-color: transparent; font-weight: 600; min-height: 44px; padding: 0 12px;
 }
-.toast-action:hover { background: rgba(255,255,255,.1); }
-.toast-note { opacity: .75; font-size: 13px; margin-left: 10px; }
-
-.status {
-  display: flex; align-items: center; gap: 14px; padding: 3px 12px; min-height: 32px;
-  background: var(--panel); border-top: 1px solid var(--line); font-size: 12px; color: var(--muted);
-  white-space: nowrap; min-width: 0;
-}
-.status > * { flex: none; }
-.status .root-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* Une seule ligne sur un ecran etroit (portrait) : textes abreges. */
-.status .sh { display: none; }
-@media (max-width: 1100px) {
-  .status { gap: 10px; padding: 3px 8px; }
-  .status .lg { display: none; }
-  .status .sh { display: inline; }
-}
-.pill { display: inline-flex; align-items: center; gap: 5px; }
-.pill .led { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
-.pill .led.off { background: #9ca3af; }
-.pill .led.wait { background: #f0b429; }
-.pill .led.err { background: #dc2626; }
-.pill.unsaved { color: #a51b1b; font-weight: 600; }
-/* Bouton discret de la barre d'etat : 44 px de haut quand meme, sans
-   epaissir la barre (il deborde de 6 px dessus et dessous, sur du vide). */
-.status .keys-btn { min-height: var(--touch); min-width: var(--touch); margin: -6px 0; padding: 0 8px; }
-.status .reco-blocked { color: #a51b1b; border-color: #e7a3a3; background: #fff5f5; }
-.status .pill.usage-high { color: #8a5a00; font-weight: 600; }
-.tabbar .help-btn { font-weight: 700; color: var(--muted); }
+.toast-action:hover { background: rgba(255, 255, 255, .1); }
+.toast-close { background: transparent; border-color: transparent; color: #b4bcc8; padding: 0; min-width: 40px; width: 40px; }
+.toast-close:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.toast-note { opacity: .75; font-size: var(--fs-sm); margin-left: 8px; }
+kbd { color: var(--text-2); }
 
 .hits { display: flex; flex-direction: column; gap: 6px; }
 .hit {
-  text-align: left; width: 100%; border: 1px solid var(--line); border-radius: 8px;
-  background: var(--panel); padding: 9px 12px; cursor: pointer;
+  text-align: left; width: 100%; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); padding: 9px 12px; cursor: pointer;
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-height: 56px;
 }
-.hit:hover { background: #f7f8fa; }
+.hit:hover { background: var(--surface-2); }
 .hit .where { font-size: 12px; color: var(--muted); }
 
 .empty { color: var(--muted); text-align: center; padding: 40px 20px; }
@@ -566,10 +828,10 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .probe-canvas { flex: 1; background: #fff; touch-action: none; }
 .probe-readout {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px;
-  padding: 10px; background: var(--panel); border-top: 1px solid var(--line);
+  padding: 10px; background: var(--surface); border-top: 1px solid var(--border);
   font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px;
 }
-.probe-readout div { background: #f6f7f9; border-radius: 6px; padding: 6px 10px; }
+.probe-readout div { background: var(--surface-2); border-radius: 6px; padding: 6px 10px; }
 .probe-readout b { color: var(--accent); }
 
 /* ---------------- texte de la page, facon traitement de texte ---------------- */
@@ -586,7 +848,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
      lit d'un seul tenant, comme un document LaTeX. */
   font: calc(21px * var(--k, 1)) / 1.5 KaTeX_Main, "Latin Modern Roman", "Times New Roman", serif;
   line-height: var(--line);
-  color: #16181d; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--sheet-text); white-space: pre-wrap; overflow-wrap: anywhere;
   outline: none; cursor: text; caret-color: var(--accent);
   -webkit-user-select: text; user-select: text;
   /* Le doigt et le stylet sont rendus au canvas (PageView.routePointers). */
@@ -607,16 +869,16 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 
 .mathbar {
   display: flex; align-items: center; gap: 3px; flex-wrap: nowrap; overflow-x: auto;
-  padding: 3px 8px; background: #fafbfc; border-bottom: 1px solid var(--line);
+  padding: 3px 8px; background: var(--surface-2); border-bottom: 1px solid var(--border);
   scrollbar-width: thin;
 }
-.mathbar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+.mathbar .sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
 .mathbar .mathkey {
   flex: none; min-width: 44px; min-height: 44px; padding: 0 7px;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px;
+  font-size: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
 }
-.mathbar .mathkey:hover { border-color: var(--accent); background: #f3f7ff; }
+.mathbar .mathkey:hover { border-color: var(--accent); background: var(--accent-soft); }
 .mathbar .mathkey.eq { font-weight: 600; color: var(--accent); }
 .mathbar .mathkey .katex { font-size: 1em; }
 /* Pas de marge autour des formules : pas de blanc avant la virgule ou le
@@ -658,31 +920,6 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .work { flex: 1; min-height: 0; display: flex; }
 .work .panes { min-width: 0; }
 
-.side-tools {
-  --tools-w: 262px;
-  flex: none; width: var(--tools-w); overflow-y: auto; overflow-x: hidden;
-  background: var(--panel); border-right: 1px solid var(--line);
-  scrollbar-width: thin;
-}
-.side-tools .toolbar {
-  flex-wrap: wrap; gap: 5px; padding: 8px; border-bottom: none;
-}
-.side-tools .toolbar > button:not(.swatch) { flex: 1 1 calc(50% - 5px); padding: 0 6px; font-size: 14px; }
-.side-tools .toolbar .sep { flex-basis: 100%; width: auto; height: 1px; margin: 3px 0; }
-.side-tools .toolbar .spacer { display: none; }
-.side-tools .toolbar .swatch { flex: 1 1 0; min-width: 0; }
-.side-tools .toolbar > .small { flex: none; }
-.side-tools .toolbar > .swatch-legend { flex: 1 1 100%; }
-
-/* Grille : les touches remplissent la largeur, sans vide a droite. */
-.side-tools .mathbar {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
-  overflow: visible; gap: 4px; padding: 0 8px 8px; border-bottom: none; background: transparent;
-}
-.side-tools .mathbar .sep { grid-column: 1 / -1; width: auto; height: 1px; margin: 3px 0; align-self: auto; }
-.side-tools .mathbar .mathkey { min-width: 0; padding: 0 2px; }
-.side-tools .mathbar .mathkey.eq { grid-column: 1 / -1; }
-
 /* Trois choix sur une ligne (epaisseurs, reglages du menu ⋯). */
 .seg { display: flex; gap: 0; flex: 1 1 100%; }
 .seg > button { flex: 1 1 0; min-width: 0; border-radius: 0; margin-left: -1px; padding: 0 6px; }
@@ -690,43 +927,28 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .seg > button:last-child { border-radius: 0 8px 8px 0; }
 .seg > button.on { position: relative; z-index: 1; font-weight: 600; }
 
-.side-tools .page-nav button.page-label { flex: 1 1 auto; min-width: 0; padding: 0 2px; font-size: 14px; white-space: nowrap; }
-.side-tools .page-nav button:not(.page-label) { flex: 0 0 44px; }
-/* « Pas compris » : la couleur des reperes, reperable sans lire. */
-.side-tools .toolbar > button.flag-btn {
-  flex: 1 1 auto; background: #fff4e5; border-color: #f0b429; color: #7a4700; font-weight: 600;
-}
-.side-tools .toolbar > button.flag-btn:hover { background: #ffecd0; }
-.side-tools .toolbar > button.more-btn { flex: 0 0 52px; font-size: 20px; font-weight: 700; }
-
-.math-section { border-top: 1px solid var(--line); background: #fafbfc; }
-.section-toggle {
-  width: 100%; justify-content: space-between; border: none; border-radius: 0;
-  background: transparent; padding: 0 14px; font-weight: 600; font-size: 14px; color: var(--muted);
-}
-.section-toggle:hover { background: rgba(0,0,0,.03); }
-
 /* Menu « ⋯ » : fond transparent, un appui a cote le ferme. */
 .backdrop.more-backdrop { background: transparent; display: block; padding: 0; }
 /* Deux colonnes (actions, reglages) : le menu tient en 1366x768. */
 .more-menu {
-  position: fixed; width: 632px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  position: fixed; width: 668px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: 0 18px 50px rgba(10,14,25,.22); padding: 8px; display: flex; gap: 12px; align-items: flex-start;
 }
 .more-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.more-col + .more-col { border-left: 1px solid var(--line); padding-left: 12px; }
+.more-col + .more-col { border-left: 1px solid var(--border); padding-left: 12px; }
 @media (max-width: 880px) {
   .more-menu { width: 320px; flex-direction: column; }
-  .more-col + .more-col { border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }
+  .more-col + .more-col { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 8px; }
 }
 .more-menu .more-item { justify-content: flex-start; border-color: transparent; background: transparent; width: 100%; }
-.more-menu .more-item:hover { background: #f3f5f8; }
-.more-menu .more-item.danger { color: #a51b1b; }
-.more-menu .sep { height: 1px; background: var(--line); margin: 4px 0; }
+.more-menu .more-item:hover { background: var(--surface-2); }
+.more-menu .more-item.danger { color: var(--danger-text); }
+.more-menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
 .more-seg { display: flex; align-items: center; gap: 8px; padding: 2px 4px; }
 .more-seg > span { flex: 0 0 92px; line-height: 1.2; }
 .more-seg .seg { flex: 1 1 auto; }
+.more-seg .seg > button { padding: 0 4px; white-space: nowrap; }
 /* Plus de trois choix (fond de page) : trois par ligne, boutons separes. */
 .seg.wrap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
 .seg.wrap > button, .seg.wrap > button:first-child, .seg.wrap > button:last-child {
@@ -742,13 +964,13 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 .shortcuts-group td { padding: 3px 6px 3px 0; vertical-align: top; }
 .shortcuts-group td:first-child { white-space: nowrap; width: 1%; padding-right: 12px; }
 kbd {
-  font: 12px "Cascadia Mono", Consolas, monospace; background: #f6f7f9;
-  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
+  font: 12px "Cascadia Mono", Consolas, monospace; background: var(--surface-2);
+  border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
 }
 
 .side-calc {
   flex: none; width: 400px; display: flex; flex-direction: column; min-height: 0;
-  border-left: 1px solid var(--line); background: var(--panel);
+  border-left: 1px solid var(--border); background: var(--surface);
 }
 .side-calc.closed { display: none; }
 .calc.docked {
@@ -757,33 +979,59 @@ kbd {
 }
 .calc.docked .calc-head { cursor: default; }
 .calc.docked .calc-body { max-height: none; flex: 1; min-height: 0; }
-.side-tools .toolbar + .toolbar { border-top: 1px solid var(--line); }
-.side-tools .page-nav { flex-basis: 100%; display: flex; align-items: center; gap: 6px; }
-.side-tools .page-nav button { flex: 1; }
-@media (max-width: 1500px) { .side-calc { width: 340px; } .side-tools { --tools-w: 236px; } }
+@media (max-width: 1500px) { .side-calc { width: 340px; } }
 
-/* Ruban Maths a cote des outils (App.mathLayout « side ») : rien a faire
-   defiler en 1366x768, et la feuille garde sa largeur de lecture. */
-.side-tools.two-cols { display: flex; width: auto; overflow: hidden; }
-.side-tools.two-cols > .toolbar { flex: none; width: var(--tools-w); overflow-y: auto; align-content: flex-start; }
-.side-tools.two-cols > .math-section {
-  flex: none; width: 216px; overflow-y: auto; border-top: none; border-left: 1px solid var(--line);
+/* Ruban Maths (App.paintMath) : volet flottant a cote du rail, par-dessus
+   la marge, ou colonne quand il est epingle sur un ecran >= 1600 px. */
+.work { position: relative; }
+.math-panel {
+  --math-w: 220px;
+  display: flex; flex-direction: column; width: var(--math-w); min-height: 0;
+  background: var(--surface);
+}
+.math-panel.column { flex: none; border-right: 1px solid var(--border); }
+.math-panel.float {
+  position: absolute; z-index: 55; left: calc(var(--rail-w) + 8px); top: 8px; max-height: calc(100% - 16px);
+  border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-3);
+  animation: fly-in-x var(--dur) var(--ease);
+}
+.math-head {
+  display: flex; align-items: center; gap: 2px; padding: 2px 4px 2px 14px; flex: none;
+  border-bottom: 1px solid var(--border); min-height: 48px;
+}
+.math-title { font-weight: 600; font-size: var(--fs); color: var(--text); }
+.math-head .small-icon { width: 40px; min-width: 40px; }
+.math-panel .mathbar {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; align-content: start;
+  padding: 8px; overflow-y: auto; border-bottom: none; background: transparent; flex: 1 1 auto; min-height: 0;
   scrollbar-width: thin;
 }
-/* Ruban en volet (« fly ») : split ou ecran bas, par-dessus la page, a
-   droite de la colonne ; Echap ou un appui a cote le ferme. */
-.math-section.fly.open > .mathbar {
-  position: fixed; z-index: 55; left: calc(var(--tools-w) + 6px); bottom: 48px;
-  width: min(392px, calc(100vw - var(--tools-w) - 16px)); max-height: calc(100vh - 170px); overflow-y: auto;
-  padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
-  box-shadow: 0 18px 50px rgba(10,14,25,.22);
+.math-panel .mathbar .sep { grid-column: 1 / -1; width: auto; height: 1px; margin: 3px 0; align-self: auto; }
+.math-panel .mathbar .mathkey { min-width: 0; padding: 0 2px; font-size: 17px; }
+.math-panel .mathbar .mathkey.eq { grid-column: span 2; font-size: var(--fs); }
+.math-panel .mathbar > .mathkey.eq + .sep { display: none; }
+
+/* Indicateur de page du panneau, en bas a droite (hors de la zone
+   d'ecriture centrale) : precedente, « p. 4 / 12 », suivante, nouvelle
+   page, zoom. */
+.page-pill {
+  position: absolute; right: 16px; bottom: 12px; z-index: 5;
+  display: flex; align-items: center; gap: 0; padding: 2px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent); border: 1px solid var(--border);
+  border-radius: 24px; box-shadow: var(--shadow-2);
+  backdrop-filter: blur(6px);
 }
-.math-section.fly.open > .section-toggle { background: var(--accent-soft); color: #1b3fa8; }
-/* Sous-colonne et volet : « Equation » sur deux cases, les modeles a sa
-   suite (une rangee de gagnee, le ruban tient en 768 px de haut). */
-.side-tools.two-cols .mathbar .mathkey.eq, .math-section.fly .mathbar .mathkey.eq { grid-column: span 2; }
-.side-tools.two-cols .mathbar > .mathkey.eq + .sep, .math-section.fly .mathbar > .mathkey.eq + .sep { display: none; }
-.side-tools .mathbar .mathkey { font-size: 17px; }
+.page-pill .icon-btn { border-radius: 22px; width: 40px; min-width: 40px; }
+.page-pill .page-label {
+  border-color: transparent; background: transparent; padding: 0 8px; min-width: 64px;
+  font-size: var(--fs-sm); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; border-radius: 22px;
+  white-space: nowrap;
+}
+.page-pill .page-label:hover { background: var(--hover); }
+.page-pill .zoom-chip {
+  position: static; border: none; box-shadow: none; background: var(--accent-soft); color: var(--accent-text);
+  font-size: var(--fs-xs); font-weight: 600; border-radius: 22px; margin-left: 4px; min-width: 52px; padding: 0 10px;
+}
 
 /* Photo posee dans le texte : sa propre ligne, largeur en unites de page. */
 .text-doc .doc-img {
@@ -825,7 +1073,7 @@ kbd {
 .text-doc .doc-img.live-fit .doc-img-bar { top: calc(100% + 4px); right: auto; left: 0; z-index: 3; }
 .live-calc {
   display: inline-flex; align-items: center; gap: .5em;
-  padding: .15em .5em; border-left: 3px solid #93a8d8; background: #f6f8fd; border-radius: 4px;
+  padding: .15em .5em; border-left: 3px solid #93a8d8; background: color-mix(in srgb, #2563eb 6%, var(--page-bg)); border-radius: 4px;
 }
 .live-graph { display: block; border: 1px solid #dbe2ee; border-radius: 6px; background: #fff; padding: .2em .3em; }
 .live-graph canvas { display: block; width: 100%; height: auto; }
@@ -894,8 +1142,8 @@ kbd {
 /* ---------------- navigation et organisation ---------------- */
 
 /* Bloc « Pas compris » du menu : ambre, comme ses badges. */
-.resume.flags { border-left-color: #f59e0b; }
-.resume .key-hint { border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+.resume.flags { border-left-color: var(--flag); }
+.resume .key-hint { border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; }
 .matieres-head { gap: 14px; }
 .matieres-head h2 { margin-right: 4px; }
 .filter-note { margin-top: 14px; color: var(--muted); }
@@ -908,16 +1156,15 @@ kbd {
 .card.add[hidden] { display: none; }
 .cleanup {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px;
-  padding: 12px 14px; border: 1px solid #ffd9a8; background: #fffaf2; border-radius: var(--radius);
+  padding: 12px 14px; border: 1px solid var(--warn-border); background: var(--warn-soft); border-radius: var(--radius);
 }
 .others { margin-top: 26px; }
 .others summary { cursor: pointer; min-height: var(--touch); display: flex; align-items: center; font-weight: 600; color: var(--muted); }
-.other-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-top: 1px solid var(--line); }
+.other-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-top: 1px solid var(--border); }
 .other-name { font-weight: 500; }
 .color-row { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Onglets : celui qu'on vise, et l'autre panneau du split. */
-.tab.shown { border-color: #bcd0ff; }
 /* Split : le panneau qui recoit le clavier et les outils. */
 /* Meme hauteur d'en-tete des deux cotes : les feuilles restent alignees. */
 .pane-head { min-height: 52px; }
@@ -939,7 +1186,7 @@ kbd {
 .sheet.readonly { pointer-events: none; }
 .readonly-note {
   margin: 0 0 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px;
-  background: #fff4e5; color: #8a4b00; border: 1px solid #ffd9a8;
+  background: var(--warn-soft); color: var(--warn-text); border: 1px solid var(--warn-border);
 }
 /* Bandeaux avec boutons : presence sur l'autre PC, copies de conflit OneDrive. */
 .view-notes { max-width: 900px; margin: 0 auto; }
@@ -976,8 +1223,8 @@ kbd {
 .review-filter-label { flex: 0 0 92px; padding-top: 13px; font-size: 13px; color: var(--muted); }
 .review-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
 .review-chip { border-radius: 22px; padding: 0 14px; }
-.review-chip.on { background: var(--accent-soft); border-color: var(--accent); color: #1b3fa8; font-weight: 600; }
-.review-chip[style*="--c"].on { background: color-mix(in srgb, var(--c) 12%, #fff); border-color: var(--c); color: var(--ink); }
+.review-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.review-chip[style*="--c"].on { background: color-mix(in srgb, var(--c) 12%, var(--surface)); border-color: var(--c); color: var(--ink); }
 .review-chip-in { display: inline-flex; align-items: center; gap: 7px; }
 .review-chip .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 .review-count { font-size: 12px; color: var(--muted); font-weight: 400; }
@@ -991,10 +1238,10 @@ kbd {
 .review-where:hover { background: var(--accent-soft); }
 .review-item {
   text-align: left; width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
-  border: 1px solid var(--line); border-left: 5px solid var(--c, var(--accent)); border-radius: 8px;
-  background: var(--panel); padding: 10px 14px; min-height: 56px; height: auto;
+  border: 1px solid var(--border); border-left: 5px solid var(--c, var(--accent)); border-radius: 8px;
+  background: var(--surface); padding: 10px 14px; min-height: 56px; height: auto;
 }
-.review-item:hover { background: #fafbfc; }
+.review-item:hover { background: var(--surface-2); }
 .review-item:focus-visible, .review-where:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .review-tag { font-size: 12px; font-weight: 600; color: var(--c, var(--muted)); }
 .review-tag .muted { font-weight: 400; }
@@ -1026,9 +1273,8 @@ kbd {
 .page-break { position: absolute; left: 0; right: 0; border-top: 2px dashed #9aa7bd; }
 .page-break span {
   position: absolute; right: 8px; top: 2px; font: 600 11px/1.4 system-ui, sans-serif;
-  color: #6b7487; background: rgba(255, 255, 255, .9); padding: 0 6px; border-radius: 4px;
+  color: #6b7487; background: color-mix(in srgb, var(--page-bg) 90%, transparent); padding: 0 6px; border-radius: 4px;
 }
-.long-note button { min-height: 44px; }
 
 /* ---------------- liens entre pages (core/links.ts) ---------------- */
 /* Puce de lien dans le texte : libelle souligne, couleur d'accent, un appui la suit. */
@@ -1050,10 +1296,10 @@ body.printing .doc-link::before, body.printing .doc-link::after { content: none;
 /* Selecteur [[ : liste flottante pres du curseur. */
 .link-picker {
   position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 6px;
-  background: var(--panel, #fff); border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 10px 30px rgba(10, 14, 25, .18); padding: 8px; overflow: hidden;
 }
-.link-picker-input { min-height: var(--touch, 44px); font-size: 15px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; }
+.link-picker-input { min-height: var(--touch, 44px); font-size: 15px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; }
 .link-picker-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; flex: 1; }
 .link-pick {
   text-align: left; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
@@ -1072,11 +1318,11 @@ body.printing .doc-link::before, body.printing .doc-link::after { content: none;
 .backlinks-title { font-weight: 600; margin-right: 2px; }
 .backlink {
   display: inline-flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; text-align: left;
-  min-height: var(--touch, 44px); padding: 4px 12px; border: 1px solid var(--line); border-radius: 22px;
-  background: var(--panel, #fff); cursor: pointer;
+  min-height: var(--touch, 44px); padding: 4px 12px; border: 1px solid var(--border); border-radius: 22px;
+  background: var(--surface); cursor: pointer;
 }
-.backlink-where { color: #1d4ed8; }
-.backlink-title { color: var(--text, #222); }
+.backlink-where { color: var(--accent-text); }
+.backlink-title { color: var(--text); }
 .backlink-labels { font-size: 12px; }
 body.printing .backlinks { display: none; }
 
@@ -1089,3 +1335,22 @@ body.printing .backlinks { display: none; }
 .docx-option { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; padding: 6px 0; cursor: pointer; }
 .docx-option input[type="checkbox"] { width: 22px; height: 22px; min-height: 0; padding: 0; margin: 2px 0 0; flex: none; border: 0; box-shadow: none; accent-color: var(--accent); }
 .docx-option-note { display: block; margin-top: 4px; }
+
+/* ---------------- theme sombre : ce que les jetons ne couvrent pas ---------------- */
+/* Pave de la calculatrice : memes familles de couleur (section 7), teintes
+   sombres ; l'ecran de la calculatrice est deja sombre. */
+html[data-theme="dark"] .k-fn    { background: #2a2140; border-color: #43356a; color: #cdb8ff; }
+html[data-theme="dark"] .k-op    { background: #1c2a45; border-color: #2f4778; color: #a9c6ff; }
+html[data-theme="dark"] .k-const { background: #15302a; border-color: #23564a; color: #86e5bd; }
+html[data-theme="dark"] .k-del   { background: #3a1d20; border-color: #66313a; color: #ffadad; }
+html[data-theme="dark"] .k-2nd   { background: #362a12; border-color: #5f4a1c; color: #ffd68a; }
+html[data-theme="dark"] .keys button .second { color: #f6b75b; }
+html[data-theme="dark"] .calc-screen { background: #0b0e14; box-shadow: inset 0 0 0 1px #262b34; }
+html[data-theme="dark"] .plot-box { background: #fff; }
+html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-where { color: var(--accent-text); }
+.app[data-sheet="dark"] .text-doc .doc-link { color: #8ab4ff; }
+.app[data-sheet="dark"] .live-tag { color: #a8b0bd; border-color: #3a3f48; }
+.app[data-sheet="dark"] .text-doc math-field { color: var(--sheet-text); --selection-background-color: #2b4370; }
+/* Couleurs semantiques du texte tape (style en ligne, colorSpan) : sur la
+   feuille sombre, la variable --ink-* de la couleur l'emporte deja ; rien
+   a faire ici. */

@@ -122,6 +122,18 @@ les deux PC.
   long puis glisser au doigt ou au stylet) le change de place. `Ctrl+T` : nouvel
   intercalaire. En split, outils et clavier visent le panneau touche en
   dernier ; portable tourne (portrait), les deux panneaux s'empilent.
+- Ecran cahier : barre du haut (maison = menu, fil d'Ariane matiere ›
+  intercalaire, recherche, split, aide, point d'etat), rail d'outils a gauche
+  (icones ; nom et raccourci au survol ; second appui ou appui long sur la
+  gomme, le lasso ou le stylo sans stylet : ses options), indicateur de page
+  en bas a droite de chaque panneau. Le point d'etat est vert quand tout va
+  bien, orange ou rouge avec un mot (« Non enregistré », « Hors ligne »,
+  « Lecture seule ») sinon ; un appui donne le detail et les cles MyScript.
+- Ruban Maths : bouton ∑ du rail ou `Ctrl+Maj+M`, volet a cote du rail ;
+  l'epingle le garde ouvert (en colonne sur un ecran d'au moins 1600 px).
+- Apparence (menu « ⋯ ») : theme Clair, Sombre ou Systeme (`Ctrl+Maj+T`),
+  feuille Claire, Sepia ou Sombre ; la feuille sombre montre l'encre noire en
+  clair a l'ecran seulement, l'export PDF et Word reste blanc a encre noire.
 - Un appui sur « p. 4 / 12 » (ou `Ctrl+G`) : liste des pages avec date et
   premiere ligne. `Alt+←` (ou le bouton retour de la souris) revient d'avant un
   saut : recherche, repere, lien, liste des pages.
@@ -147,6 +159,9 @@ src/
 │   ├── palette.ts        les 5 couleurs a semantique fixe
 │   ├── shortcuts.ts      table unique des raccourcis (clavier, aide F1)
 │   ├── templates.ts      modeles du ruban Maths
+│   ├── theme.ts          theme, teinte de feuille, encre a l'affichage, contraste
+│   ├── chrome.ts         ruban Maths (volet/colonne), placement des messages
+│   ├── status.ts         indicateur d'etat compact
 │   ├── sync.ts           OneDrive : copies de conflit, fusion d'encre, presence
 │   ├── calc/             mathjs : evaluation, derivation, primitives,
 │   │                     equations, matrices, courbes, ecran facon TI
@@ -160,7 +175,9 @@ src/
 │   ├── pagelist.ts       liste des pages (numero, date, premiere ligne)
 │   ├── probe.ts          sonde stylet
 │   ├── help.ts           fiche des raccourcis (F1, Ctrl+/)
-│   └── app.ts            onglets, split, colonne d'outils, menu « ⋯ »
+│   ├── icons.ts          icones SVG inline (Lucide, ISC)
+│   ├── tooltip.ts        infobulles, application du theme
+│   └── app.ts            barre du haut, rail d'outils, split, menu « ⋯ »
 ├── platform.ts           Tauri ou navigateur
 └── tests/
 src-tauri/src/lib.rs      acces disque controle, instance unique
@@ -210,9 +227,9 @@ schéma part entier et garde sa place par rapport au texte. La page suivante est
 créée (renumérotation) ; si elle a été créée par un débordement précédent, le
 texte y continue. Le curseur suit (en mode pages, la vue passe à la page
 suivante). `Ctrl+Z` juste après un débordement le défait d'un coup. Le stylet
-n'écrit plus hors de la feuille. Une ancienne page plus longue qu'une A4 n'est
-jamais découpée d'office : pointillés à chaque fin de feuille et bouton
-« Répartir sur plusieurs pages » (annulable 8 s). Une photo plus haute qu'une
+n'écrit plus hors de la feuille. Toutes les pages ont la taille d'une A4 : une
+ancienne page plus longue est répartie d'office sur plusieurs pages dès son
+ouverture (sauf en lecture seule). Une photo plus haute qu'une
 page est réduite à la hauteur de page.
 
 Limites : supprimer du texte ne fait pas remonter les lignes de la page
@@ -346,7 +363,7 @@ date ou la taille de son fichier change (OneDrive, explorateur).
 ## Raccourcis
 
 La liste complete est dans l'application : **F1** (ou `Ctrl+/`, ou le bouton
-« ? » en haut a droite). Elle est generee depuis la table unique
+clavier en haut a droite). Elle est generee depuis la table unique
 `src/core/shortcuts.ts`, qui sert aussi au clavier : elle ne peut pas mentir.
 Les lettres seules tapent du texte, comme dans Word ; les raccourcis passent
 tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
@@ -366,6 +383,8 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+O` | importer un PDF apres la page courante, pour l'annoter (aussi : deposer un .pdf sur la page) |
 | `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
 | `Ctrl+M` | menu, et retour au meme endroit |
+| `Ctrl+Maj+M` | ruban Maths : ouvrir ou fermer le volet |
+| `Ctrl+Maj+T` | theme : clair, sombre, celui de Windows |
 | `Ctrl+K` | recherche globale |
 | `Ctrl+Maj+K` | reviser : extraits d'une couleur (theoremes, definitions...) par matiere, export PDF |
 | `Ctrl+L` | calculatrice |
@@ -441,3 +460,12 @@ Calculatrice, conventions de saisie (clavier francais) :
   editable comme les autres ;
 - l'onglet Courbes suit le mode d'angle (bouton RAD/DEG a cote de la
   fonction) : en DEG, `sin(x)` sur [0 ; 360] fait une periode.
+
+## Licences des icones
+
+Les icones de l'interface (`src/ui/icons.ts`) reprennent des traces de
+[Lucide](https://lucide.dev), licence ISC : « Copyright (c) for portions of
+Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other
+copyright (c) for Lucide are held by Lucide Contributors 2022. » Permission
+d'utiliser, copier, modifier et distribuer avec ou sans contrepartie, sous
+reserve de cette mention. Elles sont embarquees dans l'application (aucun CDN).
