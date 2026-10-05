@@ -1925,7 +1925,12 @@ export class PageView {
         this.holdKeys();
         nextPage = await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, n)).catch(() => null);
       }
-      const isFlow = !!nextPage && nextPage.continues === from.page.id && !isFutureVersion(nextPage) && !shownNext?.readOnly;
+      // Comme Word : ce qui deborde passe en tete de la page suivante (son
+      // contenu descend, et deborde a son tour), au lieu d'inserer une page
+      // presque vide. Nouvelle page seulement en fin d'intercalaire, ou si la
+      // suivante est en lecture seule ou une page de PDF.
+      const isFlow = !!nextPage && !isFutureVersion(nextPage) && !shownNext?.readOnly && !shownNext?.copy
+        && !pdfBlockOf(nextPage);
 
       if (isFlow && shownNext) {
         // Page de suite affichee (defilement) : tout se passe en memoire.
@@ -1936,6 +1941,9 @@ export class PageView {
         const c = composeFlowText(tail, plan.lead, existing, plan.textLines, plan.inkLines);
         moveFlowBlocks(from.page, shownNext.page, { ...sel, blockIds: imageIdsOf(tail) }, plan.dy, c.shift, uuid);
         this.setFlowText(shownNext, c.text);
+        // Elle deborde peut-etre a son tour : revue apres celui-ci.
+        shownNext.editedAt = performance.now();
+        this.flowAgain.add(shownNext);
         this.repaintFlowed(shownNext);
         this.repaintFlowed(from);
         // La page d'arrivee part la premiere sur le disque.
