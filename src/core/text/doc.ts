@@ -463,6 +463,68 @@ export function absorbTextBoxes(
 }
 
 /**
+ * Texte colle d'ailleurs (ChatGPT, Overleaf, un cours en Markdown) : le
+ * LaTeX entre $…$, $$…$$, \(…\) ou \[…\] devient une formule. Les formules
+ * centrees ($$ et \[) gardent leur grande taille (\displaystyle). Un $ seul
+ * n'ouvre une formule que s'il est colle a son contenu ($x$, pas « 5 $ et
+ * 10 $ ») et sur la meme ligne. null s'il n'y a aucune formule : le texte est
+ * alors colle tel quel.
+ */
+export function pastedMath(src: string): DocToken[] | null {
+  const out: DocToken[] = [];
+  let buf = "";
+  let found = false;
+  const flush = (): void => {
+    buf.split("\n").forEach((part, k) => {
+      if (k) out.push({ kind: "br" });
+      if (part) out.push({ kind: "text", text: part });
+    });
+    buf = "";
+  };
+  const push = (latex: string, display: boolean): void => {
+    const body = latex.replace(/\s+/g, " ").trim();
+    flush();
+    out.push({ kind: "math", latex: display ? `\\displaystyle ${body}` : body });
+    found = true;
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    const display = src.startsWith("$$", i) ? "$$" : src.startsWith("\\[", i) ? "\\]" : null;
+    if (display) {
+      const end = src.indexOf(display, i + 2);
+      if (end > i + 2 && src.slice(i + 2, end).trim()) {
+        push(src.slice(i + 2, end), true);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (src.startsWith("\\(", i)) {
+      const end = src.indexOf("\\)", i + 2);
+      if (end > i + 2 && src.slice(i + 2, end).trim()) {
+        push(src.slice(i + 2, end), false);
+        i = end + 1;
+        continue;
+      }
+    }
+    if (c === "\\" && src[i + 1] === "$") { buf += "$"; i++; continue; }
+    if (c === "$" && src[i + 1] !== "$") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== "$" && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
+      const body = src.slice(i + 1, j);
+      if (src[j] === "$" && body && !/^\s|\s$/.test(body) && !/\d/.test(src[j + 1] ?? "")) {
+        push(body, false);
+        i = j;
+        continue;
+      }
+    }
+    buf += c;
+  }
+  if (!found) return null;
+  flush();
+  return out;
+}
+
+/**
  * Texte d'un morceau copie, pour le presse-papiers des autres logiciels :
  * les formules en $LaTeX$, les photos omises.
  */

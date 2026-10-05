@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  absorbTextBoxes, docClipboardLines, docClipboardText, docImageIds, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
+  absorbTextBoxes, docClipboardLines, docClipboardText, docImageIds, pastedMath, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
   trailingOperand,
   type DocToken,
 } from "../core/text/doc";
@@ -173,5 +173,36 @@ describe("copier vers un autre logiciel", () => {
     expect(docClipboardLines(t)).toEqual([{ marker: "", parts: [
       { latex: "3+2=5" }, { text: " le tout divise par 2; " }, { latex: "\\frac{3+5}{2}" },
     ] }]);
+  });
+});
+
+describe("coller du LaTeX ($…$, $$…$$, \\(…\\), \\[…\\])", () => {
+  it("formule centree $$…$$ apres du texte", () => {
+    const src = "S(p) = $$S(p) = \\left[ -\\frac{t\\, e^{-(p+3)t}}{p+3} \\right]_0^{+\\infty} + \\frac{1}{p+3} \\int_0^{+\\infty} e^{-(p+3)t}\\, dt$$";
+    expect(pastedMath(src)).toEqual([
+      { kind: "text", text: "S(p) = " },
+      { kind: "math", latex: "\\displaystyle S(p) = \\left[ -\\frac{t\\, e^{-(p+3)t}}{p+3} \\right]_0^{+\\infty} + \\frac{1}{p+3} \\int_0^{+\\infty} e^{-(p+3)t}\\, dt" },
+    ]);
+  });
+
+  it("formules en ligne, \\( \\) et \\[ \\], retours a la ligne", () => {
+    expect(pastedMath("soit $x^2$ et \\(y\\)\n\\[\n\\int f\n\\]")).toEqual([
+      { kind: "text", text: "soit " }, { kind: "math", latex: "x^2" }, { kind: "text", text: " et " },
+      { kind: "math", latex: "y" }, { kind: "br" }, { kind: "math", latex: "\\displaystyle \\int f" },
+    ]);
+  });
+
+  it("des prix ou un $ seul restent du texte", () => {
+    expect(pastedMath("5 $ et 10 $")).toBeNull();
+    expect(pastedMath("entre $5 et $10")).toBeNull();
+    expect(pastedMath("rien de special")).toBeNull();
+    expect(pastedMath("un \\$ et $a$")).toEqual([
+      { kind: "text", text: "un $ et " }, { kind: "math", latex: "a" },
+    ]);
+  });
+
+  it("la formule collee survit a l'enregistrement", () => {
+    const t = pastedMath("$$\\frac{1}{p+3}$$")!;
+    expect(parseDoc(serializeDoc(t))).toEqual(t);
   });
 });

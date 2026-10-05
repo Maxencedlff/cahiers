@@ -2,10 +2,10 @@ import { MathfieldElement } from "mathlive";
 import "mathlive/fonts.css";
 import katex from "katex";
 import { askText, el, toast } from "./dom";
-import { colorOf } from "../core/palette";
+import { inkCssColor } from "../core/theme";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardLines, docClipboardText, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
+  docClipboardLines, docClipboardText, pastedMath, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
   texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
@@ -432,7 +432,11 @@ export class TextDoc {
       // Lien copie depuis la recherche (« Copier le lien ») : une puce.
       const plainText = dt?.getData("text/plain") ?? "";
       if (parseLinkMarkdown(plainText)) { this.insertTokens(parseDoc(plainText.trim())); return; }
-      this.insertPlain((dt?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n"));
+      const plain = (dt?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n");
+      // Formules LaTeX ($…$, $$…$$, \(…\), \[…\]) : posees en formules.
+      const withMath = pastedMath(plain);
+      if (withMath) { this.insertTokens(withMath); return; }
+      this.insertPlain(plain);
     });
   }
 
@@ -3002,7 +3006,8 @@ function sinkFocused(mf: MathfieldElement): boolean {
  */
 function colorSpan(color: ColorKey | null, ...children: Node[]): HTMLElement {
   const span = el("span", { class: "tc", dataset: { c: color ?? "none" } }, ...children);
-  span.style.color = color ? colorOf(color) : "var(--text-ink, #16181d)";
+  // Variable redefinie par la feuille sombre ; repli = couleur stockee.
+  span.style.color = color ? inkCssColor(color) : "var(--text-ink, #16181d)";
   return span;
 }
 
