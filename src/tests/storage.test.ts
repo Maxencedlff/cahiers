@@ -716,3 +716,20 @@ describe("arborescence a 3 niveaux (D4, palier 2)", () => {
     expect(meta.futur).toBe(1);
   });
 });
+
+describe("mot lu orphelin", () => {
+  it("un mot dont aucun trait n'existe plus disparait a la lecture", () => {
+    const p = migratePage({
+      version: 2, id: "p", created: "", modified: "",
+      blocks: [{
+        id: "i", type: "ink", mode: "raw", recognized: "rien",
+        strokes: [{ id: "neuf", points: [{ x: 1, y: 1, p: 0.5 }], color: "normal", width: 1, tool: "pen" }],
+        words: [{ label: "rien", strokeIds: ["ancien"], box: { x: 0, y: 0, w: 1, h: 1 } }],
+      }],
+    } as never);
+    const ink = p.blocks[0] as { words?: unknown[]; recognized: string | null; strokes: unknown[] };
+    expect(ink.words).toBeUndefined();
+    expect(ink.recognized).toBeNull();
+    expect(ink.strokes).toHaveLength(1);
+  });
+});

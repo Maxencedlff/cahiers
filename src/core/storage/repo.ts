@@ -6,6 +6,7 @@ import {
 } from "../types";
 import { uuid, nowIso } from "../id";
 import { decodeStroke, encodeStroke, isMemoryStroke } from "../ink/stroke";
+import { joinWords } from "../ink/words";
 import { indexPage, type FlagHit, type PageIndex } from "./search";
 import { parseConflictName, renumberConflictName } from "../sync";
 import {
@@ -1076,6 +1077,16 @@ export function migratePage(p: Page): Page {
     for (const key of ["strokes", "annotations"]) {
       const list = holder[key];
       if (Array.isArray(list)) holder[key] = list.map(decodeStroke);
+    }
+    // Mot lu dont plus aucun trait n'existe (resultat de lecture arrive apres
+    // une gomme) : il restait affiche sans pouvoir etre gomme.
+    if (b.type === "ink" && Array.isArray(b.words)) {
+      const ids = new Set(b.strokes.map((s) => s.id));
+      const kept = b.words.filter((w) => !w.strokeIds?.length || w.strokeIds.some((id) => ids.has(id)));
+      if (kept.length !== b.words.length) {
+        b.words = kept.some((w) => w.strokeIds?.length) ? kept : undefined;
+        b.recognized = b.words ? joinWords(b.words) || null : null;
+      }
     }
   }
   if (!isFutureVersion(p)) p.version = SCHEMA_VERSION;
