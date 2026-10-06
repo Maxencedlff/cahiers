@@ -1,4 +1,5 @@
 import type { ColorKey, InkColor, ToolKind } from "./types";
+import { isSheetTone, isThemePref, type SheetTone, type ThemePref } from "./theme";
 
 /**
  * Reglages locaux a la machine. Ils ne vont JAMAIS dans le dossier
@@ -23,8 +24,16 @@ export interface Settings {
   penSeen: boolean;
   /** Calculatrice ouverte (colonne de droite, ou flottante sur un petit ecran). */
   calcOpen: boolean;
-  /** Ruban Maths deplie dans la colonne d'outils. */
-  mathOpen: boolean;
+  /**
+   * Ruban Maths epingle : il reste ouvert (colonne a cote du rail sur un
+   * ecran d'au moins 1600 px, sinon volet flottant). Non epingle, il
+   * s'ouvre en volet d'un appui et se referme seul.
+   */
+  mathPinned: boolean;
+  /** Theme du chrome : clair, sombre ou celui de Windows. */
+  theme: ThemePref;
+  /** Teinte de la feuille, independante du theme (claire par defaut). */
+  sheet: SheetTone;
   /**
    * Version de la disposition. Passee a 2 quand la calculatrice est devenue
    * fermee par defaut (D6) : l'ancien defaut « ouverte » est remis a fermee
@@ -48,7 +57,9 @@ const DEFAULTS: Settings = {
   eraserMode: "stroke",
   autoConvert: false,
   calcOpen: false,
-  mathOpen: true,
+  mathPinned: false,
+  theme: "system",
+  sheet: "light",
   layout: LAYOUT,
   autoMath: true,
   spellcheck: false,
@@ -71,6 +82,11 @@ export function loadSettings(): Settings {
     // reglages gardaient l'encre en « Definition » sous un texte noir : deux
     // pastilles allumees. L'encre suit desormais le texte (noir = "normal").
     out.color = out.textColor ?? "normal";
+    if (!isThemePref(out.theme)) out.theme = DEFAULTS.theme;
+    if (!isSheetTone(out.sheet)) out.sheet = DEFAULTS.sheet;
+    out.mathPinned = out.mathPinned === true;
+    // Ancien ruban « deplie dans la colonne » : remplace par le volet epinglable.
+    delete (out as Partial<Settings> & { mathOpen?: unknown }).mathOpen;
     // Calculatrice ouverte par l'ancien defaut : la feuille perdait 340 px
     // sur le portable. Fermee une fois ; Ctrl+L la rouvre et c'est retenu.
     if ((parsed.layout ?? 1) < LAYOUT) {

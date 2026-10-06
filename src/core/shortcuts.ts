@@ -15,7 +15,8 @@ export type Command =
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
-  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf" | "viewMode";
+  | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf" | "viewMode"
+  | "maths" | "theme";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -115,6 +116,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("d", false, "finger", "Doigt : écrire ou naviguer (avec un stylet : l'oublier)", "Outils et couleurs"),
 
   { keys: "Alt+=", label: "Nouvelle formule", group: "Formules" },
+  ctrl("m", true, "maths", "Ruban Maths : ouvrir ou fermer le volet (épinglé : il reste ouvert)", "Formules"),
   ...MATH_TEMPLATES.filter((t) => t.key).map((t): Shortcut => ({
     keys: `Alt+${t.key!.toUpperCase()}`, label: t.title, group: "Formules",
   })),
@@ -127,6 +129,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("\\", false, "split", "Split gauche/droite (AZERTY : Ctrl+*)", "Fenêtres"),
   ctrl("x", true, "swap", "Permuter les panneaux", "Fenêtres"),
   ctrl("w", true, "closeSplit", "Fermer le panneau droit", "Fenêtres"),
+  ctrl("t", true, "theme", "Thème : clair, sombre, celui de Windows (la feuille a son propre réglage dans le menu ⋯)", "Fenêtres"),
   { keys: "F1", label: "Cette fiche (aussi Ctrl+/)", group: "Fenêtres" },
 ];
 

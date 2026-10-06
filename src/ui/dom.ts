@@ -1,5 +1,8 @@
 /** Micro-utilitaires DOM. Pas de framework : l'empreinte memoire compte. */
 
+import { toastPlacement, toastsToDrop } from "../core/chrome";
+import { icon } from "./icons";
+
 type Attrs = Record<string, unknown>;
 
 export function el<K extends keyof HTMLElementTagNameMap>(
@@ -74,20 +77,47 @@ export interface ToastAction {
 }
 
 /**
- * Message en bas de l'ecran. `key` : un message de meme cle remplace le
- * precedent au lieu de s'empiler (trois Ctrl+F = un seul message).
+ * Place de la pile de messages : en haut a droite sous la barre du haut,
+ * jamais sur la zone d'ecriture centrale ; en bas a droite si une
+ * calculatrice detachee occupe le coin (core/chrome.ts, toastPlacement).
+ */
+function placeToasts(host: HTMLElement): void {
+  const bar = document.querySelector(".topbar")?.getBoundingClientRect();
+  const avoid = [...document.querySelectorAll<HTMLElement>(".calc:not(.docked)")]
+    .map((c) => { const r = c.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; })
+    // Fermee (display: none) : un rectangle vide, rien a eviter.
+    .filter((r) => r.w > 0 && r.h > 0);
+  const p = toastPlacement({
+    width: window.innerWidth, height: window.innerHeight,
+    top: bar ? Math.round(bar.bottom) : 0,
+    // Indicateur de page en bas a droite de chaque panneau.
+    bottom: 64,
+    avoid,
+  });
+  host.classList.toggle("bottom", p.corner === "bottom-right");
+  host.style.right = `${p.right}px`;
+  host.style.top = p.corner === "top-right" ? `${p.offset}px` : "";
+  host.style.bottom = p.corner === "bottom-right" ? `${p.offset}px` : "";
+}
+
+/**
+ * Message ephemere. `key` : un message de meme cle remplace le precedent
+ * au lieu de s'empiler (trois Ctrl+F = un seul message). Trois au plus, le
+ * plus recent en haut ; chacun se ferme d'un appui sur sa croix.
  */
 export function toast(
   message: string, kind: "info" | "warn" | "err" = "info", ms = 3200, action?: ToastAction, key?: string,
 ): void {
   if (!toastHost) {
-    toastHost = el("div", { class: "toast-host" });
+    toastHost = el("div", { class: "toast-host", role: "status", "aria-live": "polite" });
     document.body.append(toastHost);
   }
+  placeToasts(toastHost);
   if (key) {
     for (const old of [...toastHost.children] as HTMLElement[]) if (old.dataset.key === key) old.remove();
   }
-  const node = el("div", { class: `toast ${kind === "info" ? "" : kind}` }, message);
+  const node = el("div", { class: `toast${kind === "info" ? "" : ` ${kind}`}` },
+    el("span", { class: "toast-text" }, message));
   if (key) node.dataset.key = key;
   if (action) {
     node.classList.add("with-action");
@@ -100,21 +130,22 @@ export function toast(
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     node.append(btn);
   }
-  // Deux messages au plus : une pile masquait la page et la barre d'etat.
-  // Le plus ancien part, sauf s'il porte une action (« Annuler ») et qu'un
-  // message sans action peut partir a sa place.
+  const close = el("button", {
+    class: "toast-close", "aria-label": "Fermer le message", onclick: () => node.remove(),
+  }, icon("close", 16));
+  close.addEventListener("mousedown", (e) => e.preventDefault());
+  node.append(close);
+  // Trois messages au plus. Le plus ancien part, sauf s'il porte une action
+  // (« Annuler ») et qu'un message sans action peut partir a sa place.
+  // Pile affichee du plus recent (en haut) au plus ancien : l'ordre du DOM
+  // est inverse par CSS (column-reverse), on travaille donc du plus ancien.
   const shown = [...toastHost.children] as HTMLElement[];
-  while (shown.length >= MAX_TOASTS) {
-    const plain = shown.find((t) => !t.classList.contains("with-action"));
-    const victim = plain ?? shown[0];
-    victim.remove();
-    shown.splice(shown.indexOf(victim), 1);
+  for (const i of toastsToDrop(shown.map((t) => ({ action: t.classList.contains("with-action") }))).reverse()) {
+    shown[i].remove();
   }
   toastHost.append(node);
   setTimeout(() => node.remove(), ms);
 }
-
-const MAX_TOASTS = 2;
 
 /** Retire le message pose avec cette cle, s'il est encore affiche. */
 export function dismissToast(key: string): void {
@@ -129,8 +160,7 @@ export function appendToToast(key: string, text: string): void {
   for (const t of [...(toastHost?.children ?? [])] as HTMLElement[]) {
     if (t.dataset.key !== key || t.querySelector(".toast-note")) continue;
     const note = el("span", { class: "toast-note" }, text);
-    const btn = t.querySelector(".toast-action");
-    if (btn) t.insertBefore(note, btn); else t.append(note);
+    (t.querySelector(".toast-text") ?? t).append(note);
   }
 }
 

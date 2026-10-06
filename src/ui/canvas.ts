@@ -1,5 +1,5 @@
 import type { InkColor, InkPoint, Stroke, ToolKind } from "../core/types";
-import { colorOf } from "../core/palette";
+import { inkDisplayColor, isSheetTone, type SheetTone } from "../core/theme";
 import {
   newStroke, simplify, cachedBounds, strokeHitsCircle, unionBounds, padBounds,
   widthAt, boundsIntersect, roundPoint, HIGHLIGHT_FACTOR, type Bounds,
@@ -157,6 +157,12 @@ export class InkSurface {
    */
   private paper: PaperKind = "uni";
   /**
+   * Teinte de la feuille ou le canvas est pose (data-sheet de l'appli),
+   * relue a chaque layout : hors de l'appli (export PDF), toujours claire.
+   * Change seulement les couleurs peintes, jamais les traits.
+   */
+  private tone: SheetTone = "light";
+  /**
    * Page de PDF importee, peinte en fond (sur le papier, sous l'encre) dans
    * la zone `rect` (unites de page). `img` = rendu pdf.js deja a la taille
    * de cette zone dans le canvas : chaque repeinte n'en copie qu'un
@@ -176,6 +182,7 @@ export class InkSurface {
     const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
     if (!ctx) throw new Error("Canvas 2D indisponible");
     this.ctx = ctx;
+    SURFACES.add(this);
     watchPen();
     canvas.addEventListener("pointerdown", this.onDown);
     canvas.addEventListener("pointermove", this.onMove);
@@ -188,6 +195,7 @@ export class InkSurface {
 
   dispose(): void {
     this.disposed = true;
+    SURFACES.delete(this);
     if (this.raf) cancelAnimationFrame(this.raf);
     this.canvas.removeEventListener("pointerdown", this.onDown);
     this.canvas.removeEventListener("pointermove", this.onMove);
@@ -286,8 +294,7 @@ export class InkSurface {
    * n'aurait nulle part ou aller.
    */
   layout(cssWidth: number, pageH = PAGE_H, density?: number): void {
-    const declared = getComputedStyle(this.canvas).getPropertyValue("--page-bg").trim();
-    if (declared) this.paperColor = declared;
+    this.readTone();
     // `density` : densite imposee (export PDF en densite 3, zoom : voir
     // core/zoom.ts inkDensity), sinon l'ecran.
     this.dpr = density ?? Math.min(window.devicePixelRatio || 1, 2);
@@ -305,6 +312,21 @@ export class InkSurface {
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     this.dirty = { x: 0, y: 0, w: PAGE_W, h: this.pageH };
     this.flush();
+  }
+
+  /** Fond et teinte de la feuille, lus sur l'element ou le canvas est pose. */
+  private readTone(): void {
+    const declared = getComputedStyle(this.canvas).getPropertyValue("--page-bg").trim();
+    if (declared) this.paperColor = declared;
+    const tone = this.canvas.closest("[data-sheet]")?.getAttribute("data-sheet");
+    this.tone = isSheetTone(tone) ? tone : "light";
+  }
+
+  /** Teinte de la feuille changee (menu ⋯) : on relit et on repeint tout. */
+  retone(): void {
+    if (this.disposed || !this.canvas.width) return;
+    this.readTone();
+    this.repaintAll();
   }
 
   /** Comme layout, mais seulement si la taille change (appele souvent). */
@@ -985,7 +1007,7 @@ export class InkSurface {
     ctx.setTransform(k, 0, 0, k, 0, 0);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = colorOf(s.color, s.tool);
+    ctx.strokeStyle = inkDisplayColor(s.color, s.tool, this.tone);
     ctx.lineWidth = widthAt(s.width, (a.p + b.p) / 2);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
@@ -996,7 +1018,7 @@ export class InkSurface {
 
   private drawStroke(ctx: CanvasRenderingContext2D, s: Stroke) {
     if (s.points.length < 2) return;
-    ctx.strokeStyle = colorOf(s.color, s.tool);
+    ctx.strokeStyle = inkDisplayColor(s.color, s.tool, this.tone);
     ctx.lineJoin = "round";
 
     if (s.tool === "highlighter") {
@@ -1024,6 +1046,13 @@ export class InkSurface {
       ctx.stroke();
     }
   }
+}
+
+/** Canvas vivants : la teinte de la feuille change, ils se repeignent. */
+const SURFACES = new Set<InkSurface>();
+
+export function retoneSurfaces(): void {
+  for (const s of SURFACES) s.retone();
 }
 
 function clamp(v: number, lo: number, hi: number): number {

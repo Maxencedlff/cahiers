@@ -1,5 +1,5 @@
 import {
-  el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick,
+  el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick, onLongPress,
   appendToToast, dismissPageToasts, APP_TOAST, type DialogField,
 } from "./dom";
 import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
@@ -50,9 +50,15 @@ import { isPdfFile } from "../core/pdf/pdf";
 import { PAPERS } from "../core/paper";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import {
-  ctrlCommand, escapeAction, isReloadKey, pageLabel, parsePageInput, titleOf, type Command,
+  ctrlCommand, escapeAction, isReloadKey, keysOf, pageLabel, parsePageInput, titleOf, type Command,
 } from "../core/shortcuts";
 import { showShortcuts } from "./help";
+import { icon, widthIcon, type IconName } from "./icons";
+import { applyAppearance, installTooltips, onSystemThemeChange } from "./tooltip";
+import { retoneSurfaces } from "./canvas";
+import { mathPanelMode, type MathPanelMode } from "../core/chrome";
+import { statusSummary } from "../core/status";
+import { inkDisplayColor, nextThemePref, SHEET_TONES, THEME_PREFS, type SheetTone, type ThemePref } from "../core/theme";
 import type { Presence } from "../platform";
 import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
 
@@ -192,12 +198,18 @@ export class App {
   private autoConvert = false;
 
   private root = el("div", { class: "app" });
-  private tabbar = el("div", { class: "tabbar" });
+  /** Barre du haut : maison, fil d'Ariane, onglets, recherche, etat. */
+  private tabbar = el("header", { class: "topbar" });
   private main = el("div", { class: "notebook", style: { flex: "1", minHeight: "0", display: "flex", flexDirection: "column" } });
-  private statusbar = el("div", { class: "status" });
+  /**
+   * Indicateur d'etat compact (barre du haut, a droite) : point vert, ou
+   * orange/rouge et un texte court s'il y a un probleme ; detail au survol
+   * ou a l'appui (core/status.ts). Remplace l'ancienne barre d'etat.
+   */
+  private statusBtn = el("button", { class: "status-btn", "data-tip-side": "bottom" });
   private queueState: QueueState;
-  /** Indicateur « p. 4 / 12 » de la colonne d'outils, mis a jour sur place. */
-  private pageLabelEl: HTMLElement | null = null;
+  /** Indicateur « p. 4 / 12 » de chaque panneau, mis a jour sur place. */
+  private pageLabels = new WeakMap<PageView, HTMLElement>();
   /** Ou poser la calculatrice sur l'ecran cahier : colonne ou zone de travail. */
   private calcSlot: { side: HTMLElement; work: HTMLElement } | null = null;
   /** Envois a MyScript ce mois-ci, sur cette machine (quota, reco-3). */
@@ -252,7 +264,12 @@ export class App {
     this.queueState = this.queue.state();
     this.queue.subscribe((s) => { this.queueState = s; this.paintStatus(); });
 
-    this.root.append(this.tabbar, this.main, this.statusbar);
+    this.root.append(this.tabbar, this.main);
+    this.statusBtn.addEventListener("click", () => this.openStatusPanel());
+    // Apparence : theme du chrome et teinte de la feuille, retenus ici.
+    applyAppearance(this.root, this.settings.theme, this.settings.sheet);
+    onSystemThemeChange(() => { if (this.settings.theme === "system") this.applyLook(); });
+    installTooltips();
     // Glisser-deposer HTML5 rendu au WebView (dragDropEnabled: false) : un
     // fichier lache hors d'une page ouvrirait le fichier a la place de
     // l'appli. Seule la page (TextDoc) accepte un depot de fichier.
@@ -743,11 +760,10 @@ export class App {
       resumeRecognition: (key, kind, strokes, partial) => this.resume(key, kind, strokes, partial),
       cancelRecognition: (key) => this.cancelRecognition(key),
       onDirty: () => this.paintStatus(),
-      // Seule la vue du panneau vise pilote l'indicateur de la colonne.
+      // Chaque panneau a son indicateur de page.
       onPageChange: (n, total) => {
-        if (this.focusedTab()?.view === view && this.pageLabelEl) {
-          this.pageLabelEl.textContent = pageLabel(n, total);
-        }
+        const label = this.pageLabels.get(view);
+        if (label) label.textContent = pageLabel(n, total);
       },
       openLink: (target, pageId) => void this.followLink(target, pageId),
       links: this.pageLinks,
@@ -831,70 +847,156 @@ export class App {
     if (this.focusedId === id || !this.splitId) this.focusedId = this.activeId;
   }
 
+  /**
+   * Barre du haut : maison (menu), fil d'Ariane du panneau vise (matiere ›
+   * intercalaire), onglets, puis recherche, split, aide et l'indicateur
+   * d'etat. Une seule rangee de 48 px : la hauteur reste a la feuille.
+   */
   private paintTabs(): void {
     this.tabbar.replaceChildren();
-    this.tabbar.append(el("button", {
-      class: "ghost",
-      title: titleOf("Menu", "menu"),
-      onclick: () => void this.showMenu(),
-    }, "Menu"));
+    const notebook = this.screen === "notebook";
+    const focused = notebook ? this.focusedTab() : undefined;
+    this.tabbar.append(this.iconButton("home", "Menu", keysOf("menu"), () => void this.showMenu(), {
+      cls: `home-btn${this.screen === "menu" ? " on" : ""}`, side: "bottom",
+    }));
 
-    const focused = this.screen === "notebook" ? this.focusedTab() : undefined;
-    for (const tab of this.tabs) {
-      const node = el("div", {
-        class: `tab${tab === focused ? " active" : this.screen === "notebook" && this.shown(tab) ? " shown" : ""}`,
-        draggable: "true",
-      },
-        el("span", { class: "dot", style: { background: tab.color } }),
-        // Le dernier niveau seulement : le chemin complet est dans l'infobulle.
-        el("span", { class: "label", title: `${tab.title} · ${dividerLabel(tab.divider)}` },
-          `${tab.title} · ${leafName(tab.divider)}`),
-        el("button", {
-          class: "close",
-          title: titleOf("Fermer l'onglet", "closeTab"),
-          onclick: (e: Event) => { e.stopPropagation(); void this.closeTab(tab.id); },
-        }, "✕"),
-      );
-      // Un onglet deja a l'ecran prend la main ; un autre remplace celui du
-      // panneau vise (le split ne se referme plus en cliquant l'onglet de droite).
-      node.addEventListener("click", () => {
-        if (this.screen === "notebook" && this.shown(tab)) { this.setFocused(tab.id); return; }
-        this.place(tab);
-        void this.renderNotebookScreen();
+    // Fil d'Ariane : la matiere (un appui : changer de matiere), les groupes
+    // (ouvrent leur sous-bande), l'intercalaire (liste des pages, Ctrl+G).
+    if (focused) {
+      const crumbs = el("nav", { class: "crumbs", "aria-label": "Emplacement" });
+      crumbs.append(el("button", {
+        class: "crumb crumb-nb",
+        "data-tip": "Changer de matière", "data-tip-side": "bottom",
+        "aria-haspopup": "menu",
+        onclick: (e: Event) => void this.openNotebookSwitcher(e.currentTarget as HTMLElement),
+      }, el("span", { class: "dot", style: { background: focused.color } }), el("span", { class: "crumb-text" }, focused.title),
+      icon("chevronDown", 14)));
+      const parts = focused.divider.split("/");
+      parts.forEach((name, i) => {
+        const path = parts.slice(0, i + 1).join("/");
+        const last = i === parts.length - 1;
+        crumbs.append(el("span", { class: "crumb-sep", "aria-hidden": "true" }, "›"));
+        crumbs.append(el("button", {
+          class: `crumb${last ? " current" : ""}`,
+          ...(last
+            ? { "data-tip": "Liste des pages", "data-keys": keysOf("goto"), "data-tip-side": "bottom", "aria-current": "location" }
+            : { "data-tip": `Intercalaires de ${name}`, "data-tip-side": "bottom" }),
+          onclick: () => {
+            if (last) void this.showPageList();
+            else this.toggleGroup(focused, path, false);
+          },
+        }, el("span", { class: "crumb-text" }, name)));
       });
-      // Glisser un onglet sur la moitie droite ouvre le split (section 5).
-      node.addEventListener("dragstart", (e) => {
-        e.dataTransfer?.setData("text/plain", tab.id);
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-      });
-      this.tabbar.append(node);
+      this.tabbar.append(crumbs);
+    }
+
+    // Onglets : au menu, ils ramenent au travail ; sur un cahier, seulement
+    // s'il y en a plusieurs (un seul onglet redirait le fil d'Ariane).
+    const showTabs = this.tabs.length > 0 && (!notebook || this.tabs.length > 1);
+    if (showTabs) {
+      const strip = el("div", { class: "tabs", role: "tablist" });
+      for (const tab of this.tabs) {
+        const active = tab === focused;
+        const node = el("div", {
+          class: `tab${active ? " active" : notebook && this.shown(tab) ? " shown" : ""}`,
+          draggable: "true", role: "tab", "aria-selected": String(active),
+        },
+          el("span", { class: "dot", style: { background: tab.color } }),
+          // Le dernier niveau seulement : le chemin complet est dans l'infobulle.
+          el("span", { class: "label", title: `${tab.title} · ${dividerLabel(tab.divider)}` },
+            `${tab.title} · ${leafName(tab.divider)}`),
+          el("button", {
+            class: "close",
+            "aria-label": "Fermer l'onglet",
+            title: titleOf("Fermer l'onglet", "closeTab"),
+            onclick: (e: Event) => { e.stopPropagation(); void this.closeTab(tab.id); },
+          }, icon("close", 15)),
+        );
+        // Un onglet deja a l'ecran prend la main ; un autre remplace celui du
+        // panneau vise (le split ne se referme plus en cliquant l'onglet de droite).
+        node.addEventListener("click", () => {
+          if (this.screen === "notebook" && this.shown(tab)) { this.setFocused(tab.id); return; }
+          this.place(tab);
+          void this.renderNotebookScreen();
+        });
+        // Glisser un onglet sur la moitie droite ouvre le split (section 5).
+        node.addEventListener("dragstart", (e) => {
+          e.dataTransfer?.setData("text/plain", tab.id);
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+        });
+        strip.append(node);
+      }
+      this.tabbar.append(strip);
     }
 
     this.tabbar.append(el("div", { class: "spacer" }));
-    // Le split n'a de sens que sur l'ecran cahier.
-    if (this.tabs.length && this.screen === "notebook") {
-      this.tabbar.append(
-        el("button", {
-          class: this.splitId ? "on" : "",
-          title: titleOf("Split gauche/droite", "split"),
-          onclick: () => void this.toggleSplit(),
-        }, "Split"),
-      );
-    }
-    // Le menu a deja son propre bouton de recherche : deux au meme instant
-    // font doublon a l'ecran.
+    // Le menu a deja son propre champ de recherche : deux au meme instant
+    // font doublon a l'ecran. Champ-bouton si la place le permet, sinon icone.
     if (this.screen !== "menu") {
       this.tabbar.append(el("button", {
+        class: "search-field",
+        "aria-label": "Rechercher",
         title: titleOf("Recherche dans tous les cahiers", "search"),
         onclick: () => void this.showSearch(),
-      }, "Rechercher"));
+      }, icon("search", 18), el("span", { class: "search-ph" }, "Rechercher…"), el("kbd", {}, keysOf("search"))));
+    }
+    // Le split n'a de sens que sur l'ecran cahier.
+    if (this.tabs.length && notebook) {
+      this.tabbar.append(this.iconButton("split", "Split", keysOf("split"), () => void this.toggleSplit(), {
+        cls: this.splitId ? "on" : "", side: "bottom", tip: "Split gauche/droite",
+      }));
     }
     // Au doigt et au stylet, aucune infobulle : la fiche est a un appui.
-    this.tabbar.append(el("button", {
-      class: "ghost help-btn",
-      title: "Raccourcis clavier (F1)",
-      onclick: () => showShortcuts(),
-    }, "?"));
+    this.tabbar.append(
+      this.iconButton("keyboard", "Raccourcis clavier", "F1", () => showShortcuts(), { side: "bottom" }),
+      this.statusBtn,
+    );
+  }
+
+  /**
+   * Bouton icone du chrome : nom dans l'aria-label (lecteur d'ecran, tests),
+   * infobulle nom + raccourci a la souris (tooltip.ts), 44 px au doigt.
+   */
+  private iconButton(
+    name: IconName, label: string, keys: string, run: (e: MouseEvent) => void,
+    o: { cls?: string; side?: "right" | "bottom"; tip?: string; keep?: boolean; pressed?: boolean } = {},
+  ): HTMLButtonElement {
+    const b = el("button", {
+      class: `icon-btn ${o.cls ?? ""}`.trim(),
+      "aria-label": label,
+      "data-tip": o.tip ?? label,
+      "data-tip-side": o.side ?? "right",
+      ...(keys ? { "data-keys": keys } : {}),
+      ...(o.pressed != null ? { "aria-pressed": String(o.pressed) } : {}),
+      onclick: (e: MouseEvent) => run(e),
+    }, icon(name));
+    if (o.keep) keepFocus(b);
+    return b;
+  }
+
+  /**
+   * Fil d'Ariane, matiere : changer de matiere d'un appui, sans repasser
+   * par le menu. L'onglet de la matiere est repris s'il est ouvert.
+   */
+  private async openNotebookSwitcher(anchor: HTMLElement): Promise<void> {
+    const dirs = await this.repo.listNotebookDirs();
+    const metas = await Promise.all(dirs.map(async (dir) => {
+      try { const m = await this.repo.readMeta(dir); return { dir, title: m.title || dir, color: m.color }; }
+      catch { return { dir, title: dir, color: "#9ca3af" }; }
+    }));
+    const current = this.focusedTab()?.notebook;
+    const list = el("div", { class: "fly-list", role: "menu" });
+    for (const m of metas) {
+      list.append(el("button", {
+        class: `fly-item${m.dir === current ? " on" : ""}`, role: "menuitem",
+        onclick: () => { this.closeFlyout(); if (m.dir !== current) void this.openNotebook(m.dir); },
+      }, el("span", { class: "dot", style: { background: m.color } }), m.title));
+    }
+    list.append(el("div", { class: "fly-sep" }), el("button", {
+      class: "fly-item", role: "menuitem",
+      onclick: () => { this.closeFlyout(); void this.showMenu(); },
+    }, icon("home", 18), "Toutes les matières (menu)"));
+    this.openFlyout(anchor, list, { side: "bottom", label: "Matières" });
   }
 
   /* ---------------- ecran cahier ---------------- */
@@ -935,17 +1037,52 @@ export class App {
     panes.append(this.buildPane(tab, false));
     if (other) panes.append(this.buildPane(other, true));
     work.append(tools, panes, calcSide);
+    this.paintMath();
     this.paintStatus();
 
     // La vue reprend son defilement : un passage par le menu ou un autre
     // onglet ne ramene plus en haut de l'intercalaire.
     for (const t of other ? [tab, other] : [tab]) {
       if (!t.view) continue;
-      // Indicateur de zoom du panneau, a cote de la vue (pas dedans : il
-      // defilerait avec les pages).
-      t.host.append(t.view.root, t.view.zoomChip);
+      // Pages et zoom du panneau, a cote de la vue (pas dedans : ils
+      // defileraient avec les pages).
+      t.host.append(t.view.root, this.buildPagePill(t.view));
       t.view.attached();
     }
+  }
+
+  /**
+   * Indicateur de page du panneau, en bas a droite (hors de la zone
+   * d'ecriture centrale) : precedente, « p. 4 / 12 » (liste des pages,
+   * Ctrl+G), suivante, nouvelle page, et le zoom quand il n'est pas a 100 %.
+   * Un par panneau : en split, chacun dit ou il en est.
+   */
+  private buildPagePill(view: PageView): HTMLElement {
+    const label = el("button", {
+      class: "page-label",
+      "aria-label": "Liste des pages",
+      "data-tip": "Liste des pages : numéro, date, première ligne", "data-keys": keysOf("goto"), "data-tip-side": "top",
+      onclick: () => { this.focusView(view); void this.showPageList(view); },
+    }, pageLabel(view.pageNumber, view.pageCount));
+    this.pageLabels.set(view, label);
+    const nav = (name: IconName, aria: string, keys: string, run: () => void) => {
+      const b = this.iconButton(name, aria, keys, () => { this.focusView(view); run(); }, { keep: true, side: "bottom" });
+      b.dataset.tipSide = "top";
+      return b;
+    };
+    return el("div", { class: "page-pill", role: "toolbar", "aria-label": "Pages" },
+      nav("chevronLeft", "Page précédente", keysOf("prevPage"), () => void view.prev()),
+      keepFocus(label),
+      nav("chevronRight", "Page suivante", keysOf("nextPage"), () => void view.next()),
+      nav("plus", "Nouvelle page", keysOf("newPage"), () => void view.newPage()),
+      view.zoomChip,
+    );
+  }
+
+  /** Un bouton d'un panneau du split le vise d'abord (outils, clavier). */
+  private focusView(view: PageView): void {
+    const tab = this.tabs.find((t) => t.view === view);
+    if (tab) this.setFocused(tab.id);
   }
 
   private buildPane(tab: Tab, isRight: boolean): HTMLElement {
@@ -961,10 +1098,10 @@ export class App {
       el("div", { class: "spacer" }),
       // Les deux commandes du split, une seule fois, sur le panneau droit.
       isRight
-        ? el("button", { class: "ghost", title: titleOf("Permuter les panneaux", "swap"), onclick: () => void this.swapPanes() }, "Permuter")
+        ? this.iconButton("swap", "Permuter les panneaux", keysOf("swap"), () => void this.swapPanes(), { side: "bottom" })
         : null,
       isRight
-        ? el("button", { class: "ghost", title: titleOf("Fermer le panneau droit", "closeSplit"), onclick: () => void this.closeSplit() }, "Fermer le panneau")
+        ? this.iconButton("close", "Fermer le panneau droit", keysOf("closeSplit"), () => void this.closeSplit(), { side: "bottom" })
         : null,
     ));
     return pane;
@@ -1749,198 +1886,290 @@ export class App {
    * ruban Maths, repliable. Les actions rares et les reglages vont dans le
    * menu « ⋯ ».
    */
+  /**
+   * Rail d'outils (64 px) : icones de 44 px, nom et raccourci en infobulle
+   * (titleOf/keysOf, la table unique). Les sous-choix d'un outil (gomme
+   * precise, lasso ou espace, doigt sans stylet) s'ouvrent en mini-volet :
+   * second appui sur l'outil actif, ou appui long. Couleur et epaisseur :
+   * un bouton chacun, leur volet montre les choix et leur sens. Tient en
+   * 1366x768 et en 1280x720 sans defiler.
+   */
   private buildToolbar(): HTMLElement {
-    const bar = el("div", { class: "toolbar" });
+    const rail = el("aside", { class: "rail", "aria-label": "Outils" });
     const view = () => this.focusedTab()?.view;
-    // Pas de focus sur ces boutons a la souris : la selection et le curseur
-    // du texte restent, on continue de taper aussitot.
-    const keep = <T extends HTMLElement>(b: T): T => {
-      b.addEventListener("mousedown", (e) => e.preventDefault());
-      b.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") e.preventDefault(); });
+
+    const tool = (id: Tool, name: IconName, label: string, keys: string, sub?: (anchor: HTMLElement) => void) => {
+      const active = id === this.tool || (id === "lasso" && isSelect(this.tool));
+      const locked = active && this.toolLocked;
+      const b = this.iconButton(name, label, keys, () => {
+        // Outil deja actif et sous-choix : le second appui ouvre le volet.
+        if (active && sub) { sub(b); return; }
+        this.selectTool(id);
+      }, {
+        cls: `tool${active ? " on" : ""}${locked ? " locked" : ""}${sub ? " has-sub" : ""}`,
+        pressed: active, keep: true,
+        tip: label + (locked ? " · verrouillée" : ""),
+      });
+      b.dataset.tool = id;
+      if (sub) {
+        // Appui long : le volet, l'outil choisi au passage.
+        onLongPress(b, () => {
+          if (!active) this.selectTool(id);
+          const now = this.main.querySelector<HTMLElement>(`.rail [data-tool="${id}"]`) ?? b;
+          sub(now);
+        });
+      }
       return b;
     };
 
-    const toolButton = (id: Tool, label: string, title: string) =>
-      el("button", {
-        class: `${this.tool === id ? "on" : ""}${this.tool === id && this.toolLocked ? " locked" : ""}`,
-        title,
-        onclick: () => this.selectTool(id),
-      }, label);
+    const optionList = (anchor: HTMLElement, label: string, options: {
+      on: boolean; name: IconName | null; text: string; hint: string; run: () => void;
+    }[]) => {
+      const list = el("div", { class: "fly-list", role: "menu", "aria-label": label },
+        el("div", { class: "fly-title" }, label),
+        ...options.map((o) => keepFocus(el("button", {
+          class: `fly-item${o.on ? " on" : ""}`, role: "menuitemradio", "aria-checked": String(o.on),
+          onclick: () => { this.closeFlyout(); o.run(); },
+        }, o.name ? icon(o.name, 20) : null, el("span", { class: "fly-text" },
+          el("span", {}, o.text), el("span", { class: "fly-hint" }, o.hint))))));
+      this.openFlyout(anchor, list, { side: "right", label });
+    };
 
-    bar.append(
-      toolButton("pen", "Stylo", "Écrire (Alt+E). La souris tape du texte."),
-      toolButton("highlighter", "Surligneur", "Surligner (Alt+H)"),
-      toolButton("eraser", "Gomme", "Effacer les traits touchés (Alt+G ; deux fois : trait entier ou précise). "
-        + "Le bout gomme du stylet gomme aussi."),
-      toolButton("region", "Zone math",
-        "Entourer une formule manuscrite pour la convertir (Alt+Z). Une zone, puis retour au stylo ; "
-          + "deux fois pour enchaîner plusieurs zones."),
-      toolButton("textregion", "Zone texte",
-        "Entourer du texte manuscrit pour le convertir (Alt+T). Une zone, puis retour au stylo ; "
-          + "deux fois pour enchaîner plusieurs zones."),
-      el("button", {
-        class: isSelect(this.tool) ? "on" : "",
-        title: "Lasso (Alt+A) : entourer des traits, puis les déplacer, les retailler par la poignée, "
-          + "les recolorer, Suppr, Ctrl+C / Ctrl+V. Deux fois : insérer de l'espace.",
-        onclick: () => this.selectTool(isSelect(this.tool) ? this.tool : "lasso"),
-      }, "Lasso"),
+    const eraserSub = (a: HTMLElement) => optionList(a, "Gomme", [
+      { on: this.eraserMode === "stroke", name: "eraser", text: "Trait entier", hint: "Efface tout le trait touché", run: () => this.setEraserMode("stroke") },
+      { on: this.eraserMode === "precise", name: "eraser", text: "Précise", hint: "Coupe le trait : seule la partie frottée part", run: () => this.setEraserMode("precise") },
+    ]);
+    const lassoSub = (a: HTMLElement) => optionList(a, "Sélection", [
+      { on: this.tool === "lasso", name: "lasso", text: "Entourer", hint: "Déplacer, retailler, recolorer, copier", run: () => this.selectTool("lasso") },
+      { on: this.tool === "space", name: "space", text: "Insérer de l'espace", hint: "Glisser une ligne : tout ce qui est dessous descend", run: () => this.selectTool("space") },
+    ]);
+    // Sans stylet, ce que fait le doigt : un sous-choix du stylo.
+    const penSub = this.sawPen ? undefined : (a: HTMLElement) => optionList(a, "Doigt (pas de stylet)", [
+      { on: this.touchWrites, name: "pen", text: "Le doigt écrit", hint: keysOf("finger"), run: () => { if (!this.touchWrites) this.toggleFinger(); } },
+      { on: !this.touchWrites, name: "hand", text: "Le doigt navigue", hint: "Défilement, pinch-zoom", run: () => { if (this.touchWrites) this.toggleFinger(); } },
+    ]);
+
+    const eraserTip = this.eraserMode === "precise" ? "Gomme précise" : "Gomme";
+    rail.append(
+      tool("pen", "pen", "Stylo", "Alt+E", penSub),
+      tool("highlighter", "highlighter", "Surligneur", "Alt+H"),
+      tool("eraser", "eraser", eraserTip, "Alt+G", eraserSub),
+      tool("lasso", this.tool === "space" ? "space" : "lasso", this.tool === "space" ? "Espace" : "Lasso", "Alt+A", lassoSub),
+      tool("region", "zoneMath", "Zone math", "Alt+Z"),
+      tool("textregion", "zoneText", "Zone texte", "Alt+T"),
     );
-    // Options de l'outil : gomme entiere ou precise, lasso ou espace.
-    if (this.tool === "eraser") {
-      bar.append(el("div", { class: "seg tool-opt" }, ...([
-        ["stroke", "Trait entier", "La gomme efface tout le trait touché"],
-        ["precise", "Précise", "La gomme coupe le trait : seule la partie frottée part"],
-      ] as const).map(([m, label, title]) => el("button", {
-        class: this.eraserMode === m ? "on" : "", title, "aria-pressed": String(this.eraserMode === m),
-        onclick: () => this.setEraserMode(m),
-      }, label))));
-    }
-    if (isSelect(this.tool)) {
-      bar.append(el("div", { class: "seg tool-opt" }, ...([
-        ["lasso", "Entourer", "Entourer des traits pour les déplacer, recolorer, copier, supprimer"],
-        ["space", "Espace", "Glisser une ligne vers le bas : tout ce qui est dessous descend"],
-      ] as const).map(([t, label, title]) => el("button", {
-        class: this.tool === t ? "on" : "", title, "aria-pressed": String(this.tool === t),
-        onclick: () => this.selectTool(t),
-      }, label))));
-    }
-    // Sans stylet, ce que fait le doigt : a cote des outils, c'en est un.
-    if (!this.sawPen) {
-      bar.append(el("button", {
-        class: this.touchWrites ? "on" : "",
-        title: titleOf("Ce que fait le doigt, faute de stylet", "finger"),
-        onclick: () => this.toggleFinger(),
-      }, this.touchWrites ? "Doigt : écrit" : "Doigt : navigue"));
-    }
-    bar.append(el("div", { class: "sep" }));
+    // aria-label stable pour les tests et les lecteurs d'ecran.
+    rail.querySelector('[data-tool="lasso"]')?.setAttribute("aria-label", "Lasso");
+    rail.querySelector('[data-tool="eraser"]')?.setAttribute("aria-label", "Gomme");
+    rail.append(el("div", { class: "rail-sep", role: "separator" }));
 
-    // Palette fermee a 5 couleurs a semantique fixe (section 8), plus
-    // l'encre neutre noire. La couleur choisie vaut pour l'encre ET pour le
-    // texte tape : une seule pastille active, sa legende en dessous.
-    // Grille de 4 : chaque pastille fait 44 px dans les deux sens (six sur
-    // une ligne n'y tenaient qu'a 32 px), la legende finit la seconde ligne.
-    const swatches = el("div", { class: "swatches" });
-    swatches.append(keep(el("button", {
-      class: `swatch${this.color === "normal" ? " on" : ""}`,
-      title: "Normal, en noir (Alt+0) : encre et texte tapé",
-      "aria-label": "Normal, en noir",
-      onclick: () => this.pickColor(null),
-    }, el("i", { style: { background: NEUTRAL_INK.ink } }))));
-    for (const p of PALETTE) {
-      swatches.append(keep(el("button", {
-        class: `swatch${this.color === p.key ? " on" : ""}`,
-        title: `${p.label} (Alt+${p.shortcut}) : encre et texte tapé`,
-        "aria-label": p.label,
-        onclick: () => this.pickColor(p.key),
-      }, el("i", { style: { background: p.ink } }))));
-    }
-    // Le sens de la couleur, a l'ecran : au doigt, aucune infobulle.
-    swatches.append(el("div", { class: "swatch-legend small muted" },
-      el("span", {}, labelOf(this.color)), el("span", {}, `Alt+${shortcutOf(this.color)}`)));
-    bar.append(swatches);
-
-    // Trois epaisseurs sur une seule ligne.
-    const widths: [string, number, string][] = [
-      ["Fin", 1.4, "Trait fin"], ["Moyen", 2.2, "Trait moyen"], ["Épais", 3.6, "Trait épais"],
+    // Palette fermee a 5 couleurs a semantique fixe (section 8), plus l'encre
+    // neutre noire ; elle vaut pour l'encre ET le texte tape. Le bouton montre
+    // la couleur active ; son volet, les six avec leur sens et leur touche.
+    const colors: { key: ColorKey | null; label: string; ink: string; keys: string }[] = [
+      { key: null, label: `${NEUTRAL_INK.label}, en noir`, ink: NEUTRAL_INK.ink, keys: `Alt+${NEUTRAL_INK.shortcut}` },
+      ...PALETTE.map((p) => ({ key: p.key as ColorKey | null, label: p.label, ink: p.ink, keys: `Alt+${p.shortcut}` })),
     ];
-    bar.append(
-      el("div", { class: "sep" }),
-      el("div", { class: "seg widths" }, ...widths.map(([label, w, title]) => keep(el("button", {
-        class: this.width === w ? "on" : "",
-        title,
-        "aria-pressed": String(this.width === w),
-        onclick: () => { this.width = w; this.persist(); this.paintToolbar(); },
-      }, label)))),
-      el("div", { class: "sep" }),
-      keep(el("button", { onclick: () => view()?.undo(), title: titleOf("Annuler", "undo") }, "Annuler")),
-      keep(el("button", { onclick: () => view()?.redo(), title: titleOf("Rétablir", "redo") }, "Rétablir")),
-      el("div", { class: "sep" }),
+    // Pastilles telles que l'encre s'affiche (feuille sombre : noir montre clair).
+    const shown = (c: { key: ColorKey | null; ink: string }) =>
+      this.settings.sheet === "dark" ? inkDisplayColor(c.key ?? "normal", "pen", "dark") : c.ink;
+    const activeInk = colors.find((c) => (c.key ?? "normal") === this.color) ?? colors[0];
+    const colorBtn = keepFocus(el("button", {
+      class: "icon-btn color-btn",
+      "aria-label": `Couleur : ${labelOf(this.color)}`,
+      "aria-haspopup": "menu",
+      "data-tip": `Couleur : ${labelOf(this.color)}`, "data-keys": `Alt+${shortcutOf(this.color)}`,
+      onclick: () => {
+        const list = el("div", { class: "fly-list colors", role: "menu", "aria-label": "Couleur" },
+          el("div", { class: "fly-title" }, "Couleur de l'encre et du texte"),
+          ...colors.map((c) => keepFocus(el("button", {
+            class: `fly-item swatch-item${(c.key ?? "normal") === this.color ? " on" : ""}`,
+            role: "menuitemradio", "aria-checked": String((c.key ?? "normal") === this.color),
+            "aria-label": c.key ? c.label : "Normal, en noir",
+            onclick: () => { this.closeFlyout(); this.pickColor(c.key); },
+          }, el("i", { class: "swatch-dot", style: { background: shown(c) } }),
+          el("span", { class: "fly-text" }, el("span", {}, c.key ? c.label : "Normal")), el("kbd", {}, c.keys)))));
+        this.openFlyout(colorBtn, list, { side: "right", label: "Couleur" });
+      },
+    }, el("i", { class: "swatch-dot", style: { background: shown(activeInk) } })));
+    colorBtn.dataset.color = this.color;
+
+    const widths: [string, number][] = [["Fin", 1.4], ["Moyen", 2.2], ["Épais", 3.6]];
+    const widthName = widths.find(([, w]) => w === this.width)?.[0] ?? "Moyen";
+    const widthBtn = keepFocus(el("button", {
+      class: "icon-btn width-btn", "aria-label": `Épaisseur : ${widthName}`, "aria-haspopup": "menu",
+      "data-tip": `Épaisseur : ${widthName}`,
+      onclick: () => {
+        const list = el("div", { class: "fly-list", role: "menu", "aria-label": "Épaisseur" },
+          el("div", { class: "fly-title" }, "Épaisseur du trait"),
+          ...widths.map(([label, w]) => keepFocus(el("button", {
+            class: `fly-item${this.width === w ? " on" : ""}`, role: "menuitemradio", "aria-checked": String(this.width === w),
+            onclick: () => { this.closeFlyout(); this.width = w; this.persist(); this.paintToolbar(); },
+          }, widthIcon(w, 22), el("span", { class: "fly-text" }, el("span", {}, label))))));
+        this.openFlyout(widthBtn, list, { side: "right", label: "Épaisseur" });
+      },
+    }, widthIcon(this.width)));
+    rail.append(colorBtn, widthBtn, el("div", { class: "rail-sep", role: "separator" }));
+
+    rail.append(
+      this.iconButton("undo", "Annuler", keysOf("undo"), () => view()?.undo(), { keep: true }),
+      this.iconButton("redo", "Rétablir", keysOf("redo"), () => view()?.redo(), { keep: true }),
+      el("div", { class: "rail-sep", role: "separator" }),
     );
 
-    // Pages : ou l'on est, et un appui pour bouger. Un appui sur
-    // l'indicateur ouvre la liste des pages (comme Ctrl+G).
-    const v = view();
-    this.pageLabelEl = el("button", {
-      class: "page-label ghost",
-      title: titleOf("Liste des pages : numéro, date, première ligne", "goto"),
-      onclick: () => void this.showPageList(),
-    }, pageLabel(v?.pageNumber ?? 1, v?.pageCount ?? 0));
-    bar.append(
-      el("div", { class: "page-nav" },
-        keep(el("button", { onclick: () => void view()?.prev(), title: titleOf("Page précédente", "prevPage"), "aria-label": "Page précédente" }, "◀")),
-        this.pageLabelEl,
-        keep(el("button", { onclick: () => void view()?.next(), title: titleOf("Page suivante", "nextPage"), "aria-label": "Page suivante" }, "▶")),
-        keep(el("button", { onclick: () => void view()?.newPage(), title: titleOf("Nouvelle page à la fin", "newPage"), "aria-label": "Nouvelle page" }, "+")),
-      ),
-      // « Pas compris » : un appui, en plein cours (section 6).
-      keep(el("button", {
-        class: "flag-btn",
-        title: titleOf("Pas compris : repère sur la page", "flag"),
-        onclick: () => view()?.addFlag(),
-      }, "Pas compris")),
-      el("button", {
-        class: "more-btn",
-        title: "Plus : photo, export, affichage, réglages",
-        "aria-label": "Plus d'actions",
-        onclick: (e: Event) => this.openMoreMenu(e.currentTarget as HTMLElement),
-      }, "⋯"),
+    const mathsOpen = this.mathMode() !== "closed";
+    const maths = this.iconButton("sigma", "Maths", keysOf("maths"), () => this.toggleMaths(), {
+      cls: `maths-btn${mathsOpen ? " on" : ""}`, keep: true, pressed: mathsOpen, tip: "Ruban Maths",
+    });
+    maths.setAttribute("aria-expanded", String(mathsOpen));
+    rail.append(
+      maths,
+      // « Pas compris » : un appui, en plein cours (section 6). Son ambre,
+      // celui des reperes, se reconnait sans lire.
+      this.iconButton("help", "Pas compris", keysOf("flag"), () => view()?.addFlag(), {
+        cls: "flag-btn", keep: true, tip: "Pas compris : repère sur la page",
+      }),
+      el("div", { class: "spacer" }),
+      this.iconButton("more", "Plus d'actions", "", (e) => this.openMoreMenu(e.currentTarget as HTMLElement), {
+        cls: "more-btn", tip: "Plus : photo, export, affichage, réglages",
+      }),
     );
-
-    // Ruban Maths, repliable ; l'etat est retenu sur cette machine. Ou il
-    // va (mathLayout) : sous les outils, a cote (seconde sous-colonne), ou
-    // en volet par-dessus la page quand la colonne est trop basse.
-    const layout = this.mathLayout();
-    const fly = layout === "fly";
-    const mathOpen = fly ? this.mathFly : this.settings.mathOpen;
-    const maths = el("div", { class: `math-section${fly ? " fly" : ""}${mathOpen ? " open" : ""}` },
-      el("button", {
-        class: "section-toggle",
-        "aria-expanded": String(mathOpen),
-        title: mathOpen ? "Replier le ruban Maths" : "Déplier le ruban Maths",
-        onclick: () => {
-          if (fly) { this.setMathFly(!this.mathFly); return; }
-          this.settings.mathOpen = !this.settings.mathOpen;
-          saveSettings(this.settings);
-          this.paintToolbar();
-        },
-      }, el("span", {}, "Maths"), el("span", { class: "chevron" }, fly ? (mathOpen ? "◂" : "▸") : mathOpen ? "▾" : "▸")),
-      mathOpen ? buildMathBar(() => this.focusedTab()?.view?.activeDoc) : null,
-    );
-
-    // Outils a gauche : la hauteur de l'ecran reste a la feuille.
-    const twoCols = layout === "side" && mathOpen;
-    return el("aside", { class: `side-tools${twoCols ? " two-cols" : ""}` }, bar, maths);
+    return rail;
   }
 
-  /**
-   * Place du ruban Maths. Sous les outils, il obligeait a faire defiler la
-   * colonne en 1366x768. A cote (seconde sous-colonne) quand la feuille
-   * garde sa largeur de lecture ; sinon (split, ecran etroit) sous les
-   * outils si la hauteur le permet, ou en volet par-dessus la page.
-   */
-  private mathLayout(): "side" | "below" | "fly" {
-    const w = window.innerWidth, h = window.innerHeight;
-    if (!this.splitId && w >= 1240 && w > h) return "side";
-    return h >= 1000 ? "below" : "fly";
+  /** Mode du ruban Maths, selon l'etat et la place (core/chrome.ts). */
+  private mathMode(): MathPanelMode {
+    return mathPanelMode({
+      open: this.mathFly, pinned: this.settings.mathPinned,
+      width: window.innerWidth, split: !!this.splitId,
+    });
+  }
+
+  /** Bouton du rail ou Ctrl+Maj+M : ouvre le volet, ou ferme le ruban. */
+  private toggleMaths(): void {
+    if (this.mathMode() !== "closed") {
+      if (this.settings.mathPinned) { this.settings.mathPinned = false; saveSettings(this.settings); }
+      this.setMathFly(false);
+      this.paintToolbar();
+      return;
+    }
+    this.setMathFly(true);
+  }
+
+  /** Epingle ou detache le ruban (retenu sur cette machine). */
+  private setMathPinned(pinned: boolean): void {
+    this.settings.mathPinned = pinned;
+    saveSettings(this.settings);
+    // Detache : il reste ouvert en volet, il ne disparait pas sous le doigt.
+    this.mathFly = !pinned;
+    if (!pinned) this.watchMathOutside();
+    this.paintToolbar();
   }
 
   /**
    * Ruban Maths en volet : ouvert ou ferme (pas retenu, c'est un volet).
-   * Echap, le bouton « Maths » ou un appui hors du volet le ferme ; les
-   * touches du ruban le laissent ouvert (plusieurs symboles de suite).
+   * Echap, le bouton ∑ ou un appui hors du volet le ferme ; les touches du
+   * ruban le laissent ouvert (plusieurs symboles de suite).
    */
   private setMathFly(open: boolean): void {
     if (this.mathFly === open) return;
     this.mathFly = open;
     this.paintToolbar();
-    if (!open) return;
+    if (open) this.watchMathOutside();
+  }
+
+  private watchMathOutside(): void {
     const outside = (e: PointerEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t?.closest(".math-section")) return;
+      if (t?.closest(".math-panel, .maths-btn")) return;
       document.removeEventListener("pointerdown", outside, true);
-      if (this.mathFly) this.setMathFly(false);
+      if (this.mathFly && !this.settings.mathPinned) this.setMathFly(false);
     };
     document.addEventListener("pointerdown", outside, true);
+  }
+
+  /**
+   * Pose le ruban Maths : colonne a cote du rail (epingle, ecran >= 1600 px,
+   * sans split) ou volet flottant par-dessus la marge, a cote du rail.
+   */
+  private paintMath(): void {
+    const work = this.calcSlot?.work;
+    if (!work?.isConnected) return;
+    work.querySelector(":scope > .math-panel")?.remove();
+    const mode = this.mathMode();
+    if (mode === "closed") return;
+    const pinned = this.settings.mathPinned;
+    const panel = el("section", { class: `math-panel ${mode}`, "aria-label": "Ruban Maths" },
+      el("header", { class: "math-head" },
+        el("span", { class: "math-title" }, "Maths"),
+        el("div", { class: "spacer" }),
+        this.iconButton("pin", pinned ? "Détacher le ruban" : "Épingler le ruban", "", () => this.setMathPinned(!pinned), {
+          cls: `small-icon${pinned ? " on" : ""}`, keep: true, pressed: pinned, side: "bottom",
+          tip: pinned ? "Détacher : le ruban se refermera seul" : "Épingler : le ruban reste ouvert (colonne sur grand écran)",
+        }),
+        this.iconButton("close", "Fermer le ruban", keysOf("maths"), () => this.toggleMaths(), {
+          cls: "small-icon", keep: true, side: "bottom",
+        }),
+      ),
+      buildMathBar(() => this.focusedTab()?.view?.activeDoc),
+    );
+    const rail = work.querySelector(":scope > .rail");
+    if (rail) rail.after(panel); else work.prepend(panel);
+  }
+
+  /* ---------------- volets du chrome ---------------- */
+
+  /** Volet ouvert (couleur, gomme, matieres, etat...) et sa fermeture. */
+  private flyout: { node: HTMLElement; close: () => void } | null = null;
+
+  private closeFlyout(): void {
+    this.flyout?.close();
+  }
+
+  /**
+   * Petit volet ancre a un bouton du chrome : a droite du rail, ou sous la
+   * barre du haut. Un appui a cote, Echap ou un choix le ferme ; le clavier
+   * reste ou il etait (les boutons ne prennent pas le focus a la souris).
+   */
+  private openFlyout(anchor: HTMLElement, content: HTMLElement, o: { side: "right" | "bottom"; label: string; cls?: string }): void {
+    const same = this.flyout?.node.dataset.label === o.label;
+    this.closeFlyout();
+    // Second appui sur le bouton qui l'a ouvert : il se referme seulement.
+    if (same) return;
+    const node = el("div", { class: `flyout ${o.side} ${o.cls ?? ""}`.trim(), dataset: { label: o.label } }, content);
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (node.contains(t)) return;
+      close();
+      // L'appui sur le bouton d'origine ne doit pas le rouvrir aussitot.
+      if (anchor.contains(t)) { e.stopPropagation(); e.preventDefault(); swallowClick(anchor); }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault(); e.stopPropagation();
+      close();
+    };
+    const close = () => {
+      node.remove();
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+      anchor.classList.remove("open");
+      if (this.flyout?.node === node) this.flyout = null;
+    };
+    document.body.append(node);
+    anchor.classList.add("open");
+    const r = anchor.getBoundingClientRect();
+    const w = node.offsetWidth, h = node.offsetHeight;
+    let x: number, y: number;
+    if (o.side === "bottom") { x = r.left; y = r.bottom + 6; }
+    else { x = r.right + 8; y = r.top - 6; }
+    x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
+    y = Math.max(8, Math.min(y, window.innerHeight - h - 8));
+    node.style.left = `${Math.round(x)}px`;
+    node.style.top = `${Math.round(y)}px`;
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    this.flyout = { node, close };
   }
 
   /**
@@ -2014,6 +2243,7 @@ export class App {
           () => void this.exportWord(view(), "all")),
         el("div", { class: "sep" }),
         action("Raccourcis clavier", "Fiche des raccourcis (F1)", () => showShortcuts()),
+        action("Clés MyScript…", "Clés de la reconnaissance manuscrite", () => void this.editKeys()),
         action("Sonde stylet (diagnostic)", "Ce que renvoie l'écran : type de pointeur, pression, points",
           () => this.showProbe()),
         // En bas, loin des autres actions : un appui de travers au stylet
@@ -2047,13 +2277,21 @@ export class App {
           ["Oui", this.settings.spellcheck, () => this.setSpelling(true)],
           ["Non", !this.settings.spellcheck, () => this.setSpelling(false)],
         ]),
+        el("div", { class: "sep" }),
+        segment("Thème", titleOf("Couleurs de l'interface ; Système suit Windows", "theme"),
+          THEME_PREFS.map(({ pref, label }): [string, boolean, () => unknown] =>
+            [label, this.settings.theme === pref, () => this.setTheme(pref)])),
+        segment("Feuille", "Teinte de la feuille à l'écran ; l'export PDF et Word reste blanc, encre noire",
+          SHEET_TONES.map(({ tone, label }): [string, boolean, () => unknown] =>
+            [label, this.settings.sheet === tone, () => this.setSheet(tone)]),
+          SHEET_TONES.map((t) => t.title)),
       );
       place();
     };
     // A droite de la colonne, sans sortir de l'ecran (ni a droite ni en bas).
     const place = () => {
       const r = anchor.getBoundingClientRect();
-      const col = anchor.closest(".side-tools")?.getBoundingClientRect();
+      const col = anchor.closest(".rail")?.getBoundingClientRect();
       const left = (col?.right ?? r.right) + 6;
       panel.style.left = `${Math.round(Math.max(8, Math.min(left, window.innerWidth - panel.offsetWidth - 8)))}px`;
       const h = panel.offsetHeight;
@@ -2114,11 +2352,12 @@ export class App {
   }
 
   private paintToolbar(): void {
-    const old = this.main.querySelector(".side-tools");
+    const old = this.main.querySelector(".rail");
     if (!old) return;
-    const next = this.buildToolbar();
-    old.replaceWith(next);
-    next.scrollTop = old.scrollTop;
+    // Le volet d'un bouton du rail ne survit pas au rail qu'il designait.
+    if (this.flyout && old.contains(document.querySelector(".rail .open"))) this.closeFlyout();
+    old.replaceWith(this.buildToolbar());
+    this.paintMath();
   }
 
   private async setViewMode(mode: ViewMode): Promise<void> {
@@ -2519,7 +2758,8 @@ export class App {
       // touche a deja servi, elle ne compte pas pour aller au menu.
       handled: e.defaultPrevented || e.isComposing,
       dialog: !!document.querySelector(".backdrop"),
-      popover: this.mathFly,
+      // Ruban Maths en volet (pas epingle) : Echap le ferme.
+      popover: this.mathFly && !this.settings.mathPinned,
       calc: !!this.calculator?.isVisible && !!active?.closest(".calc"),
       field: (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") && !active?.closest(".text-doc"),
       selection: !!view?.hasSelection,
@@ -2632,6 +2872,13 @@ export class App {
       case "swap": void this.swapPanes(); return true;
       case "closeSplit": void this.closeSplit(); return true;
       case "help": showShortcuts(); return true;
+      case "maths": if (notebook) this.toggleMaths(); return true;
+      case "theme": {
+        const next = nextThemePref(this.settings.theme);
+        this.setTheme(next);
+        toast(`Thème : ${THEME_PREFS.find((t) => t.pref === next)?.label}`, "info", 1400, undefined, "theme");
+        return true;
+      }
       // Zoom du panneau vise (chaque panneau du split a le sien). Toujours
       // pris : sinon le WebView2 zoomerait toute l'interface.
       case "zoomIn": if (notebook) view?.zoomIn(); return true;
@@ -2939,70 +3186,89 @@ export class App {
     return null;
   }
 
-  private paintStatus(): void {
+  /** Etat a montrer : la vue visee dit si son cahier est en lecture seule. */
+  private statusNow() {
     const q = this.queueState;
-    const unsaved = this.hasUnsaved;
-    const failed = this.unsavedError;
-    // Texte complet, et sa forme courte pour un ecran etroit (portrait) :
-    // la barre reste sur une ligne. La forme complete reste en infobulle.
-    const say = (long: string, short: string) => [
-      el("span", { class: "lg" }, long), el("span", { class: "sh", title: long }, short),
-    ];
-    const reco = !q.backendReady
-      ? (q.pending
-          ? [`${q.pending} en attente, reconnaissance non configurée`, `${q.pending} en attente`]
-          : ["reconnaissance non configurée", "reco. off"])
-      : q.pending
-        ? [`${q.pending} conversion${q.pending > 1 ? "s" : ""} en attente`, `${q.pending} en attente`]
-        : ["aucune conversion en attente", "reco. à jour"];
-    this.statusbar.replaceChildren(
-      el("span", { class: "pill" },
-        el("span", { class: `led ${q.online ? "" : "off"}` }),
-        q.online ? "en ligne" : "hors ligne",
+    const tab = this.screen === "notebook" ? this.focusedTab() : undefined;
+    return statusSummary({
+      online: q.online,
+      backendReady: q.backendReady,
+      pending: q.pending,
+      keysBlocked: q.blocked === "keys",
+      lastError: q.lastError ?? null,
+      saving: this.hasUnsaved,
+      saveError: this.unsavedError,
+      readOnly: !!tab && this.isLocked(tab.notebook),
+      usage: this.usage.count,
+      quota: MONTHLY_QUOTA,
+      penSeen: this.sawPen,
+      touchWrites: this.touchWrites,
+    });
+  }
+
+  /**
+   * Indicateur d'etat : un point vert quand tout va bien ; orange ou rouge
+   * avec un texte court (« Non enregistré », « Hors ligne ») s'il y a un
+   * probleme. Une ecriture en echec reste affichee en rouge tant qu'elle
+   * n'a pas abouti : on ne doit pas fermer l'appli en la croyant enregistree.
+   */
+  private paintStatus(): void {
+    const st = this.statusNow();
+    const b = this.statusBtn;
+    b.className = `status-btn ${st.level}`;
+    b.setAttribute("aria-label", `État : ${st.title}`);
+    b.dataset.tip = st.level === "ok" ? "Tout va bien : détail" : `${st.title} : détail`;
+    b.replaceChildren(el("span", { class: "led", "aria-hidden": "true" }));
+    if (st.short) b.append(el("span", { class: "status-text" }, st.short));
+    // Volet ouvert : il suit l'etat en direct.
+    if (this.flyout?.node.dataset.label === "État") this.fillStatusPanel(this.flyout.node.firstElementChild as HTMLElement);
+  }
+
+  /** Detail de l'etat, ouvert d'un appui sur l'indicateur. */
+  private openStatusPanel(): void {
+    const panel = el("div", { class: "status-panel", role: "dialog", "aria-label": "État" });
+    this.fillStatusPanel(panel);
+    this.openFlyout(this.statusBtn, panel, { side: "bottom", label: "État" });
+  }
+
+  private fillStatusPanel(panel: HTMLElement): void {
+    const st = this.statusNow();
+    const q = this.queueState;
+    panel.replaceChildren(
+      el("div", { class: "fly-title" }, st.level === "ok" ? "Tout va bien" : st.title),
+      el("dl", { class: "status-lines" }, ...st.lines.flatMap((l) => [
+        el("dt", {}, el("span", { class: `led ${l.level}`, "aria-hidden": "true" }), l.label),
+        el("dd", {}, l.text),
+      ])),
+      el("div", { class: "status-root", title: this.rootLabel }, el("span", { class: "muted" }, "Dossier : "), this.rootLabel),
+      el("div", { class: "status-actions" },
+        el("button", {
+          class: q.blocked === "keys" ? "primary" : "",
+          onclick: () => { this.closeFlyout(); void this.editKeys(); },
+        }, icon("key", 18), "Clés MyScript"),
       ),
-      el("span", { class: "pill" },
-        el("span", { class: `led ${!q.backendReady && q.pending ? "off" : q.pending ? "wait" : ""}` }),
-        // Une file qui n'ira nulle part doit le dire, sinon l'attente est
-        // indistinguable d'une conversion qui prend son temps.
-        ...say(reco[0], reco[1]),
-      ),
-      // Une ecriture en echec reste affichee en rouge tant qu'elle n'a pas
-      // abouti : on ne doit pas fermer l'appli en la croyant enregistree.
-      failed
-        ? el("span", { class: "pill unsaved", title: failed }, el("span", { class: "led err" }), "Non enregistré")
-        : el("span", { class: "pill" },
-          el("span", { class: `led ${unsaved ? "wait" : ""}` }),
-          unsaved ? "enregistrement…" : "enregistré",
-        ),
-      el("span", { class: "pill" },
-        el("span", { class: `led ${this.sawPen ? "" : "off"}` }),
-        ...(this.sawPen
-          ? say("stylet actif, le doigt navigue", "stylet")
-          : this.touchWrites
-            ? say("pas de stylet, le doigt écrit", "doigt écrit")
-            : say("pas de stylet, le doigt navigue", "doigt navigue")),
-      ),
-      el("div", { class: "spacer" }),
-      ...(q.blocked === "keys"
-        ? [el("button", {
-            class: "ghost small keys-btn reco-blocked",
-            title: "La file de conversion est arrêtée : saisis des clés valides",
-            onclick: () => void this.editKeys(),
-          }, q.lastError ?? "Clés MyScript refusées")]
-        : q.lastError ? [el("span", { class: "pill", title: q.lastError }, `dernière erreur : ${q.lastError}`)] : []),
-      ...(q.backendReady && this.usage.count > 0
-        ? [el("span", {
-            class: `pill${this.usage.count >= MONTHLY_QUOTA * 0.8 ? " usage-high" : ""}`,
-            title: "Envois à MyScript ce mois-ci, sur cette machine (quota mensuel du compte)",
-          }, usageLabel(this.usage))]
-        : []),
-      el("span", { class: "pill root-label", title: this.rootLabel }, this.rootLabel),
-      el("button", {
-        class: "ghost small keys-btn",
-        title: "Clés de la reconnaissance manuscrite",
-        onclick: () => void this.editKeys(),
-      }, ...say("Clés MyScript", "Clés")),
     );
+  }
+
+  /* ---------------- apparence ---------------- */
+
+  /** Theme et teinte appliques ; les feuilles deja peintes se repeignent. */
+  private applyLook(): void {
+    applyAppearance(this.root, this.settings.theme, this.settings.sheet);
+    retoneSurfaces();
+  }
+
+  private setTheme(pref: ThemePref): void {
+    this.settings.theme = pref;
+    saveSettings(this.settings);
+    this.applyLook();
+  }
+
+  private setSheet(tone: SheetTone): void {
+    this.settings.sheet = tone;
+    saveSettings(this.settings);
+    this.applyLook();
+    this.paintToolbar();
   }
 
   /**
@@ -3222,6 +3488,24 @@ export class App {
  * Job de reconnaissance. `partial` : envoi par bandes du fond de page, le
  * resultat ne vaut que pour ces traits (RecoResult.scope, bands.ts).
  */
+/**
+ * Bouton du chrome qui ne prend pas le focus a la souris : la selection et
+ * le curseur du texte restent, on continue de taper aussitot. Le clavier
+ * (Tab) l'atteint toujours.
+ */
+function keepFocus<T extends HTMLElement>(b: T): T {
+  b.addEventListener("mousedown", (e) => e.preventDefault());
+  b.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") e.preventDefault(); });
+  return b;
+}
+
+/** Avale le clic qui suit (l'appui a deja ferme le volet de ce bouton). */
+function swallowClick(node: HTMLElement): void {
+  const eat = (e: Event) => { e.stopImmediatePropagation(); e.preventDefault(); };
+  node.addEventListener("click", eat, { capture: true, once: true });
+  setTimeout(() => node.removeEventListener("click", eat, { capture: true }), 600);
+}
+
 function jobOf(key: string, kind: "math" | "text", strokes: Stroke[], partial: boolean): RecoJob {
   return partial ? { key, kind, strokes, scope: strokes.map((s) => s.id) } : { key, kind, strokes };
 }

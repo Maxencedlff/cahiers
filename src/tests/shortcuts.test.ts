@@ -153,11 +153,13 @@ describe("reglages de disposition", () => {
   };
   afterEach(() => { store.clear(); delete (globalThis as { localStorage?: unknown }).localStorage; });
 
-  it("calculatrice fermee et ruban Maths deplie par defaut (D6)", () => {
+  it("calculatrice fermee, ruban Maths non epingle, theme systeme et feuille claire par defaut", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     const s = loadSettings();
     expect(s.calcOpen).toBe(false);
-    expect(s.mathOpen).toBe(true);
+    expect(s.mathPinned).toBe(false);
+    expect(s.theme).toBe("system");
+    expect(s.sheet).toBe("light");
   });
 
   it("l'ancien defaut « calculatrice ouverte » est ferme une fois, puis respecte", () => {
@@ -171,10 +173,25 @@ describe("reglages de disposition", () => {
     expect(loadSettings().calcOpen).toBe(true);
   });
 
-  it("le repli du ruban Maths est retenu", () => {
+  it("ruban epingle, theme et feuille retenus ; valeurs inconnues ramenees au defaut", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
-    store.set("cahiers.settings.v1", JSON.stringify({ mathOpen: false, layout: 2 }));
-    expect(loadSettings().mathOpen).toBe(false);
+    store.set("cahiers.settings.v1", JSON.stringify({ mathOpen: true, mathPinned: true, theme: "dark", sheet: "sepia", layout: 2 }));
+    const s = loadSettings();
+    expect(s.mathPinned).toBe(true);
+    expect(s.theme).toBe("dark");
+    expect(s.sheet).toBe("sepia");
+    // L'ancien « ruban deplie » ne survit pas (remplace par l'epingle).
+    expect("mathOpen" in s).toBe(false);
+    store.set("cahiers.settings.v1", JSON.stringify({ theme: "noir", sheet: 3, layout: 2 }));
+    expect(loadSettings().theme).toBe("system");
+    expect(loadSettings().sheet).toBe("light");
+  });
+
+  it("Ctrl+Maj+M ouvre le ruban Maths, Ctrl+Maj+T change le theme ; Ctrl+M reste le menu", () => {
+    expect(ctrlCommand(ctrl("m", true))).toBe("maths");
+    expect(ctrlCommand(ctrl("t", true))).toBe("theme");
+    expect(ctrlCommand(ctrl("m"))).toBe("menu");
+    expect(ctrlCommand(ctrl("t"))).toBe("newDivider");
   });
 });
 

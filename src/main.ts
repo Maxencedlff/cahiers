@@ -52,7 +52,9 @@ async function main() {
     if (platform.isTauri) await guardClose(app);
     await app.start();
 
-    if (!platform.isTauri) {
+    // Mode navigateur : rappel seulement en developpement (npm run dev) ;
+    // le dossier reste lisible dans le detail de l'indicateur d'etat.
+    if (!platform.isTauri && import.meta.env.DEV) {
       toast("Mode navigateur : les données restent dans ce navigateur.", "warn", 5000);
     }
   } catch (e) {

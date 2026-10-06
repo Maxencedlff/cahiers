@@ -101,13 +101,14 @@ def main() -> int:
         verifier(not chevauche, "les blocs ne se recouvrent pas")
         page.screenshot(path=OUT / "04-blocs.png")
 
-        # Outils du cours visibles sans faire defiler la colonne, meme sur
+        # Outils du cours visibles sans faire defiler le rail (plus de barre
+        # d'etat en bas : tout l'ecran compte), meme sur
         # un ecran de 1280x720.
         page.set_viewport_size({"width": 1280, "height": 720})
         page.wait_for_timeout(400)
         for nom in ["Pas compris", "Page suivante", "Plus d'actions"]:
             boite = page.get_by_role("button", name=nom).first.bounding_box()
-            verifier(boite is not None and boite["y"] + boite["height"] <= 720 - 36,
+            verifier(boite is not None and boite["y"] + boite["height"] <= 720,
                      f"« {nom} » visible a 1280x720")
         page.set_viewport_size({"width": 1500, "height": 940})
         page.wait_for_timeout(400)
@@ -180,7 +181,7 @@ def main() -> int:
         # cahier), puis le menu ouvre une autre matiere.
         page.get_by_role("button", name="Retour").click()
         page.wait_for_timeout(700)
-        verifier(page.locator(".side-tools").count() > 0, "« Retour » depuis la recherche revient au cahier")
+        verifier(page.locator(".rail").count() > 0, "« Retour » depuis la recherche revient au cahier")
 
         # Split, puis retour sur l'onglet mis en panneau droit.
         page.get_by_role("button", name="Menu").click()
@@ -196,7 +197,7 @@ def main() -> int:
         page.get_by_text("Maths", exact=True).first.click()
         page.wait_for_timeout(900)
         verifier(
-            page.locator(".side-tools .flag-btn").count() > 0,
+            page.locator(".rail .flag-btn").count() > 0,
             "revenir sur l'onglet du panneau droit ne casse pas la vue",
         )
 
