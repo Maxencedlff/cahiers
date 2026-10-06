@@ -29,3 +29,14 @@ export const MATH_TEMPLATES: MathTemplate[] = [
   { label: "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}", insert: "\\begin{pmatrix}#?&#?\\\\#?&#?\\end{pmatrix}", title: "Matrice 2×2", key: "m" },
   { label: "\\begin{cases}\\cdot\\\\\\cdot\\end{cases}", insert: "\\begin{cases}#?\\\\#?\\end{cases}", title: "Système" },
 ];
+
+/**
+ * Raccourci de MathLive ("alt+p", "alt+[KeyP]") deja pris par un Alt+lettre
+ * de l'appli : retire du champ, sinon MathLive pose aussi le sien (pi pour
+ * Alt+P, racine pour Alt+V, d droit pour Alt+D) avant le modele.
+ */
+export function appAltKey(binding: string): boolean {
+  const m = /^alt\+(?:\[Key([A-Z])\]|([a-z]))$/.exec(binding);
+  const k = (m?.[1] ?? m?.[2] ?? "").toLowerCase();
+  return !!k && (MATH_TEMPLATES.some((t) => t.key === k) || "ehgazt".includes(k));
+}

@@ -18,7 +18,7 @@ export const SYMBOLS: [string, string][] = [
   ["\\leq", "\\leq"], ["\\geq", "\\geq"], ["\\neq", "\\neq"], ["\\approx", "\\approx"],
   ["\\in", "\\in"], ["\\forall", "\\forall"], ["\\exists", "\\exists"], ["\\mathbb{R}", "\\mathbb{R}"],
   ["\\times", "\\times"], ["\\pm", "\\pm"], ["\\partial", "\\partial"], ["\\Omega", "\\Omega"], ["\\eta", "\\eta"],
-  ["\\varepsilon", "\\varepsilon"],
+  ["\\varepsilon", "\\varepsilon"], ["\\mathcal{L}", "\\mathcal{L}"],
 ];
 
 const KEY = "cahiers.symbols.v1";
@@ -86,6 +86,7 @@ const SYMBOL_NAMES: Record<string, string> = {
   "\\exists": "il existe", "\\mathbb{R}": "ensemble des réels", "\\times": "multiplié par",
   "\\pm": "plus ou moins", "\\partial": "dérivée partielle", "\\Omega": "Oméga majuscule (ohm)",
   "\\eta": "êta", "\\varepsilon": "epsilon",
+  "\\mathcal{L}": "transformée de Laplace",
 };
 
 export function symbolName(insert: string): string {

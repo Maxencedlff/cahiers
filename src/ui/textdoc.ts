@@ -14,6 +14,7 @@ import {
   subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
+import { appAltKey } from "../core/templates";
 import { linesToReach } from "../core/textlayout";
 import { BLOCK_MAX_H } from "../core/paginate";
 import { cleanHint, linkUrl, parseLinkMarkdown, pagePathOf, type LinkCandidate } from "../core/links";
@@ -1834,6 +1835,10 @@ export class TextDoc {
     // Reglages a poser une fois le champ dans la page (sinon MathLive leve
     // "Mathfield not mounted"). La barre d'espace fait un vrai espace.
     mf.mathModeSpace = "\\;";
+    // "e^23" : sans cela MathLive sort de l'exposant apres le premier chiffre (e^2 3).
+    mf.smartSuperscript = false;
+    // Les Alt+lettre sont a l'appli (Alt+P puissance, Alt+V vecteur...).
+    mf.keybindings = mf.keybindings.filter((k) => !appAltKey(k.key));
     // Raccourcis en minuscules seulement : "PI" reste P fois I. Dans une
     // fraction ouverte par "/", grecs et fonctions seulement.
     mf.inlineShortcuts = numSrc !== undefined
@@ -2002,6 +2007,15 @@ export class TextDoc {
         mf.executeCommand(blankBranch(a.parent, "superscript") ? "moveToOpposite" : "moveAfterParent");
         return true;
       }
+    }
+    // Exposant ou indice fini au bout d'une formule posee depuis le texte
+    // (e Alt+P 23) : Espace rend la main au texte ("e^{23} suite"), fleche
+    // droite sort d'un coup. Dans une formule rouverte, rien ne change.
+    if (!auto && !shift && (key === " " || key === "ArrowRight") && !this.fieldOrigin
+      && ((endOfScript(mf) && scriptIsLast(mf)) || (key === " " && afterLastScript(mf)))) {
+      this.commit(true);
+      if (key === " ") this.insertTextAtCaret(" ");
+      return true;
     }
     // Espace a la fin d'un indice ou d'une borne remplis : on en sort ("int_0^1 x").
     if (key === " " && !auto && endOfScript(mf)) mf.executeCommand("moveAfterParent");
@@ -3283,6 +3297,12 @@ function autoSource(auto: AutoFrac, value: string): { latex: string; src: string
 }
 
 function insertInField(mf: MathfieldElement, template: string): void {
+  // Alt+P (Alt+I) dans l'exposant (l'indice) deja rempli : on en sort, comme une bascule.
+  const branch = template === "#@^{#?}" ? "superscript" : template === "#@_{#?}" ? "subscript" : null;
+  if (branch && endOfScript(mf) && caretAtom(mf)?.parentBranch === branch) {
+    mf.executeCommand("moveAfterParent");
+    return;
+  }
   // Dans une formule, #@ prend ce qui precede (MathLive le gere).
   mf.insert(template, { selectionMode: "placeholder", focus: true });
   lowerBoundFirst(mf);
@@ -3361,6 +3381,24 @@ function eqBeforeOnLine(node: Node): boolean {
 function atBranchEnd(a: MlAtom): boolean {
   const br = a.parent && typeof a.parentBranch === "string" ? a.parent.branch(a.parentBranch) : undefined;
   return !!br && br[br.length - 1] === a;
+}
+
+/** L'exposant (l'indice) sous le curseur porte sur le dernier terme de la formule. */
+function scriptIsLast(mf: MathfieldElement): boolean {
+  const p = caretAtom(mf)?.parent;
+  const root = p?.parent;
+  if (!p || !root || root.parent) return false;
+  const body = root.branch("body");
+  return !!body && body[body.length - 1] === p;
+}
+
+/** Curseur juste apres un terme a exposant (indice) qui finit la formule (e^{23}|, sorti par Alt+P). */
+function afterLastScript(mf: MathfieldElement): boolean {
+  const a = caretAtom(mf);
+  const root = a?.parent;
+  if (!a || !root || root.parent || a.parentBranch !== "body") return false;
+  const body = root.branch("body");
+  return !!body && body[body.length - 1] === a && !!(a.branch("superscript") || a.branch("subscript"));
 }
 
 /** Curseur a la fin d'un indice ou d'un exposant deja rempli. */
