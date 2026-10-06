@@ -12,7 +12,7 @@
 
 /** [rendu, insertion] ; l'ordre sert pour les symboles jamais utilises. */
 export const SYMBOLS: [string, string][] = [
-  ["\\alpha", "\\alpha"], ["\\mathrm{A}", "\\mathrm{A}"], ["\\beta", "\\beta"], ["\\lambda", "\\lambda"], ["\\pi", "\\pi"],
+  ["\\alpha", "\\alpha"], ["\\mathrm{A}", "\\mathrm{A}"], ["\\beta", "\\beta"], ["\\gamma", "\\gamma"], ["\\lambda", "\\lambda"], ["\\pi", "\\pi"],
   ["\\theta", "\\theta"], ["\\omega", "\\omega"], ["\\Delta", "\\Delta"], ["\\infty", "\\infty"],
   ["\\to", "\\to"], ["\\Rightarrow", "\\Rightarrow"], ["\\Leftrightarrow", "\\Leftrightarrow"],
   ["\\leq", "\\leq"], ["\\geq", "\\geq"], ["\\neq", "\\neq"], ["\\approx", "\\approx"],
@@ -78,7 +78,7 @@ export function orderedSymbols(now = Date.now()): [string, string][] {
  * « alpha » ou « implique », pas « \alpha ».
  */
 const SYMBOL_NAMES: Record<string, string> = {
-  "\\alpha": "alpha", "\\mathrm{A}": "Alpha majuscule", "\\beta": "bêta", "\\lambda": "lambda", "\\pi": "pi",
+  "\\alpha": "alpha", "\\mathrm{A}": "Alpha majuscule", "\\beta": "bêta", "\\gamma": "gamma", "\\lambda": "lambda", "\\pi": "pi",
   "\\theta": "thêta", "\\omega": "oméga", "\\Delta": "Delta majuscule", "\\infty": "infini",
   "\\to": "flèche, tend vers", "\\Rightarrow": "implique", "\\Leftrightarrow": "équivalent à",
   "\\leq": "inférieur ou égal", "\\geq": "supérieur ou égal", "\\neq": "différent de",
