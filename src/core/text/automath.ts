@@ -232,13 +232,24 @@ const LONE_NAMES = new Set([
   "Eth", "Gv", "Gd", "w0", "ω0", "ωc", "τ1", "τ2",
 ]);
 
+/**
+ * Mot outil du francais tel qu'on l'ecrit : "il", "Il". "iL", "IL" (casse
+ * melangee ou majuscules) sont des grandeurs.
+ */
+function stopWord(s: string): boolean {
+  const l = s.toLowerCase();
+  return STOP.has(l) && (s === l || s === l[0].toUpperCase() + l.slice(1));
+}
+
 /** Le mot peut-il etre une variable ? */
 function validIdent(s: string): boolean {
   if (isGreek(s) || s in FUNCS || GREEK_SUB.test(s) || FORMULA_ONLY.has(s)) return true;
   if (GREEK_NAME_SUB.test(s)) return true;
   if (s in SET_CHARS || s === "∞" || IMAG.test(s)) return true;
   if (/[^A-Za-z0-9]/.test(s)) return false; // accents, lettres grecques collees
-  if (STOP.has(s.toLowerCase())) return false;
+  // "IL", "iL" : des grandeurs (courant dans L), pas « il » ; "IL" en
+  // majuscules seulement dans une formule (voir loneVariable).
+  if (stopWord(s)) return false;
   if (s.length > 6) return false;
   if (OMEGA_WORD.test(s)) return true;
   // Mot en minuscules de 3 lettres ou plus : seulement les tensions et
@@ -284,6 +295,10 @@ class Parser {
   private seenOp = false;
   /** Corps d'integrale en cours de lecture : "dx" le termine. */
   private inIntegral = 0;
+  /** Bornes d'un intervalle en cours de lecture (voir interval). */
+  private inInterval = 0;
+  /** Bornes lues comme grandeur seulement parce qu'on est dans un intervalle. */
+  private relaxed = 0;
   constructor(private toks: Tok[], start: number) { this.i = start; }
 
   get pos(): number { return this.i; }
@@ -315,14 +330,26 @@ class Parser {
     for (;;) {
       const save = this.i, seen = this.seenOp;
       const t = this.peek();
-      if (t?.t !== "op" || !(t.s in REL)) break;
+      // "x in [0, IL]" : appartient, devant un intervalle.
+      const inInterval = t?.t === "id" && t.s === "in" && this.intervalAfter();
+      if (!inInterval && (t?.t !== "op" || !(t.s in REL))) break;
       this.skipSp(); this.i++;
       this.seenOp = true;
       const rhs = this.sum();
       if (!rhs) { this.i = save; this.seenOp = seen; break; }
-      tex += ` ${REL[t.s]} ${rhs.tex}`; ops += 1 + rhs.ops; vars += rhs.vars;
+      tex += ` ${inInterval ? "\\in" : REL[t!.s]} ${rhs.tex}`; ops += 1 + rhs.ops; vars += rhs.vars;
     }
     return { tex, ops, vars };
+  }
+
+  /** Le prochain jeton (un mot) est-il suivi d'un crochet d'intervalle ? */
+  private intervalAfter(): boolean {
+    let j = this.i;
+    while (this.toks[j]?.t === "sp") j++;
+    j++;
+    while (this.toks[j]?.t === "sp") j++;
+    const n = this.toks[j];
+    return n?.t === "other" && (n.s === "[" || n.s === "]");
   }
 
   private sum(): Node | null {
@@ -638,7 +665,8 @@ class Parser {
       // relation ("x -> +inf") ; "borne inf" reste du texte.
       if (t.s === "inf" || t.s === "infty") {
         const prev = this.before(this.i);
-        if (!(prev?.t === "op" && prev.s !== ")" && prev.s !== ".")) return null;
+        // Borne d'intervalle : "[0, inf[" aussi.
+        if (!(prev?.t === "op" && prev.s !== ")" && prev.s !== ".") && !(this.inInterval > 0 && prev?.t === "other")) return null;
         this.i++;
         return { tex: "\\infty", ops: 0, vars: 0 };
       }
@@ -659,10 +687,15 @@ class Parser {
         if (t.s === "sqrt") return { tex: `\\sqrt{${arg.group ?? arg.tex}}`, ops: arg.ops + 1, vars: arg.vars };
         return { tex: `${FUNCS[t.s]}${arg.group ? `\\left(${arg.group}\\right)` : ` ${arg.tex}`}`, ops: arg.ops + 1, vars: arg.vars };
       }
-      if (!validIdent(t.s) && !this.letterA(t)) return null;
+      if (!validIdent(t.s) && !this.letterA(t)) {
+        // Borne d'intervalle : "ton", "toff" sont des grandeurs (t_on).
+        if (!(this.inInterval > 0 && /^[A-Za-z][A-Za-z0-9]{0,4}$/.test(t.s))) return null;
+        this.relaxed++;
+      }
       this.i++;
       return { tex: identTex(t.s), ops: 0, vars: 1 };
     }
+    if (t.t === "other" && (t.s === "[" || t.s === "]")) return this.interval();
     if (t.t === "op" && t.s === "(") {
       const m = this.matrix();
       if (m) return m;
@@ -680,6 +713,51 @@ class Parser {
       return { tex: `\\left(${inner.tex}\\right)`, group: inner.tex, ops: inner.ops, vars: inner.vars };
     }
     return null;
+  }
+
+  /**
+   * Intervalle a la francaise : "[0, ton[", "]a ; b]", "[ILmin, ILmax]",
+   * "]-inf, 0]". Bornes : des expressions, separees par "," ou ";". Un mot
+   * outil ("ton") n'y est une grandeur que si l'autre borne en est une sans
+   * doute possible : "[note, page]" reste du texte.
+   */
+  private interval(): Node | null {
+    const save = this.i, seen = this.seenOp, relaxed0 = this.relaxed;
+    const open = this.toks[this.i].s;
+    const fail = () => { this.i = save; this.seenOp = seen; this.relaxed = relaxed0; return null; };
+    this.i++;
+    this.inInterval++;
+    try {
+      const bound = (): { node: Node; relaxed: boolean } | null => {
+        const r0 = this.relaxed;
+        this.skipSp();
+        let plus = "";
+        // "+inf" derriere le separateur.
+        if (this.toks[this.i]?.t === "op" && this.toks[this.i].s === "+") { plus = "+"; this.i++; }
+        const node = this.sum();
+        return node ? { node: { ...node, tex: plus + node.tex }, relaxed: this.relaxed > r0 } : null;
+      };
+      const lo = bound();
+      if (!lo) return fail();
+      this.skipSp();
+      const sep = this.toks[this.i];
+      if (sep?.t !== "other" || (sep.s !== "," && sep.s !== ";")) return fail();
+      this.i++;
+      const hi = bound();
+      if (!hi || (lo.relaxed && hi.relaxed)) return fail();
+      this.skipSp();
+      const close = this.toks[this.i];
+      if (close?.t !== "other" || (close.s !== "[" && close.s !== "]")) return fail();
+      this.i++;
+      this.seenOp = true;
+      const s = sep.s === ";" ? ";\\," : ",\\,";
+      return {
+        tex: `\\left${open} ${lo.node.tex}${s}${hi.node.tex} \\right${close.s}`,
+        ops: lo.node.ops + hi.node.ops + 1, vars: lo.node.vars + hi.node.vars,
+      };
+    } finally {
+      this.inInterval--;
+    }
   }
 
   /**
@@ -719,7 +797,8 @@ const LONE_STOP = new Set(["Vu", "Lu", "Pr", "If", "It", "In", "Up", "Un", "Lac"
 function loneVariable(s: string): boolean {
   if (LONE_NAMES.has(s)) return true;
   if (FORMULA_ONLY.has(s)) return false;
-  if (!validIdent(s) || STOP.has(s.toLowerCase()) || isGreek(s) || s in FUNCS) return false;
+  // Seul dans une phrase, "IL" en majuscules reste du texte (« IL FAUT »).
+  if (!validIdent(s) || stopWord(s) || (STOP.has(s.toLowerCase()) && /^[A-Z]+$/.test(s)) || isGreek(s) || s in FUNCS) return false;
   if (isUnit(s) || LONE_STOP.has(s)) return false;
   // Majuscule + indice : Vz, Ru, Vbe, Vbatt, Vin, Zin (pas Pin, Voici, Loi).
   const m = /^([VIURCLPZ])([a-z]{1,4})$/.exec(s);
@@ -740,7 +819,8 @@ function loneVariable(s: string): boolean {
 function numericOk(src: string, tex: string): boolean {
   const s = src.replace(/\s+/g, "");
   if (/^\d+\/\d+\/\d+$/.test(s) || /^\d{2}\/\d{2}$/.test(s) || /^0\d\//.test(s)) return false;
-  return /\\frac|\^|\\cdot|=|<|>|\\leq|\\geq|\\approx|\\neq|\\ll|\\gg|\\to|Rightarrow/.test(tex);
+  // Intervalle de nombres ("]0 ; 1[", "[0, +inf[") : des maths aussi.
+  return /\\frac|\^|\\cdot|=|<|>|\\leq|\\geq|\\approx|\\neq|\\ll|\\gg|\\to|Rightarrow|\\left[[\]]/.test(tex);
 }
 
 /** Paires a barre oblique qui ne sont pas des fractions (E/S, I/O). */
@@ -782,7 +862,7 @@ export function findFormulas(line: string, mode: ScanMode = "final"): FoundFormu
   let k = 0;
   while (k < toks.length) {
     const t = toks[k];
-    if (t.t === "sp" || t.t === "other") { k++; continue; }
+    if (t.t === "sp" || (t.t === "other" && t.s !== "[" && t.s !== "]")) { k++; continue; }
     // Trait d'union colle a un mot ("lithium-ion") : pas un moins.
     const prev = toks[k - 1];
     if (t.t === "op" && (t.s === "-" || t.s === "−") && prev && (prev.t === "id" || prev.t === "num")) { k++; continue; }

@@ -11,6 +11,26 @@ const one = (line: string) => {
 };
 
 describe("formules automatiques", () => {
+  it("intervalles, bornes a indice", () => {
+    expect(one("[0, ton[").tex).toBe("\\left[ 0,\\,t_{on} \\right[");
+    expect(one("[ILmin, ILmax]").tex).toBe("\\left[ I_{Lmin},\\,I_{Lmax} \\right]");
+    expect(one("]0 ; 1[").tex).toBe("\\left] 0;\\,1 \\right[");
+    expect(one("]-inf, 0]").tex).toBe("\\left] -\\infty,\\,0 \\right]");
+    expect(one("[0, +inf[").tex).toBe("\\left[ 0,\\,+\\infty \\right[");
+    expect(one("x in [0, IL]").tex).toBe("x \\in \\left[ 0,\\,I_L \\right]");
+    // Mots outils entre crochets : du texte.
+    expect(findFormulas("[voir cours, page 3]")).toHaveLength(0);
+    expect(findFormulas("[note, page]")).toHaveLength(0);
+  });
+
+  it("IL, iL : des grandeurs, pas le pronom", () => {
+    expect(one("IL = 3 A").tex).toBe("I_L = 3\\,\\mathrm{A}");
+    expect(one("iL(t) = IL").tex).toBe("i_L\\left(t\\right) = I_L");
+    expect(one("le courant iL traverse").tex).toBe("i_L");
+    expect(findFormulas("Il faut voir")).toHaveLength(0);
+    expect(findFormulas("IL FAUT")).toHaveLength(0);
+  });
+
   it("indices, relation, unite", () => {
     const r = one("Vs = Vz - Vbe");
     expect(r.src).toBe("Vs = Vz - Vbe");
