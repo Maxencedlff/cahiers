@@ -2,6 +2,7 @@ import type { Repo } from "./repo";
 import type { Block, ColorKey, Page } from "../types";
 import { dividerMatches, extractReview, groupReview, type ReviewFilter, type ReviewItem, type ReviewResult, type ReviewSource } from "../review";
 import { docHeadings, docLinks, docTitle, parseDoc, texToPlain, type DocToken } from "../text/doc";
+import { extractFormulas, type Formula } from "../suggest";
 import { blockLinkRef, parseLinkUrl, type IndexedLink, type LinkAnchor, type LinkPage } from "../links";
 import {
   fold, makeExcerpt, matchesAll, notebookMatches, parseQuery, queryReady,
@@ -88,6 +89,8 @@ export interface PageIndex {
   links?: IndexedLink[];
   /** Formules et zones reconnues, cibles possibles d'un lien. Absent : aucune. */
   anchors?: LinkAnchor[];
+  /** Relations du texte tape (core/suggest.ts), reproposees en grise. Absent : aucune. */
+  formulas?: Formula[];
 }
 
 /** Longueur de la premiere ligne montree dans la liste des pages. */
@@ -150,6 +153,7 @@ export function indexPage(page: Page): PageIndex {
     ?? blocks.find((b) => b.type !== "flag");
   const title = body?.type === "text" ? firstLineOf(docTitle(tokens)) : "";
   const review = extractReview(page);
+  const formulas = body?.type === "text" ? extractFormulas(body.content) : [];
   return {
     modified: page.modified ?? "", created: page.created ?? "",
     firstLine: title || (lead ? firstLineOf(lead.text) : ""), ...(title ? { title } : {}), flags, blocks,
@@ -158,6 +162,7 @@ export function indexPage(page: Page): PageIndex {
     ...(headings.length ? { headings } : {}),
     ...(links.length ? { links } : {}),
     ...(anchors.length ? { anchors } : {}),
+    ...(formulas.length ? { formulas } : {}),
   };
 }
 

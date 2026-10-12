@@ -321,7 +321,125 @@ export class TextDoc {
     const r = sel.getRangeAt(0);
     if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
     this.markSelectedEqs(sel.isCollapsed ? null : r);
+    // Curseur deplace : la suggestion grisee ne vaut plus.
+    const g = this.ghostAt;
+    if (g && !(sel.isCollapsed && r.startContainer === g.node && r.startOffset === g.offset)) this.hideGhost();
   };
+
+  /**
+   * Suggestion grisee (core/suggest.ts) : une formule deja ecrite, proposee
+   * apres le curseur. Fleche droite la pose, toute autre frappe l'oublie.
+   * Posee par PageView ; absente = pas de suggestion.
+   */
+  suggester: ((line: string) => { insert: string; replace: number } | null) | null = null;
+  /** Calque de la suggestion : frere du texte (jamais dans le contenu, la pagination ou l'annulation). */
+  private ghost: HTMLElement | null = null;
+  /** Curseur et suggestion montres. */
+  private ghostAt: { node: Text; offset: number; insert: string; replace: number } | null = null;
+  private ghostRaf = 0;
+
+  /** Suggestion recalculee a la prochaine image (apres la frappe et ses remplacements). */
+  private scheduleGhost(): void {
+    if (!this.suggester) return;
+    cancelAnimationFrame(this.ghostRaf);
+    this.ghostRaf = requestAnimationFrame(() => this.updateGhost());
+  }
+
+  private updateGhost(): void {
+    this.hideGhost();
+    if (!this.suggester || this.field || this.root.contentEditable === "false") return;
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return;
+    // Seulement en fin de ligne : rien d'autre que du blanc apres le curseur.
+    const after = document.createRange();
+    after.setStart(node, r.startOffset);
+    after.setEnd(this.root, this.root.childNodes.length);
+    const rest = after.toString();
+    const eol = rest.indexOf("\n");
+    if ((eol < 0 ? rest : rest.slice(0, eol)).replace(/[\s\u200b]/g, "")) return;
+    if (eol < 0 && after.cloneContents().querySelector(".eq, .doc-img")) return;
+    const line = this.lineAt(node as Text, r.startOffset);
+    const s = this.suggester(line.full);
+    if (!s) return;
+    const rect = caretRect(r, this.root);
+    const host = this.root.parentElement;
+    if (!rect || !host) return;
+    const g = this.ghost ?? el("div", { class: "text-ghost", "aria-hidden": "true" });
+    this.ghost = g;
+    g.replaceChildren(el("span", { class: "text-ghost-key" }, "→"), ...ghostNodes(s.insert));
+    const cs = getComputedStyle(this.root);
+    g.style.font = cs.font;
+    g.style.lineHeight = cs.lineHeight;
+    if (!g.isConnected) host.append(g);
+    const hr = host.getBoundingClientRect();
+    const left = rect.right - hr.left + 6;
+    g.style.left = `${Math.round(left)}px`;
+    g.style.top = `${Math.round(rect.top - hr.top)}px`;
+    g.style.minHeight = `${Math.round(rect.height)}px`;
+    // Trop long pour la fin de ligne : sous la ligne, au bord du texte.
+    const padL = parseFloat(cs.paddingLeft) || 0, padR = parseFloat(cs.paddingRight) || 0;
+    if (left + g.offsetWidth > host.clientWidth - padR / 2) {
+      g.style.left = `${Math.round(padL)}px`;
+      g.style.top = `${Math.round(rect.bottom - hr.top)}px`;
+      g.classList.add("below");
+    } else g.classList.remove("below");
+    this.ghostAt = { node: node as Text, offset: r.startOffset, insert: s.insert, replace: s.replace };
+  }
+
+  /** Retire la suggestion grisee. */
+  hideGhost(): void {
+    cancelAnimationFrame(this.ghostRaf);
+    this.ghostAt = null;
+    this.ghost?.remove();
+  }
+
+  /**
+   * Fleche droite : la suggestion remplace ce qui avait ete tape (« DeltaS
+   * = ») et se pose telle qu'elle est dans le cahier (texte et formules).
+   * Ctrl+Z juste apres rend la frappe d'avant.
+   */
+  private acceptGhost(): boolean {
+    const g = this.ghostAt;
+    this.hideGhost();
+    if (!g || !g.node.isConnected) return false;
+    const line = this.lineAt(g.node, g.offset);
+    const from = line.full.length - g.replace;
+    let start: [Node, number] | null = null;
+    for (const seg of line.segs) {
+      if (from > seg.b || (from === seg.b && seg !== line.segs[line.segs.length - 1])) continue;
+      if (seg.kind === "eq") { start = [seg.node.parentNode!, Array.prototype.indexOf.call(seg.node.parentNode!.childNodes, seg.node)]; break; }
+      // Indice dans le texte du noeud (les \u200b ne comptent pas dans la ligne).
+      const t = seg.node.textContent ?? "";
+      let i = seg.head.length, k = seg.a;
+      while (i < t.length && k < from) { if (t[i] !== "\u200b") k++; i++; }
+      start = [seg.node, i];
+      break;
+    }
+    if (!start) return false;
+    const before = this.content;
+    const caret = this.caretOffset();
+    const r = document.createRange();
+    r.setStart(start[0], start[1]);
+    r.setEnd(g.node, g.offset);
+    r.deleteContents();
+    r.collapse(true);
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(r);
+    this.insertTokens(parseDoc(g.insert));
+    this.lastLine = {
+      undo: () => {
+        this.setContent(before);
+        if (caret !== null) this.setCaretOffset(caret);
+        this.emit();
+        return true;
+      },
+    };
+    return true;
+  }
 
   /**
    * Formules prises dans la selection : surlignees comme le texte. KaTeX ne
@@ -347,6 +465,7 @@ export class TextDoc {
    * changement de page laissait en memoire la page, son canvas et ses traits.
    */
   dispose(): void {
+    this.hideGhost();
     document.removeEventListener("selectionchange", this.onSelectionChange);
     document.removeEventListener("pointerdown", this.onOutsideDown, { capture: true });
     this.dropMarker?.remove();
@@ -397,8 +516,11 @@ export class TextDoc {
           if (this.field || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
           const made = this.convertLine("pause");
           if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret };
+          this.scheduleGhost();
         }, 900);
       }
+      if (ie.inputType === "insertText" && !ie.isComposing) this.scheduleGhost();
+      else this.hideGhost();
       this.emit();
     });
     // "[[" : selecteur de lien (core/links.ts), avant la frappe en couleur.
@@ -421,7 +543,9 @@ export class TextDoc {
     });
     this.root.addEventListener("keydown", (e) => this.onKey(e));
     // Un clic ailleurs : la derniere mise en forme n'est plus annulable.
-    this.root.addEventListener("pointerdown", () => { this.lastAuto = null; this.lastLine = null; });
+    this.root.addEventListener("pointerdown", () => { this.lastAuto = null; this.lastLine = null; this.hideGhost(); });
+    this.root.addEventListener("focusout", () => this.hideGhost());
+    this.root.addEventListener("compositionstart", () => this.hideGhost());
     this.root.addEventListener("focusin", () => { lastDoc = this; });
     this.root.addEventListener("click", (e) => {
       const link = (e.target as HTMLElement).closest?.(".doc-link");
@@ -519,6 +643,7 @@ export class TextDoc {
   get content(): string { return serializeDoc(this.read()); }
 
   setContent(content: string): void {
+    this.hideGhost();
     if (this.root.isConnected && content === this.content) return;
     this.field = null;
     this.fieldOrigin = null;
@@ -3114,6 +3239,18 @@ export class TextDoc {
 
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
+    // Suggestion grisee : Fleche droite la pose, Echap l'oublie, le reste aussi.
+    if (this.ghostAt && !["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) {
+      const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
+      if (e.key === "ArrowRight" && plain) {
+        if (this.acceptGhost()) { e.preventDefault(); e.stopPropagation(); return; }
+      } else if (e.key === "Escape") {
+        this.hideGhost();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      } else this.hideGhost();
+    }
     // Photo selectionnee : Suppr la retire, Echap la deselectionne, toute
     // autre touche rend la main au texte.
     if (this.selectedImg && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
@@ -3282,6 +3419,18 @@ function makeEq(latex: string, src?: string): HTMLElement {
  * champ d'edition, au lieu de tomber en corps 7. Une case laissee vide reste
  * visible, en gris, pour qu'on la voie a remplir.
  */
+/** Apercu d'une suggestion (markdown restreint) : texte, et formules en KaTeX. */
+function ghostNodes(insert: string): Node[] {
+  return parseDoc(insert).flatMap((t): Node[] => {
+    if (t.kind === "text") return [document.createTextNode(t.text)];
+    if (t.kind !== "math") return [];
+    const span = el("span", { class: "text-ghost-eq" });
+    const html = katexHtml(t.latex);
+    if (html) span.innerHTML = html; else span.textContent = t.latex;
+    return [span];
+  });
+}
+
 function katexHtml(latex: string): string | null {
   const shown = (latex || "\\placeholder{}").replace(/\\placeholder\{\}/g, "{\\color{#9aa3b2}\\square}");
   try {

@@ -70,6 +70,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   { keys: "C", label: "Photo sélectionnée : la mettre à côté (la photo ou le texte qui suit passe à droite)", group: "Pendant le cours" },
   { keys: "← →", label: "Photo sélectionnée : la décaler (Maj : pas fin) ; bouton ⇤ : gauche, centre, droite", group: "Pendant le cours" },
+  { keys: "→", label: "Formule déjà écrite proposée en grisé : Flèche droite la pose (Échap ou toute autre touche l'ignore, Ctrl+Z la retire)", group: "Pendant le cours" },
   { keys: "Suppr / Retour arrière", label: "À la fin d'une page / au début de sa suite : la suite remonte dans le blanc (menu : Tasser les pages)", group: "Pendant le cours" },
   { keys: "Ctrl+X, Ctrl+V", label: "Photo sélectionnée : la couper puis la coller sur une autre page (Ctrl+C : la copier)", group: "Pendant le cours" },
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),

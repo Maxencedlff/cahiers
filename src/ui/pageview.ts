@@ -57,6 +57,7 @@ import {
   type FlowPlan, type FlowSelection,
 } from "../core/paginate";
 import { measureRows, rowStart, type MeasuredRows } from "./pagebreak";
+import { refreshSuggestions, suggestFor } from "./suggestions";
 import {
   SizeMemo, anchorIndex, anchoredScroll, estimateSize, isFastScroll, measureSize, pageAt, planWindow,
   slotHeight, visibleRange, type SlotSize,
@@ -1355,6 +1356,11 @@ export class PageView {
       number: n, page, surface: null, wrap, overlay, sheet, doc, ro: null, readOnly, notes,
       ...(copy ? { copy: copy.file } : {}),
     };
+    // Formules deja ecrites reproposees en grise (core/suggest.ts), pas sur une copie ou en lecture seule.
+    if (!copy && !readOnly) {
+      doc.suggester = (line) => (loaded.readOnly || this.readOnly ? null : suggestFor(this.host.repo, this.notebook, this.divider, line));
+      refreshSuggestions(this.host.repo, this.notebook);
+    }
     this.paintNotes(loaded);
 
     const surface = new InkSurface(canvas, {

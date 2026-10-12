@@ -1033,6 +1033,19 @@ kbd {
   font-size: var(--fs-xs); font-weight: 600; border-radius: 22px; margin-left: 4px; min-width: 52px; padding: 0 10px;
 }
 
+/* Suggestion grisee (formule deja ecrite) : Fleche droite la pose. Calque
+   frere du texte, jamais dans le contenu. */
+.text-ghost {
+  position: absolute; z-index: 4; pointer-events: none; white-space: nowrap;
+  color: var(--sheet-text, #1f2430); opacity: .38; display: flex; align-items: center; gap: .35em;
+}
+.text-ghost.below { opacity: .45; }
+.text-ghost-key {
+  font: 600 calc(11px * var(--k, 1)) / 1.4 system-ui, sans-serif; border: 1px solid currentColor;
+  border-radius: 4px; padding: 0 .35em;
+}
+.text-ghost-eq .katex { font-size: 1em; }
+
 /* Photo posee dans le texte : sa propre ligne, largeur en unites de page. */
 .text-doc .doc-img {
   display: block; position: relative; margin: .4em 0;
