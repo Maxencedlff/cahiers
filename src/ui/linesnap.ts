@@ -10,6 +10,9 @@
  */
 import { blockMargins, LINE, snapInline, TEXT_FONT } from "../core/textlayout";
 
+/** Bande de texte minimale a cote d'une photo calee, en unites de page (~5 cm). */
+const MIN_TEXT = 200;
+
 /** Formules dans un titre : le titre a sa propre grille, on ne touche a rien. */
 const HEADING = ".dl-h1, .dl-h2, .dl-h3";
 
@@ -56,6 +59,24 @@ export function snapLines(root: HTMLElement, all = false): boolean {
     const ea = ma.top + ma.h + ma.bottom, eb = mb.top + mb.h + mb.bottom;
     // Arrondi par exces : le bas le plus court ne doit jamais rester au-dessus.
     if (ea < eb) ma.bottom += eb - ea + 0.01; else mb.bottom += ea - eb + 0.01;
+  }
+  // Bande laissee a droite de la derniere photo calee : trop etroite, le
+  // texte s'y ecrivait une lettre par ligne. Elle est alors bouchee (marge
+  // droite) et le texte passe dessous.
+  const cs = getComputedStyle(root);
+  const contentRight = root.getBoundingClientRect().right - (parseFloat(cs.paddingRight) || 0);
+  const minText = MIN_TEXT * (fontPx / TEXT_FONT);
+  for (const a of root.querySelectorAll<HTMLElement>(".doc-img.side")) {
+    const b = a.nextElementSibling;
+    const last = b instanceof HTMLElement && b.matches(".doc-img:not(.side)") ? b : a;
+    const before = last.style.marginRight;
+    last.style.marginRight = "";
+    const gap = parseFloat(getComputedStyle(last).marginRight) || 0;
+    const left = contentRight - last.getBoundingClientRect().right - gap;
+    const mr = left < minText ? `${Math.max(0, gap + left - 1).toFixed(2)}px` : "";
+    last.style.marginRight = mr;
+    if (mr !== before) changed = true;
+    if (last !== a && a.style.marginRight) { a.style.marginRight = ""; changed = true; }
   }
   for (const [fig, m] of want) {
     const top = `${m.top.toFixed(2)}px`, bottom = `${m.bottom.toFixed(2)}px`;
