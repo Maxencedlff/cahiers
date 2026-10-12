@@ -2233,6 +2233,9 @@ export class App {
           () => void view()?.newPage(true)),
         action("Liste des pages…", titleOf("Toutes les pages : numéro, date, première ligne", "goto"),
           () => void this.showPageList()),
+        action("Tasser les pages", "Remonte les suites de page dans le blanc laissé au-dessus (depuis la page courante). "
+          + "Une page : Suppr à la fin de la page, ou Retour arrière au début de la suivante",
+          () => void view()?.compactPages()),
         action("Exporter la page (PDF)", titleOf("La page courante, puis « Enregistrer au format PDF »", "exportPage"),
           () => void view()?.exportPdf("current")),
         action("Exporter l'intercalaire (PDF)", titleOf("Toutes les pages de l'intercalaire", "exportAll"),

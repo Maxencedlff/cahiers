@@ -1580,6 +1580,20 @@ export class PageView {
       }
       if (e.target === loaded.doc.root && typing(e)) this.skipInk(loaded);
       this.notePreEdit(loaded);
+      // Comme Word : Suppr a la fin d'une page fait remonter sa suite,
+      // Retour arriere au debut d'une page de suite la recolle a la precedente.
+      const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
+      if (plain && e.target === loaded.doc.root && !loaded.doc.editingFormula) {
+        if (e.key === "Delete" && this.caretSide(loaded, "after")) {
+          setTimeout(() => void this.pullNext(loaded), 0);
+        } else if (e.key === "Backspace" && loaded.page.continues && this.caretSide(loaded, "before")) {
+          const prev = this.list.find((x) => x.number === loaded.number - 1 && !x.dead && !x.copy);
+          if (prev?.page.id === loaded.page.continues) {
+            e.preventDefault();
+            void this.pullNext(prev, true);
+          }
+        }
+      }
     }, { capture: true });
     loaded.doc.root.addEventListener("paste", (e) => {
       if (loaded.readOnly || e.target !== loaded.doc.root) return;
@@ -1799,6 +1813,161 @@ export class PageView {
     const plan = planFlow(m.rows, loaded.page.blocks);
     if (!plan) return;
     void this.flowOut(loaded, plan, m);
+  }
+
+  /**
+   * Rien que du blanc (lignes vides) apres le curseur ("after") ou avant
+   * ("before") dans le texte de la page, selection vide.
+   */
+  private caretSide(loaded: LoadedPage, side: "after" | "before"): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const at = sel.getRangeAt(0);
+    const root = loaded.doc.root;
+    if (!root.contains(at.startContainer)) return false;
+    const r = document.createRange();
+    r.selectNodeContents(root);
+    if (side === "after") r.setStart(at.startContainer, at.startOffset);
+    else r.setEnd(at.startContainer, at.startOffset);
+    if (r.cloneContents().querySelector(".eq, .doc-img, math-field")) return false;
+    return !r.toString().replace(/[\s\u200b]/g, "");
+  }
+
+  /**
+   * Remonte la page de suite (creee par un debordement, `continues`) dans
+   * `from` : ses lignes, photos, encre et reperes passent a la fin de
+   * `from`, la page part a la corbeille, puis le debordement habituel
+   * recoupe au bon endroit. Le blanc laisse en bas d'une page (lignes
+   * effacees) se remplit ainsi, comme dans Word. Les lignes vides du bas de
+   * `from` partent avant. Rend vrai si une page a ete remontee.
+   */
+  async pullNext(from: LoadedPage, caretAtJoin = false): Promise<boolean> {
+    if (this.flowing || from.dead || from.readOnly || this.readOnly || from.copy || this.peek || !from.settled) return false;
+    if (from.doc.editingFormula || pdfBlockOf(from.page)) return false;
+    const n = from.number + 1;
+    if (n > this.total) return false;
+    const shownNext = this.list.find((p) => p.number === n && !p.dead && !p.copy) ?? null;
+    if (shownNext && (shownNext.readOnly || shownNext.page.continues !== from.page.id)) return false;
+    await this.flush();
+    if (this.flowing || from.dead) return false;
+    this.flowing = true;
+    this.diskEpoch++;
+    this.holdKeys();
+    let pulled = false;
+    try {
+      const next: Page | null = shownNext?.page
+        ?? await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, n)).catch(() => null);
+      if (!next || next.continues !== from.page.id || isFutureVersion(next) || pdfBlockOf(next)) return false;
+      // Bas reellement occupe de `from` : texte sans ses lignes vides finales, encre.
+      const mine = (this.bodyText(from.page)?.content ?? "").replace(/(?:\n[ \t\u200b]*)+$/, "");
+      this.setFlowText(from, mine);
+      this.fitSheet(from);
+      const k = (from.sheet.clientWidth || PAGE_W) / PAGE_W;
+      let textBottom = 0;
+      for (const it of measureRows(from.doc.root, from.sheet.getBoundingClientRect().top, k).items) {
+        const [nd] = it.start();
+        if (nd.nodeType === Node.TEXT_NODE && !(nd.textContent ?? "").replace(/\u200b/g, "").trim()) continue;
+        textBottom = Math.max(textBottom, it.bottom);
+      }
+      const rows = (y: number) => (y > TEXT_TOP + 0.5 ? rowAt(y - 0.5) + 1 : 0);
+      const textRows = rows(textBottom);
+      const used = Math.max(textRows, rows(inkExtent(from.page.blocks)));
+      // La suite : sans ses lignes vides de tete si rien n'est cale dessus.
+      let theirs = this.bodyText(next)?.content ?? "";
+      const strokes = next.blocks.flatMap((b) => (b.type === "ink" || b.type === "math" ? b.strokes.map((x) => x.id) : []));
+      const placed = next.blocks.filter((b) => b.type !== "text" && "rect" in b && b.rect);
+      if (!strokes.length && !placed.length) theirs = theirs.replace(/^(?:[ \t\u200b]*\n)+/, "");
+      const joint = mine ? "\n".repeat(used - textRows) + "\n" : "\n".repeat(used);
+      const text = mine + (caretAtJoin ? CARET_MARK : "") + joint + theirs;
+      const mainInk = next.blocks.find((b) => b.type === "ink" && !("rect" in b && b.rect));
+      moveFlowBlocks(next, from.page, {
+        strokeIds: mainInk && mainInk.type === "ink" ? mainInk.strokes.map((x) => x.id) : [],
+        zoneIds: placed.filter((b) => b.type !== "flag").map((b) => b.id),
+        flagIds: placed.filter((b) => b.type === "flag").map((b) => b.id),
+        // Photos et blocs vivants du texte (et photos orphelines : rien ne se perd).
+        blockIds: next.blocks.filter((b) => b.type !== "text" && b.type !== "ink" && !("rect" in b && b.rect)).map((b) => b.id),
+      }, used * LINE, 0, uuid);
+      // La page de suite part a la corbeille (ESEO/.corbeille).
+      const nextId = next.id;
+      await this.serial(async () => {
+        await this.host.repo.deletePage(this.notebook, this.divider, n);
+        this.dropSlot(n);
+        for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === nextId)) {
+          p.dead = true;
+          p.number = 0;
+          this.pendingSave.delete(p.page.id);
+          this.history.drop(p.page.id);
+        }
+        this.shiftNumbers(n + 1, -1);
+      });
+      this.total--;
+      if (shownNext && this.list.includes(shownNext)) {
+        this.releasePage(shownNext);
+        const sep = shownNext.wrap.previousElementSibling;
+        if (sep?.classList.contains("page-sep")) sep.remove();
+        shownNext.wrap.remove();
+        this.list.splice(this.list.indexOf(shownNext), 1);
+      }
+      // La page d'apres suivait la page remontee : elle suit maintenant `from`.
+      if (n <= this.total) {
+        const after = this.list.find((p) => p.number === n && !p.dead && !p.copy);
+        if (after?.page.continues === nextId) { after.page.continues = from.page.id; this.queueSave(after); }
+        else if (!after) {
+          const pg = await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, n)).catch(() => null);
+          if (pg?.continues === nextId) {
+            pg.continues = from.page.id;
+            await this.serial(() => this.host.repo.writePage(this.notebook, this.divider, n, pg));
+          }
+        }
+      }
+      this.setFlowText(from, text);
+      this.repaintFlowed(from);
+      this.queueSave(from);
+      this.host.onPageChange?.(this.current, this.total);
+      this.host.onDirty();
+      pulled = true;
+    } catch (e) {
+      toast(`Page suivante impossible à remonter : ${errorText(e)}`, "err", 6000);
+    } finally {
+      this.flowing = false;
+      this.releaseKeys();
+    }
+    if (!pulled) return false;
+    // Photos chargees, mesures justes : ce qui depasse repart sur la page suivante.
+    await from.doc.imagesReady().catch(() => undefined);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    if (from.dead) return true;
+    this.fitSheet(from);
+    from.editedAt = performance.now();
+    this.maybeFlow(from, "force");
+    return true;
+  }
+
+  /**
+   * « Tasser les pages » : depuis la page courante, chaque page remonte ses
+   * suites tant qu'il reste de la place. Les pages ajoutees a la main (sans
+   * `continues`) ne bougent jamais.
+   */
+  async compactPages(): Promise<void> {
+    if (this.locked()) return;
+    const start = this.current;
+    let n = start, pulled = 0, guard = 0;
+    while (n <= this.total && guard++ < 200) {
+      if (this.viewMode === "pages") await this.goTo(n, false);
+      else this.revealPage(n);
+      await new Promise((r) => setTimeout(r, 60));
+      const p = this.list.find((x) => x.number === n && !x.dead && !x.copy);
+      if (!p) { n++; continue; }
+      if (!p.settled) await this.settle(p);
+      if (await this.pullNext(p)) {
+        pulled++;
+        // Le debordement qui suit peut prendre un moment.
+        for (let i = 0; i < 50 && this.flowing; i++) await new Promise((r) => setTimeout(r, 40));
+      }
+      n++;
+    }
+    if (this.viewMode === "pages") await this.goTo(start);
+    toast(pulled ? `Pages tassées : ${pulled} suite${pulled > 1 ? "s" : ""} remontée${pulled > 1 ? "s" : ""}` : "Rien à tasser : aucune page de suite n'a de place libre avant elle.");
   }
 
   /** Touches retenues pendant un debordement asynchrone (rejouees ensuite). */
