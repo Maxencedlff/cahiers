@@ -38,10 +38,26 @@ export function snapLines(root: HTMLElement, all = false): boolean {
     eq.dataset.snap = "1";
   }
   const line = LINE * (fontPx / TEXT_FONT);
+  // h : hauteur reelle (offsetHeight est arrondi, l'ecart d'un demi-pixel
+  // suffisait a laisser une ligne a cote de la plus haute des deux).
+  const want = new Map<HTMLElement, { top: number; bottom: number; h: number }>();
   for (const fig of root.querySelectorAll<HTMLElement>(":scope > .doc-img, .dl > .doc-img")) {
     const h = fig.offsetHeight;
-    if (!h) continue;
-    const m = blockMargins(h, line);
+    if (h) want.set(fig, { ...blockMargins(h, line), h: fig.getBoundingClientRect().height });
+  }
+  // Photo calee a gauche et sa voisine (style.css) : bas alignes sur la
+  // plus haute, sinon le texte qui suit se glissait dans l'ecart de
+  // quelques pixels sous la plus courte. Hauts deja alignes (meme ligne).
+  for (const [a, ma] of want) {
+    if (!a.classList.contains("side")) continue;
+    const b = a.nextElementSibling;
+    const mb = b instanceof HTMLElement && b.matches(".doc-img:not(.side)") ? want.get(b) : undefined;
+    if (!mb) continue;
+    const ea = ma.top + ma.h + ma.bottom, eb = mb.top + mb.h + mb.bottom;
+    // Arrondi par exces : le bas le plus court ne doit jamais rester au-dessus.
+    if (ea < eb) ma.bottom += eb - ea + 0.01; else mb.bottom += ea - eb + 0.01;
+  }
+  for (const [fig, m] of want) {
     const top = `${m.top.toFixed(2)}px`, bottom = `${m.bottom.toFixed(2)}px`;
     if (fig.style.marginTop !== top || fig.style.marginBottom !== bottom) {
       fig.style.marginTop = top;

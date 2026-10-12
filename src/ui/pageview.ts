@@ -1268,7 +1268,15 @@ export class PageView {
           width: b.width ?? Math.min(PAGE_W - 128, 640),
           ocr: b.ocr,
           original: !!b.original,
+          side: !!b.side,
         };
+      },
+      sided: (id, side) => {
+        const b = imageOf(id);
+        if (!b) return;
+        if (side) b.side = true; else delete b.side;
+        this.fitSheet(loaded);
+        this.queueSave(loaded);
       },
       recrop: (id) => void this.recropImage(loaded, id),
       resized: (id, width) => {

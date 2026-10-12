@@ -156,6 +156,11 @@ export interface ImageBlock extends BlockBase {
    */
   width?: number;
   /**
+   * Calee a gauche : ce qui la suit (texte, autre photo) passe a sa droite,
+   * comme l'habillage « carre » de Word. Absent = seule sur sa ligne.
+   */
+  side?: boolean;
+  /**
    * Photo d'origine, avant redressement (D9) : JPEG dans assets/. Jamais
    * jetee, dans l'esprit de « l'encre brute n'est jamais jetee » : des coins
    * mal places ou un noir et blanc qui bouche tout se refont depuis elle.

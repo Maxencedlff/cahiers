@@ -67,9 +67,13 @@ export interface DocImages {
     url: Promise<string>; width: number; ocr: string | null;
     /** Original garde (D9) : « Redresser a nouveau » possible. */
     original?: boolean;
+    /** Calee a gauche, la suite passe a cote (ImageBlock.side). */
+    side?: boolean;
   } | null;
   /** Largeur choisie a la poignee, en unites de page. */
   resized: (id: string, width: number) => void;
+  /** Photo calee a gauche (true) ou rendue a sa ligne (false). */
+  sided?: (id: string, side: boolean) => void;
   /**
    * Image collee (capture Win+Maj+S) ou deposee depuis l'Explorateur :
    * enregistree telle quelle, sans recadrage. Rend l'id du bloc cree, ou
@@ -116,6 +120,11 @@ function fitPageHeight(fig: HTMLElement, img: HTMLImageElement): void {
   if (!w || !h) return;
   fig.style.maxWidth = `calc(${((BLOCK_MAX_H * w) / h).toFixed(1)}px * var(--k, 1))`;
 }
+
+/** Largeur du texte (feuille moins les marges), en unites de page. */
+const TEXT_W = 772;
+/** Ecart entre une photo calee a gauche et ce qui passe a cote. */
+const SIDE_GAP = 16;
 
 /** Fichier image d'un presse-papiers ou d'un depot, s'il y en a un. */
 export function imageFiles(dt: DataTransfer | null): File[] {
@@ -877,6 +886,7 @@ export class TextDoc {
       dataset: { id }, title: info?.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour déplacer",
     }, img, grip);
     fig.style.setProperty("--w", String(info?.width ?? 640));
+    if (info?.side) fig.classList.add("side");
     if (info) {
       // Image decodee avant de la dire prete : l'export PDF mesure les
       // hauteurs apres (en Tauri, le src n'arrive qu'apres l'IPC).
@@ -999,9 +1009,15 @@ export class TextDoc {
     const recrop = this.images?.recrop && this.images.lookup(id)?.original
       ? button("⟲", "Redresser à nouveau (coins, noir et blanc)", () => { this.selectImage(null); this.images?.recrop?.(id); })
       : null;
+    const side = this.images?.sided && !fig.dataset.live
+      ? button("◧", fig.classList.contains("side")
+        ? "Remettre seule sur sa ligne (C)"
+        : "Mettre à côté : la photo ou le texte qui suit passe à droite (C)", () => this.toggleSide(fig))
+      : null;
     fig.append(el("span", { class: "doc-img-bar" },
       button("↑", "Monter d'une ligne", () => this.moveImage(fig, -1)),
       button("↓", "Descendre d'une ligne", () => this.moveImage(fig, 1)),
+      side,
       recrop,
       button("✕", fig.dataset.live ? "Retirer ce bloc de la page" : "Retirer la photo", () => this.removeImage(fig)),
     ));
@@ -1167,6 +1183,38 @@ export class TextDoc {
     liftToRoot(r, this.root, dir);
     r.insertNode(fig);
     this.afterMove(fig);
+  }
+
+  /**
+   * Photo calee a gauche (habillage « carre » de Word) : la photo ou le
+   * texte qui suit passe a sa droite. Trop large pour laisser de la place,
+   * elle est ramenee a une demi-ligne, et la photo suivante a ce qui reste.
+   * Un second appui la rend a sa ligne, a la taille qu'elle a alors.
+   */
+  private toggleSide(fig: HTMLElement): void {
+    const id = fig.dataset.id ?? "";
+    if (!id || fig.dataset.live) return;
+    const side = !fig.classList.contains("side");
+    fig.classList.toggle("side", side);
+    if (side) {
+      const w = Number(fig.style.getPropertyValue("--w")) || 640;
+      const mine = Math.min(w, Math.floor((TEXT_W - SIDE_GAP) / 2));
+      if (mine !== w) { fig.style.setProperty("--w", String(mine)); this.images?.resized(id, mine); }
+      // Photo juste derriere (son ancre sautee) : elle doit tenir a cote.
+      let next = fig.nextSibling;
+      while (next && next.nodeType === Node.TEXT_NODE && !(next.textContent ?? "").replace(/\u200b/g, "").trim()) next = next.nextSibling;
+      if (next instanceof HTMLElement && next.classList.contains("doc-img") && !next.dataset.live && !next.classList.contains("side")) {
+        // 2 unites de jeu : au pixel pres, l'arrondi la renvoyait dessous.
+        const room = TEXT_W - mine - SIDE_GAP - 2;
+        const nw = Number(next.style.getPropertyValue("--w")) || 640;
+        if (nw > room) { next.style.setProperty("--w", String(room)); this.images?.resized(next.dataset.id ?? "", room); }
+      }
+    }
+    this.images?.sided?.(id, side);
+    // Barre refaite : l'infobulle du bouton suit l'etat.
+    this.selectImage(null);
+    this.selectImage(fig);
+    this.emit();
   }
 
   private afterMove(fig: HTMLElement): void {
@@ -2848,6 +2896,11 @@ export class TextDoc {
     if (this.selectedImg && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
       const fig = this.selectedImg;
       if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); this.removeImage(fig); return; }
+      if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey && !fig.dataset.live) {
+        e.preventDefault();
+        this.toggleSide(fig);
+        return;
+      }
       this.selectImage(null);
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return; }
     }
