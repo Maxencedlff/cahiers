@@ -69,9 +69,14 @@ export interface DocImages {
     original?: boolean;
     /** Calee a gauche, la suite passe a cote (ImageBlock.side). */
     side?: boolean;
+    /** Hauteur etiree (ImageBlock.height), absente = proportions d'origine. */
+    height?: number;
   } | null;
-  /** Largeur choisie a la poignee, en unites de page. */
-  resized: (id: string, width: number) => void;
+  /**
+   * Taille choisie aux poignees, en unites de page. `height` : nombre =
+   * photo etiree, null = proportions d'origine rendues, absent = inchangee.
+   */
+  resized: (id: string, width: number, height?: number | null) => void;
   /** Photo calee a gauche (true) ou rendue a sa ligne (false). */
   sided?: (id: string, side: boolean) => void;
   /**
@@ -117,7 +122,8 @@ export interface DocLinkRef { href: string; hint?: string; label: string }
  */
 function fitPageHeight(fig: HTMLElement, img: HTMLImageElement): void {
   const { naturalWidth: w, naturalHeight: h } = img;
-  if (!w || !h) return;
+  // Photo etiree : sa hauteur est deja bornee aux poignees.
+  if (!w || !h || fig.classList.contains("stretched")) { fig.style.maxWidth = ""; return; }
   fig.style.maxWidth = `calc(${((BLOCK_MAX_H * w) / h).toFixed(1)}px * var(--k, 1))`;
 }
 
@@ -125,6 +131,12 @@ function fitPageHeight(fig: HTMLElement, img: HTMLImageElement): void {
 const TEXT_W = 772;
 /** Ecart entre une photo calee a gauche et ce qui passe a cote. */
 const SIDE_GAP = 16;
+/** Poignees d'une photo, dans l'ordre de Word (coins et milieux des cotes). */
+const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
+type Handle = (typeof HANDLES)[number];
+/** Plus petite photo aux poignees, en unites de page. */
+const MIN_W = 60;
+const MIN_H = 40;
 
 /** Fichier image d'un presse-papiers ou d'un depot, s'il y en a un. */
 export function imageFiles(dt: DataTransfer | null): File[] {
@@ -880,12 +892,19 @@ export class TextDoc {
     if (live) return this.makeLive(id, live);
     const info = this.images?.lookup(id) ?? null;
     const img = el("img", { alt: "photo", draggable: "false" });
-    const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
+    // Huit poignees comme dans Word : coins = proportions gardees, cotes =
+    // etirer en largeur ou en hauteur seulement.
+    const grips = HANDLES.map((d) => el("span", {
+      class: `doc-img-grip h-${d}`,
+      title: d.length === 2 ? "Glisser pour agrandir ou réduire (double-clic : proportions d'origine)"
+        : "Glisser pour étirer (double-clic : proportions d'origine)",
+    }));
     const fig = el("span", {
       class: "doc-img", contenteditable: "false",
       dataset: { id }, title: info?.ocr ? `Texte lu : ${info.ocr}` : "Glisser pour déplacer",
-    }, img, grip);
+    }, img, ...grips);
     fig.style.setProperty("--w", String(info?.width ?? 640));
+    if (info?.height) { fig.classList.add("stretched"); fig.style.setProperty("--h", String(info.height)); }
     if (info?.side) fig.classList.add("side");
     if (info) {
       // Image decodee avant de la dire prete : l'export PDF mesure les
@@ -898,8 +917,82 @@ export class TextDoc {
       fig.classList.add("missing");
     }
     fig.addEventListener("pointerdown", (e) => this.onImageDown(e, fig));
-    this.gripResize(id, fig, grip);
+    grips.forEach((g, i) => this.photoResize(id, fig, img, g, HANDLES[i]));
     return fig;
+  }
+
+  /**
+   * Poignee d'une photo, a la souris, au stylet ou au doigt. Coin : la
+   * photo grandit en gardant sa forme du moment. Cote gauche/droit : seule
+   * la largeur change ; haut/bas : seule la hauteur (photo etiree, comme
+   * dans Word). Double-clic : proportions d'origine rendues.
+   */
+  private photoResize(id: string, fig: HTMLElement, img: HTMLImageElement, grip: HTMLElement, dir: Handle): void {
+    grip.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!fig.classList.contains("stretched")) return;
+      fig.classList.remove("stretched");
+      fig.style.removeProperty("--h");
+      fitPageHeight(fig, img);
+      this.images?.resized(id, Number(fig.style.getPropertyValue("--w")) || 640, null);
+    });
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      grip.setPointerCapture(e.pointerId);
+      const k = Number(getComputedStyle(this.root).getPropertyValue("--k")) || 1;
+      const x0 = e.clientX, y0 = e.clientY;
+      // Taille affichee (une photo peut etre bornee par la largeur du texte).
+      const box = img.getBoundingClientRect();
+      const startW = box.width / k || Number(fig.style.getPropertyValue("--w")) || 640;
+      const startH = box.height / k || startW * 0.75;
+      const wasStretched = fig.classList.contains("stretched");
+      const sx = dir.includes("w") ? -1 : dir.includes("e") ? 1 : 0;
+      const sy = dir.includes("n") ? -1 : dir.includes("s") ? 1 : 0;
+      let w = startW, h: number | undefined = wasStretched ? startH : undefined;
+      const move = (m: PointerEvent) => {
+        if (m.pointerId !== e.pointerId) return;
+        const dx = (m.clientX - x0) / k, dy = (m.clientY - y0) / k;
+        if (sx && sy) {
+          // Coin : le plus grand des deux deplacements, forme gardee.
+          const byX = startW + sx * dx, byY = (startH + sy * dy) * (startW / startH);
+          let nw = Math.abs(byX - startW) >= Math.abs(byY - startW) ? byX : byY;
+          nw = Math.max(MIN_W, Math.min(TEXT_W, nw, BLOCK_MAX_H * (startW / startH)));
+          w = nw;
+          h = wasStretched ? (startH * nw) / startW : undefined;
+        } else if (sx) {
+          w = Math.max(MIN_W, Math.min(TEXT_W, startW + sx * dx));
+          h = startH;
+        } else {
+          w = startW;
+          h = Math.max(MIN_H, Math.min(BLOCK_MAX_H, startH + sy * dy));
+        }
+        w = Math.round(w);
+        if (h !== undefined) h = Math.round(h);
+        fig.style.setProperty("--w", String(w));
+        if (h === undefined) {
+          fig.classList.remove("stretched");
+          fig.style.removeProperty("--h");
+        } else {
+          fig.classList.add("stretched");
+          fig.style.maxWidth = "";
+          fig.style.setProperty("--h", String(h));
+        }
+      };
+      const up = (u: PointerEvent) => {
+        if (u.pointerId !== e.pointerId) return;
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        grip.removeEventListener("pointercancel", up);
+        if (w === startW && h === (wasStretched ? startH : undefined)) return;
+        this.images?.resized(id, w, h ?? (wasStretched ? null : undefined));
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
+    });
   }
 
   /**
@@ -915,7 +1008,7 @@ export class TextDoc {
     }, live.node);
     if (live.width !== undefined) {
       fig.style.setProperty("--w", String(live.width));
-      const grip = el("span", { class: "doc-img-grip", title: "Glisser pour retailler" });
+      const grip = el("span", { class: "doc-img-grip h-se", title: "Glisser pour retailler" });
       fig.append(grip);
       this.gripResize(id, fig, grip);
     }
@@ -1199,7 +1292,7 @@ export class TextDoc {
     if (side) {
       const w = Number(fig.style.getPropertyValue("--w")) || 640;
       const mine = Math.min(w, Math.floor((TEXT_W - SIDE_GAP) / 2));
-      if (mine !== w) { fig.style.setProperty("--w", String(mine)); this.images?.resized(id, mine); }
+      if (mine !== w) this.shrinkTo(fig, mine);
       // Photo juste derriere (son ancre sautee) : elle doit tenir a cote.
       let next = fig.nextSibling;
       while (next && next.nodeType === Node.TEXT_NODE && !(next.textContent ?? "").replace(/\u200b/g, "").trim()) next = next.nextSibling;
@@ -1207,7 +1300,7 @@ export class TextDoc {
         // 2 unites de jeu : au pixel pres, l'arrondi la renvoyait dessous.
         const room = TEXT_W - mine - SIDE_GAP - 2;
         const nw = Number(next.style.getPropertyValue("--w")) || 640;
-        if (nw > room) { next.style.setProperty("--w", String(room)); this.images?.resized(next.dataset.id ?? "", room); }
+        if (nw > room) this.shrinkTo(next, room);
       }
     }
     this.images?.sided?.(id, side);
@@ -1215,6 +1308,18 @@ export class TextDoc {
     this.selectImage(null);
     this.selectImage(fig);
     this.emit();
+  }
+
+  /** Photo ramenee a `w` de large ; etiree, sa hauteur suit (meme forme). */
+  private shrinkTo(fig: HTMLElement, w: number): void {
+    const old = Number(fig.style.getPropertyValue("--w")) || 640;
+    fig.style.setProperty("--w", String(w));
+    let h: number | undefined;
+    if (fig.classList.contains("stretched")) {
+      h = Math.round(((Number(fig.style.getPropertyValue("--h")) || 0) * w) / old);
+      fig.style.setProperty("--h", String(h));
+    }
+    this.images?.resized(fig.dataset.id ?? "", w, h);
   }
 
   private afterMove(fig: HTMLElement): void {

@@ -1057,11 +1057,24 @@ kbd {
 /* Poignee de retaille : 22 px visibles, 44 px de prise (section 3), pour
    la souris, le stylet et le doigt. Visible au survol ou photo selectionnee. */
 .text-doc .doc-img-grip {
-  position: absolute; right: 2px; bottom: 2px; width: 22px; height: 22px;
-  border-radius: 5px; background: #fff; border: 2px solid var(--accent);
-  cursor: nwse-resize; opacity: 0; touch-action: none;
+  position: absolute; width: 16px; height: 16px; margin: -8px;
+  border-radius: 4px; background: #fff; border: 2px solid var(--accent);
+  cursor: nwse-resize; opacity: 0; touch-action: none; z-index: 2;
 }
-.text-doc .doc-img-grip::before { content: ""; position: absolute; inset: -12px; }
+/* Huit poignees facon Word, a cheval sur le bord de la photo. */
+.text-doc .doc-img-grip.h-nw { left: 0; top: 0; }
+.text-doc .doc-img-grip.h-n  { left: 50%; top: 0; cursor: ns-resize; }
+.text-doc .doc-img-grip.h-ne { left: 100%; top: 0; cursor: nesw-resize; }
+.text-doc .doc-img-grip.h-e  { left: 100%; top: 50%; cursor: ew-resize; }
+.text-doc .doc-img-grip.h-se { left: 100%; top: 100%; }
+.text-doc .doc-img-grip.h-s  { left: 50%; top: 100%; cursor: ns-resize; }
+.text-doc .doc-img-grip.h-sw { left: 0; top: 100%; cursor: nesw-resize; }
+.text-doc .doc-img-grip.h-w  { left: 0; top: 50%; cursor: ew-resize; }
+/* Courbe : sa seule poignee reste dans le coin, comme avant. */
+.text-doc .doc-img.live .doc-img-grip.h-se { left: auto; top: auto; right: 2px; bottom: 2px; margin: 0; }
+/* Photo etiree : la hauteur choisie, l'image deformee pour la remplir. */
+.text-doc .doc-img.stretched img { height: calc(var(--h, 300) * 1px * var(--k, 1)); object-fit: fill; }
+.text-doc .doc-img-grip::before { content: ""; position: absolute; inset: -14px; }
 .text-doc .doc-img:hover .doc-img-grip, .text-doc .doc-img.selected .doc-img-grip { opacity: 1; }
 /* Mini-barre d'une photo selectionnee : monter, descendre, retirer. */
 .text-doc .doc-img-bar {

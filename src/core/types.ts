@@ -161,6 +161,12 @@ export interface ImageBlock extends BlockBase {
    */
   side?: boolean;
   /**
+   * Hauteur en unites de page quand la photo a ete etiree par une poignee
+   * de cote (elle ne garde plus ses proportions). Absent = proportions
+   * d'origine, la hauteur suit la largeur.
+   */
+  height?: number;
+  /**
    * Photo d'origine, avant redressement (D9) : JPEG dans assets/. Jamais
    * jetee, dans l'esprit de « l'encre brute n'est jamais jetee » : des coins
    * mal places ou un noir et blanc qui bouche tout se refont depuis elle.

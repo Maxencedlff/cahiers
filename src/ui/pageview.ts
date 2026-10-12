@@ -1269,6 +1269,7 @@ export class PageView {
           ocr: b.ocr,
           original: !!b.original,
           side: !!b.side,
+          ...(b.height ? { height: b.height } : {}),
         };
       },
       sided: (id, side) => {
@@ -1279,12 +1280,17 @@ export class PageView {
         this.queueSave(loaded);
       },
       recrop: (id) => void this.recropImage(loaded, id),
-      resized: (id, width) => {
+      resized: (id, width, height) => {
         const b = imageOf(id) ?? liveOf(id);
         if (!b || b.type === "calc") return;
         b.width = width;
+        if (b.type === "image" && height !== undefined) {
+          if (height === null) delete b.height; else b.height = height;
+        }
         // Courbe retaillee : redessinee a sa nouvelle largeur (texte net).
         if (b.type === "graph") loaded.doc.refreshLive(id);
+        // Hauteur de la feuille et place laissee a cote d'une photo calee.
+        this.fitSheet(loaded);
         this.queueSave(loaded);
       },
       addFile: (file) => this.addImageFile(loaded, file),

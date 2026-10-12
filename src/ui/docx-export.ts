@@ -238,7 +238,8 @@ async function photoImage(repo: Repo, notebook: string, divider: string, b: Imag
     const img = await loadImg(url);
     if (!img.naturalWidth || !img.naturalHeight) return null;
     const w = Math.min(b.width ?? PHOTO_W, TEXT_W);
-    const size = fitBox(w, (w * img.naturalHeight) / img.naturalWidth);
+    // Photo etiree aux poignees : sa forme de la page, pas celle du fichier.
+    const size = fitBox(w, b.height ? (b.height * w) / (b.width ?? PHOTO_W) : (w * img.naturalHeight) / img.naturalWidth);
     const m = /^data:([^;,]+);base64,(.*)$/s.exec(url);
     const mime = m?.[1] ?? "";
     if (m && (mime === "image/jpeg" || mime === "image/png")) {
