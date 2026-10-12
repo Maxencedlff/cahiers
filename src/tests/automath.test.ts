@@ -11,6 +11,24 @@ const one = (line: string) => {
 };
 
 describe("formules automatiques", () => {
+  it("valeur moyenne <x>T dans le texte", () => {
+    expect(one("iLmoy = <ic(t)>T + <iR(t)>T").tex)
+      .toBe("i_{Lmoy} = \\left\\langle i_c\\left(t\\right) \\right\\rangle_{T} + \\left\\langle i_R\\left(t\\right) \\right\\rangle_{T}");
+    expect(one("<iL(t)>=0").tex).toBe("\\left\\langle i_L\\left(t\\right) \\right\\rangle = 0");
+    expect(one("0 < x < 1").tex).toBe("0 < x < 1");
+  });
+
+  it("formule validee (MathLive) : indices et valeur moyenne", () => {
+    expect(subscriptVars("\\begin{cases}<ic(t)>T=0\\\\ <iL(t)\\ge0\\end{cases}"))
+      .toBe("\\begin{cases}\\left\\langle i_{c}(t)\\right\\rangle_{T}=0\\\\ \\left\\langle i_{L}(t)\\right\\rangle=0\\end{cases}");
+    expect(subscriptVars("ILmoy=VCC/R")).toBe("I_{Lmoy}=V_{CC}/R");
+    // Saut de ligne puis "<" : le systeme reste entier.
+    expect(cleanMathLive("\\begin{cases}a=0\\\\ <iL(t)\\ge0\\end{cases}")).toBe("\\begin{cases}a=0\\\\<iL(t)\\ge0\\end{cases}");
+    expect(subscriptVars("\\tau=RC")).toBe("\\tau=RC");
+    expect(subscriptVars("0<x<1")).toBe("0<x<1");
+    expect(subscriptVars("a\\ge b")).toBe("a\\ge b");
+  });
+
   it("intervalles, bornes a indice", () => {
     expect(one("[0, ton[").tex).toBe("\\left[ 0,\\,t_{on} \\right[");
     expect(one("[ILmin, ILmax]").tex).toBe("\\left[ I_{Lmin},\\,I_{Lmax} \\right]");

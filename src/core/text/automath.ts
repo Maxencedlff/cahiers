@@ -696,6 +696,7 @@ class Parser {
       return { tex: identTex(t.s), ops: 0, vars: 1 };
     }
     if (t.t === "other" && (t.s === "[" || t.s === "]")) return this.interval();
+    if (t.t === "op" && t.s === "<") return this.mean();
     if (t.t === "op" && t.s === "(") {
       const m = this.matrix();
       if (m) return m;
@@ -713,6 +714,38 @@ class Parser {
       return { tex: `\\left(${inner.tex}\\right)`, group: inner.tex, ops: inner.ops, vars: inner.vars };
     }
     return null;
+  }
+
+  /**
+   * Valeur moyenne : "<ic(t)>T", "<iL(t)>_T", "<iL(t)> = 0", en debut de
+   * terme (atom n'est jamais appele sur le "<" d'une relation "x < y").
+   * ">=" colle a la fermeture : ">" puis "=", rendu a la relation.
+   */
+  private mean(): Node | null {
+    const save = this.i, seen = this.seenOp;
+    const fail = () => { this.i = save; this.seenOp = seen; return null; };
+    this.i++;
+    const inner = this.sum();
+    if (!inner || inner.vars < 1) return fail();
+    this.skipSp();
+    const close = this.toks[this.i];
+    if (close?.t !== "op" || (close.s !== ">" && close.s !== ">=")) return fail();
+    let tex = `\\left\\langle ${inner.tex} \\right\\rangle`;
+    if (close.s === ">=") {
+      // Le "=" reste a lire : la relation le prendra.
+      this.toks[this.i] = { t: "op", s: "=", a: close.a + 1, b: close.b };
+    } else {
+      this.i++;
+      const n = this.toks[this.i];
+      if (n?.t === "id" && /^[A-Z]\d?$/.test(n.s)) { this.i++; tex += `_{${n.s}}`; }
+      else if (n?.s === "_") {
+        this.i++;
+        const sub = this.script();
+        if (sub === null) this.i--; else tex += `_{${sub}}`;
+      }
+    }
+    this.seenOp = true;
+    return { tex, ops: inner.ops + 1, vars: inner.vars };
   }
 
   /**
@@ -964,6 +997,7 @@ const ROMAN_UNITS = new Set(["Hz", "Ohm", "Pa", "Wh", "Ko", "Mo", "Go"]);
  * contenu de \mathrm{}, \text{} ne sont pas touches.
  */
 export function subscriptVars(latex: string): string {
+  latex = meanValues(latex);
   const protectedRe = /\\(?:mathrm|text|operatorname|mathbb)\{[^}]*\}|\\[A-Za-z]+/g;
   let out = "", last = 0, m: RegExpExecArray | null;
   const fix = (part: string) => part
@@ -971,6 +1005,16 @@ export function subscriptVars(latex: string): string {
     .replace(
       /(?<![A-Za-z_^{])(j[RLC]{1,3}w?|jw|[RLC]*[LC][RLC]*w)(?![A-Za-z0-9_])/g,
       (_all, word: string) => imagTex(word),
+    )
+    // Courants et tensions a indice : ic, iL, vs, iLmoy (i_c, i_L) ; IL,
+    // VCC, ILmoy (I_L, V_CC). Jamais RC ou LC (des produits).
+    .replace(
+      /(^|[^A-Za-z_^])(?<![_^]\{)([iuv])([A-Z][A-Za-z0-9]{0,4}|[cesdgbr]|be|ce|cc|ch|in|out|ref|max|min|moy|eff|batt|bat)(?![A-Za-z_])/g,
+      (_all, pre: string, head: string, rest: string) => `${pre}${head}_{${rest}}`,
+    )
+    .replace(
+      /(^|[^A-Za-z_^])(?<![_^]\{)([IUV])([A-Z][A-Za-z0-9]{0,4})(?![A-Za-z_])/g,
+      (_all, pre: string, head: string, rest: string) => `${pre}${head}_{${rest}}`,
     )
     // Pas devant "_" : "Cu_{c}" est C fois u_c, et C_{u}_{c} serait un
     // double indice (formule en rouge).
@@ -991,6 +1035,25 @@ export function subscriptVars(latex: string): string {
     last = m.index + m[0].length;
   }
   return out + fix(latex.slice(last));
+}
+
+/**
+ * Valeur moyenne tapee dans une formule : "<ic(t)>T" -> ⟨ic(t)⟩_T. Le "<"
+ * ouvre un terme (debut, apres =, +, -, une case) ; MathLive lit ">=" comme
+ * \ge : derriere un "<" ouvert, c'est la fermeture puis "=". Une lettre
+ * majuscule collee derriere (T) ou un indice tape devient l'indice.
+ */
+function meanValues(latex: string): string {
+  return latex.replace(
+    /(^|[=+\-&{(,]|\\\\|\\[,;:]|\\quad|\\begin\{[a-z]+\*?\})(\s*)<(?![=<])\s*((?:[^<>&\\]|\\[A-Za-z]+\s*|\\[,;])+?)\s*(>|\\geq?(?![A-Za-z]))(?:_\{([^{}]*)\}|_([A-Za-z0-9])|([A-Z0-9])(?![A-Za-z]))?/g,
+    (all, pre: string, sp: string, inner: string, close: string, subB?: string, subC?: string, subL?: string) => {
+      if (!inner.trim() || /[<>]/.test(inner)) return all;
+      // ">=0" : le 0 suit le "=", ce n'est pas un indice.
+      if (close !== ">") return `${pre}${sp}\\left\\langle ${inner.trim()}\\right\\rangle=${subB !== undefined ? `_{${subB}}` : subC !== undefined ? `_${subC}` : subL ?? ""}`;
+      const sub = subB ?? subC ?? subL;
+      return `${pre}${sp}\\left\\langle ${inner.trim()}\\right\\rangle${sub ? `_{${sub}}` : ""}`;
+    },
+  );
 }
 
 /**
@@ -1128,7 +1191,9 @@ export function cleanMathLive(latex: string): string {
     if (next === s) break;
     s = next;
   }
-  const SP = "(?:\\\\[;:, ]|\\\\quad|\\s)";
+  // Espace LaTeX ("\\,", "\\ "), jamais le second "\\" d'un saut de
+  // ligne de systeme ("\\\\ <x" perdait un antislash : systeme casse).
+  const SP = "(?:(?<!\\\\)\\\\[;:, ]|\\\\quad|\\s)";
   // "x in R" : les lettres i, n entre deux espaces (pas V_{in}, ni "min").
   s = s.replace(new RegExp(`(^|${SP})in(?=${SP}|$)`, "g"), "$1\\in");
   // Espaces tapes autour d'une relation : KaTeX espace deja.
