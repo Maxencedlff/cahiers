@@ -71,7 +71,19 @@ export interface DocImages {
     side?: boolean;
     /** Hauteur etiree (ImageBlock.height), absente = proportions d'origine. */
     height?: number;
+    /** Place sur la ligne (ImageBlock.align / x). */
+    align?: PhotoAlign;
+    x?: number;
   } | null;
+  /** Photo centree, a droite, ou decalee de `x` (rien : a gauche). */
+  placed?: (id: string, place: PhotoPlace) => void;
+  /**
+   * Ctrl+C / Ctrl+X sur une photo : la page la garde pour un Ctrl+V
+   * ailleurs. Rend le texte a mettre dans le presse-papiers (marqueur).
+   */
+  clip?: (id: string) => string | null;
+  /** Ctrl+V d'une photo copiee : bloc cree dans cette page, son id (null : rien). */
+  pasteClip?: (marker: string) => Promise<string | null>;
   /**
    * Taille choisie aux poignees, en unites de page. `height` : nombre =
    * photo etiree, null = proportions d'origine rendues, absent = inchangee.
@@ -127,10 +139,36 @@ function fitPageHeight(fig: HTMLElement, img: HTMLImageElement): void {
   fig.style.maxWidth = `calc(${((BLOCK_MAX_H * w) / h).toFixed(1)}px * var(--k, 1))`;
 }
 
+/** Pose l'alignement ou le decalage d'une photo (style.css : al-*, --x). */
+function applyPlace(fig: HTMLElement, place: PhotoPlace): void {
+  fig.classList.toggle("al-center", place.align === "center");
+  fig.classList.toggle("al-right", place.align === "right");
+  if (!place.align && place.x) fig.style.setProperty("--x", String(place.x));
+  else fig.style.removeProperty("--x");
+}
+
+/** Place actuelle d'une photo, lue sur l'element. */
+function placeOf(fig: HTMLElement): PhotoPlace {
+  if (fig.classList.contains("al-center")) return { align: "center" };
+  if (fig.classList.contains("al-right")) return { align: "right" };
+  const x = Number(fig.style.getPropertyValue("--x")) || 0;
+  return x ? { x } : {};
+}
+
 /** Largeur du texte (feuille moins les marges), en unites de page. */
 const TEXT_W = 772;
 /** Ecart entre une photo calee a gauche et ce qui passe a cote. */
 const SIDE_GAP = 16;
+/** Alignement d'une photo seule sur sa ligne (absent = a gauche). */
+export type PhotoAlign = "center" | "right";
+/** Place d'une photo sur sa ligne : alignee, ou decalee de `x` unites. */
+export interface PhotoPlace { align?: PhotoAlign; x?: number }
+/** Texte du presse-papiers d'une photo copiee dans Cahiers. */
+const PHOTO_CLIP = /^\[photo Cahiers [0-9a-f-]{8,}\]$/;
+/** Pas des fleches sur une photo selectionnee (Maj : pas fin), unites de page. */
+const NUDGE = 17;
+const NUDGE_FINE = 4;
+
 /** Poignees d'une photo, dans l'ordre de Word (coins et milieux des cotes). */
 const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 type Handle = (typeof HANDLES)[number];
@@ -438,6 +476,20 @@ export class TextDoc {
       if (this.field) return;
       e.preventDefault();
       const dt = e.clipboardData;
+      // Photo copiee ou coupee dans Cahiers (Ctrl+C / Ctrl+X sur la photo).
+      const clipText = (dt?.getData("text/plain") ?? "").trim();
+      if (PHOTO_CLIP.test(clipText) && this.images?.pasteClip) {
+        const sel = document.getSelection();
+        const r = sel?.rangeCount && this.root.contains(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0).cloneRange() : null;
+        if (r) liftToRoot(r, this.root, 1);
+        void this.images.pasteClip(clipText).then((id) => {
+          if (!id || !this.root.isConnected) return;
+          const fig = this.insertImage(id, r && this.root.contains(r.startContainer) ? r : null);
+          this.caretAfter(fig);
+          fig.scrollIntoView({ block: "nearest" });
+        });
+        return;
+      }
       // Capture d'ecran (Win+Maj+S) : une image seule, posee au curseur.
       // Un copier depuis Word amene aussi une image du passage : le texte
       // passe alors avant.
@@ -906,6 +958,7 @@ export class TextDoc {
     fig.style.setProperty("--w", String(info?.width ?? 640));
     if (info?.height) { fig.classList.add("stretched"); fig.style.setProperty("--h", String(info.height)); }
     if (info?.side) fig.classList.add("side");
+    applyPlace(fig, { align: info?.align, x: info?.x });
     if (info) {
       // Image decodee avant de la dire prete : l'export PDF mesure les
       // hauteurs apres (en Tauri, le src n'arrive qu'apres l'IPC).
@@ -1107,9 +1160,16 @@ export class TextDoc {
         ? "Remettre seule sur sa ligne (C)"
         : "Mettre à côté : la photo ou le texte qui suit passe à droite (C)", () => this.toggleSide(fig))
       : null;
+    const cur = placeOf(fig).align ?? "left";
+    const align = !fig.dataset.live && !fig.classList.contains("side")
+      ? button(cur === "center" ? "⇔" : cur === "right" ? "⇥" : "⇤",
+        `Alignée ${cur === "center" ? "au centre" : cur === "right" ? "à droite" : "à gauche"} : appuyer pour changer (← → décalent, Ctrl+X puis Ctrl+V : autre page)`,
+        () => this.cycleAlign(fig))
+      : null;
     fig.append(el("span", { class: "doc-img-bar" },
       button("↑", "Monter d'une ligne", () => this.moveImage(fig, -1)),
       button("↓", "Descendre d'une ligne", () => this.moveImage(fig, 1)),
+      align,
       side,
       recrop,
       button("✕", fig.dataset.live ? "Retirer ce bloc de la page" : "Retirer la photo", () => this.removeImage(fig)),
@@ -1147,6 +1207,11 @@ export class TextDoc {
     e.preventDefault();
     let moving = false;
     let target: Range | null = null;
+    // Glisser de cote en restant a hauteur de la photo : elle se decale sur
+    // sa ligne au lieu de changer de place dans le texte.
+    const band = fig.getBoundingClientRect();
+    const sideways = !fig.dataset.live && !fig.classList.contains("side");
+    let shift = false;
     const move = (m: PointerEvent) => {
       if (m.pointerId !== e.pointerId) return;
       if (!moving) {
@@ -1157,6 +1222,14 @@ export class TextDoc {
         // Plus de cible sous le pointeur : le texte en dessous se lit.
         fig.style.pointerEvents = "none";
       }
+      shift = sideways && m.clientY >= band.top && m.clientY <= band.bottom;
+      if (shift) {
+        fig.style.translate = `${Math.round(m.clientX - x0)}px 0`;
+        target = null;
+        this.showDropMarker(null);
+        return;
+      }
+      fig.style.translate = "";
       target = this.dropRangeAt(m.clientX, m.clientY, fig);
       this.showDropMarker(target);
     };
@@ -1166,9 +1239,17 @@ export class TextDoc {
       window.removeEventListener("pointerup", up, true);
       window.removeEventListener("pointercancel", up, true);
       fig.style.pointerEvents = "";
+      fig.style.translate = "";
       fig.classList.remove("dragging");
       this.showDropMarker(null);
       if (!moving) { if (u.type === "pointerup") this.tapImage(fig); return; }
+      if (shift) {
+        if (u.type === "pointerup") {
+          const k = Number(getComputedStyle(this.root).getPropertyValue("--k")) || 1;
+          this.nudge(fig, (u.clientX - x0) / k);
+        }
+        return;
+      }
       if (u.type !== "pointerup" || !target) return;
       this.placeImage(fig, target);
     };
@@ -1310,6 +1391,31 @@ export class TextDoc {
     this.emit();
   }
 
+  /** Change la place d'une photo et la rend a la page. */
+  private setPlace(fig: HTMLElement, place: PhotoPlace): void {
+    applyPlace(fig, place);
+    this.images?.placed?.(fig.dataset.id ?? "", place);
+    if (fig === this.selectedImg) { this.selectImage(null); this.selectImage(fig); }
+  }
+
+  /** Bouton d'alignement : gauche, centre, droite, gauche... */
+  private cycleAlign(fig: HTMLElement): void {
+    const cur = placeOf(fig).align;
+    this.setPlace(fig, cur === undefined ? { align: "center" } : cur === "center" ? { align: "right" } : {});
+  }
+
+  /** Decale une photo de `dx` unites (fleches, glisser de cote), dans la largeur du texte. */
+  private nudge(fig: HTMLElement, dx: number): void {
+    if (fig.classList.contains("side") || fig.dataset.live) return;
+    const k = Number(getComputedStyle(this.root).getPropertyValue("--k")) || 1;
+    const cs = getComputedStyle(this.root);
+    const left = this.root.getBoundingClientRect().left + (parseFloat(cs.paddingLeft) || 0);
+    const box = fig.getBoundingClientRect();
+    const max = Math.max(0, TEXT_W - box.width / k);
+    const x = Math.round(Math.max(0, Math.min(max, (box.left - left) / k + dx)));
+    this.setPlace(fig, x ? { x } : {});
+  }
+
   /** Photo ramenee a `w` de large ; etiree, sa hauteur suit (meme forme). */
   private shrinkTo(fig: HTMLElement, w: number): void {
     const old = Number(fig.style.getPropertyValue("--w")) || 640;
@@ -1334,8 +1440,20 @@ export class TextDoc {
     this.emit();
   }
 
+  /**
+   * Ctrl+C / Ctrl+X sur une photo : gardee pour un Ctrl+V sur une autre
+   * page (ou un autre cahier). Couper la retire d'ici, avec « Annuler ».
+   */
+  private clipImage(fig: HTMLElement, cut: boolean): void {
+    const marker = this.images?.clip?.(fig.dataset.id ?? "");
+    if (!marker) return;
+    void navigator.clipboard?.writeText(marker).catch(() => undefined);
+    if (cut) this.removeImage(fig, "Photo coupée : Ctrl+V pour la coller (autre page, autre cahier)");
+    else toast("Photo copiée : Ctrl+V pour la coller (autre page, autre cahier)");
+  }
+
   /** Retire la photo du texte, avec « Annuler » (le fichier reste dans assets/). */
-  private removeImage(fig: HTMLElement): void {
+  private removeImage(fig: HTMLElement, message?: string): void {
     this.selectImage(null);
     const parent = fig.parentNode;
     if (!parent) return;
@@ -1346,7 +1464,7 @@ export class TextDoc {
     anchorNode?.remove();
     this.emit();
     const label = fig.dataset.live ? this.images?.live?.(fig.dataset.id ?? "")?.label ?? "Bloc" : "Photo";
-    const what = `${label} ${/e$/.test(label) ? "retirée" : "retiré"}`;
+    const what = message ?? `${label} ${/e$/.test(label) ? "retirée" : "retiré"}`;
     toast(what, "info", 8000, {
       label: "Annuler",
       run: () => {
@@ -3001,6 +3119,20 @@ export class TextDoc {
     if (this.selectedImg && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
       const fig = this.selectedImg;
       if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); this.removeImage(fig); return; }
+      const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
+      if (ctrl && !fig.dataset.live && (e.key.toLowerCase() === "x" || e.key.toLowerCase() === "c")) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.clipImage(fig, e.key.toLowerCase() === "x");
+        return;
+      }
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !ctrl && !e.altKey
+        && !fig.dataset.live && !fig.classList.contains("side")) {
+        e.preventDefault();
+        const step = e.shiftKey ? NUDGE_FINE : NUDGE;
+        this.nudge(fig, e.key === "ArrowLeft" ? -step : step);
+        return;
+      }
       if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey && !fig.dataset.live) {
         e.preventDefault();
         this.toggleSide(fig);

@@ -276,6 +276,13 @@ interface Slot {
 const sizeMemo = new SizeMemo();
 
 /**
+ * Photo copiee ou coupee (Ctrl+C / Ctrl+X sur la photo), partagee par les
+ * vues (split) : le presse-papiers systeme ne porte qu'un marqueur, le
+ * bloc et l'intercalaire d'ou il vient restent ici.
+ */
+let photoClip: { block: ImageBlock; notebook: string; divider: string; marker: string } | null = null;
+
+/**
  * Vue d'un intercalaire. La page reste l'unite de base dans les deux modes
  * (section 5) : en defilement les pages sont simplement empilees, separees
  * par un trait discret, et gardent leur numero.
@@ -1270,8 +1277,25 @@ export class PageView {
           original: !!b.original,
           side: !!b.side,
           ...(b.height ? { height: b.height } : {}),
+          ...(b.align ? { align: b.align } : {}),
+          ...(b.x ? { x: b.x } : {}),
         };
       },
+      placed: (id, place) => {
+        const b = imageOf(id);
+        if (!b) return;
+        if (place.align) b.align = place.align; else delete b.align;
+        if (!place.align && place.x) b.x = place.x; else delete b.x;
+        this.queueSave(loaded);
+      },
+      clip: (id) => {
+        const b = imageOf(id);
+        if (!b) return null;
+        const marker = `[photo Cahiers ${uuid()}]`;
+        photoClip = { block: JSON.parse(JSON.stringify(b)) as ImageBlock, notebook: this.notebook, divider: this.divider, marker };
+        return marker;
+      },
+      pasteClip: (marker) => this.pastePhoto(loaded, marker),
       sided: (id, side) => {
         const b = imageOf(id);
         if (!b) return;
@@ -3570,6 +3594,37 @@ export class PageView {
     loaded.page.blocks.splice(i, 1);
     this.paintOverlay(loaded);
     this.queueSave(loaded);
+  }
+
+  /**
+   * Ctrl+V d'une photo copiee ou coupee (DocImages.clip) : nouveau bloc dans
+   * cette page. Autre intercalaire : la photo et son original sont copies
+   * dans ses assets/ (un intercalaire ne lit jamais les fichiers d'un autre).
+   */
+  private async pastePhoto(loaded: LoadedPage, marker: string): Promise<string | null> {
+    const clip = photoClip;
+    if (!clip || clip.marker !== marker) { toast("Cette photo n'est plus dans le presse-papiers : copie-la à nouveau.", "warn"); return null; }
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return null; }
+    const block: ImageBlock = { ...JSON.parse(JSON.stringify(clip.block)) as ImageBlock, id: uuid() };
+    if (clip.notebook !== this.notebook || clip.divider !== this.divider) {
+      const copy = async (src: string) => {
+        const url = await this.host.repo.readAsset(clip.notebook, clip.divider, src);
+        return this.host.repo.writeAsset(this.notebook, this.divider, src.split("/").pop() ?? src, url);
+      };
+      try {
+        block.src = await copy(block.src);
+      } catch (e) {
+        toast(`Photo non collée : ${(e as Error).message}`, "err", 6000);
+        return null;
+      }
+      if (block.original) {
+        try { block.original = await copy(block.original); } catch { delete block.original; delete block.quad; }
+      }
+    }
+    // Calee a cote d'une autre la-bas : seule sur sa ligne ici.
+    delete block.side;
+    loaded.page.blocks.push(block);
+    return block.id;
   }
 
   /**

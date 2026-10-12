@@ -167,6 +167,13 @@ export interface ImageBlock extends BlockBase {
    */
   height?: number;
   /**
+   * Place sur sa ligne : centree ou a droite (absent = a gauche), ou
+   * decalee de `x` unites de page depuis la marge gauche. Ignores pour une
+   * photo calee a gauche (side).
+   */
+  align?: "center" | "right";
+  x?: number;
+  /**
    * Photo d'origine, avant redressement (D9) : JPEG dans assets/. Jamais
    * jetee, dans l'esprit de « l'encre brute n'est jamais jetee » : des coins
    * mal places ou un noir et blanc qui bouche tout se refont depuis elle.

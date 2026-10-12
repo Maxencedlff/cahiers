@@ -1043,6 +1043,13 @@ kbd {
    est un bloc a contexte propre (flow-root) : elle se range a cote si elle
    tient, sinon dessous, sans jamais passer sous la photo calee. */
 .text-doc .doc-img { display: flow-root; }
+/* Place sur la ligne : centree, a droite, ou decalee (--x, jamais hors du texte). */
+.text-doc .doc-img {
+  margin-left: clamp(0px, calc(var(--x, 0) * 1px * var(--k, 1)), calc(100% - min(100%, var(--w, 640) * 1px * var(--k, 1))));
+}
+.text-doc .doc-img.al-center { margin-left: auto; margin-right: auto; }
+.text-doc .doc-img.al-right { margin-left: auto; margin-right: 0; }
+.text-doc .doc-img.side { margin-left: 0; }
 .text-doc .doc-img.side { float: left; margin-right: calc(16px * var(--k, 1)); }
 /* Photo juste derriere une photo calee (seule l'ancre les separe) : elle se
    cale aussi, le texte qui suit passe sous la plus haute des deux au lieu

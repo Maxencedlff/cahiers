@@ -69,6 +69,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("k", true, "review", "Réviser : tous les théorèmes, définitions… d'une matière, par couleur ; export PDF", "Pendant le cours"),
   { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   { keys: "C", label: "Photo sélectionnée : la mettre à côté (la photo ou le texte qui suit passe à droite)", group: "Pendant le cours" },
+  { keys: "← →", label: "Photo sélectionnée : la décaler (Maj : pas fin) ; bouton ⇤ : gauche, centre, droite", group: "Pendant le cours" },
+  { keys: "Ctrl+X, Ctrl+V", label: "Photo sélectionnée : la couper puis la coller sur une autre page (Ctrl+C : la copier)", group: "Pendant le cours" },
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),
   {
     keys: "Échap",
