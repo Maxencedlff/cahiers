@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  absorbTextBoxes, docClipboardLines, docClipboardText, docImageIds, pastedMath, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
+  absorbTextBoxes, docClipboardLines, frenchSpaceAtEnd, docClipboardText, docImageIds, pastedMath, docPlainText, normalizeTokens, parseDoc, serializeDoc, texToPlain,
   trailingOperand,
   type DocToken,
 } from "../core/text/doc";
@@ -44,6 +44,34 @@ describe("texte de page au clavier", () => {
     ];
     expect(serializeDoc(t)).toBe("**Theoreme** de *Rolle*");
     expect(round(t)).toEqual(t);
+  });
+
+  it("code : chasse fixe, ni formule ni gras a l'interieur", () => {
+    const t: DocToken[] = [
+      { kind: "text", text: "lancer " },
+      { kind: "text", text: "rsync -a --delete $HOME/*.log `x` \\", code: true },
+      { kind: "text", text: " puis " },
+      { kind: "text", text: "rw-r--r--", code: true, bold: true },
+    ];
+    expect(serializeDoc(t)).toBe("lancer `rsync -a --delete $HOME/*.log \\`x\\` \\\\` puis **`rw-r--r--`**");
+    expect(round(t)).toEqual(t);
+  });
+
+  it("un ` seul ou un ` tape dans le texte reste du texte", () => {
+    expect(parseDoc("l`apostrophe\nsuite`")).toEqual([
+      { kind: "text", text: "l`apostrophe" }, { kind: "br" }, { kind: "text", text: "suite`" },
+    ]);
+    const t: DocToken[] = [{ kind: "text", text: "a ` b ` c" }];
+    expect(serializeDoc(t)).toBe("a \\` b \\` c");
+    expect(round(t)).toEqual(t);
+  });
+
+  it("espace fine insecable devant : ; ? ! tapes apres une espace", () => {
+    expect(frenchSpaceAtEnd("On a :")).toBe("On a\u202f:");
+    expect(frenchSpaceAtEnd("Pourquoi ?")).toBe("Pourquoi\u202f?");
+    expect(frenchSpaceAtEnd("http:")).toBeNull();
+    expect(frenchSpaceAtEnd(" :")).toBeNull();
+    expect(frenchSpaceAtEnd("a\n :")).toBeNull();
   });
 
   it("un $ isole reste du texte", () => {

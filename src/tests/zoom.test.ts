@@ -173,8 +173,9 @@ describe("fonds de page (D12)", () => {
     const small = paperLines("millimetre", whole, 1 / 3);
     expect(small.map((l) => l.weight)).toEqual(["main", "strong"]);
     expect(MM / 3).toBeLessThan(MIN_GAP_PX);
-    // Seyes reduit : l'interligne part, les grands carreaux restent.
-    expect(paperLines("seyes", whole, 0.4).map((l) => l.weight)).toEqual(["main", "margin"]);
+    // Seyes reduit : l'interligne part, les grands carreaux restent (lignes
+    // d'ecriture fortes, verticales fines).
+    expect(paperLines("seyes", whole, 0.4).map((l) => l.weight)).toEqual(["main", "fine", "margin"]);
     // Au zoom, tout reste.
     expect(paperLines("millimetre", whole, 2).length).toBe(3);
   });

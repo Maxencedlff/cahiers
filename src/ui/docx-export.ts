@@ -13,7 +13,7 @@ import { paintStroke } from "./review";
 import { PAGE_W } from "../core/ink/sheet";
 import { GRAPH_RATIO, graphWidth } from "../core/liveblock";
 import { texToPlain } from "../core/text/doc";
-import { TEXT_SIDE } from "../core/textlayout";
+import { TEXT_LEFT, TEXT_RIGHT } from "../core/textlayout";
 import type { Bounds } from "../core/ink/stroke";
 import type { Block, CalcBlock, GraphBlock, ImageBlock, Page, Stroke } from "../core/types";
 import type { ReviewItem, ReviewResult } from "../core/review";
@@ -34,7 +34,7 @@ const MAX_H_EMU = 230 * EMU_PER_MM;
 /** Largeur d'une photo sans largeur notee (textdoc.ts, --w). */
 const PHOTO_W = 640;
 /** Largeur du texte de l'appli, en unites de page. */
-const TEXT_W = PAGE_W - 2 * TEXT_SIDE;
+const TEXT_W = PAGE_W - TEXT_LEFT - TEXT_RIGHT;
 
 /** Une page a exporter, avec son texte a l'ecran s'il y est (mesure des lignes). */
 export interface DocxPage {

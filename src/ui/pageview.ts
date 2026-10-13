@@ -38,7 +38,7 @@ import {
 import { TextDoc } from "./textdoc";
 import { buildBacklinks, type PageLinks } from "./linkpicker";
 import { snapLines } from "./linesnap";
-import { LINE, TEXT_TOP, clearOfInk, rowAt, rowBottom, type InkBox } from "../core/textlayout";
+import { LINE, TEXT_LEFT, TEXT_RIGHT, TEXT_TOP, clearOfInk, rowAt, rowBottom, type InkBox } from "../core/textlayout";
 import { absorbTextBoxes } from "../core/text/doc";
 import { flagContext, fold, parseQuery } from "../core/text/find";
 import { DEFAULT_FLAG_NOTE } from "../core/storage/search";
@@ -474,6 +474,8 @@ export class PageView {
     // Defilement par defaut ; « Pages » seulement si choisi pour cet intercalaire.
     this.viewMode = meta.viewMode?.[this.divider] ?? "scroll";
     this.paperKind = paperOf(meta.paper, this.divider);
+    // Couleur du cahier : titres principaux du texte tape (style.css, --nb).
+    if (meta.color) this.root.style.setProperty("--nb", meta.color);
     const nums = await this.host.repo.listPageNumbers(this.notebook, this.divider);
     if (nums.length === 0) {
       // Dossier range en sous-dossiers (E3A/S1/Chapitre 1) : aucune page n'y
@@ -1273,7 +1275,7 @@ export class PageView {
         if (!b) return null;
         return {
           url: this.host.repo.readAsset(this.notebook, this.divider, b.src),
-          width: b.width ?? Math.min(PAGE_W - 128, 640),
+          width: b.width ?? Math.min(PAGE_W - TEXT_LEFT - TEXT_RIGHT, 640),
           ocr: b.ocr,
           original: !!b.original,
           side: !!b.side,
@@ -1630,7 +1632,7 @@ export class PageView {
     loaded.overlay.style.display = "none";
     for (const b of floating) {
       const r = b.rect!;
-      if (b.type === "image") b.width = Math.max(120, Math.min(PAGE_W - 128, Math.round(r.w)));
+      if (b.type === "image") b.width = Math.max(120, Math.min(PAGE_W - TEXT_LEFT - TEXT_RIGHT, Math.round(r.w)));
       if (b.type === "graph") b.width = graphWidth(b, PAGE_W);
       delete b.rect;
       loaded.doc.adoptImage(b.id, sheet.left + 70 * k, sheet.top + (r.y + 4) * k);
@@ -3825,7 +3827,8 @@ export class PageView {
     // dessous, comme une image dans Word.
     loaded.page.blocks.push({
       // Une petite image n'est pas etiree.
-      id, type: "image", ...fields, width: Math.max(120, Math.min(PAGE_W - 128, 640, result.width)),
+      // Pleine largeur du texte au plus, centree.
+      id, type: "image", align: "center", ...fields, width: Math.max(120, Math.min(PAGE_W - TEXT_LEFT - TEXT_RIGHT, result.width)),
     });
     loaded.doc.insertImage(id);
     this.fitSheet(loaded);
@@ -3916,7 +3919,7 @@ export class PageView {
     // page) : une petite capture n'est pas etiree.
     const width = img.naturalWidth / (window.devicePixelRatio || 1);
     loaded.page.blocks.push({
-      id, type: "image", ...fields, width: Math.round(Math.max(120, Math.min(PAGE_W - 128, 640, width))),
+      id, type: "image", align: "center", ...fields, width: Math.round(Math.max(120, Math.min(PAGE_W - TEXT_LEFT - TEXT_RIGHT, width))),
     });
     const pageId = loaded.page.id;
     const ocr = this.host.ocr;
@@ -4395,6 +4398,7 @@ export class PageView {
     const nextSibling = this.root.nextSibling;
     const prevTitle = document.title;
     const host = el("div", { class: "print-host" });
+    host.style.setProperty("--nb", this.root.style.getPropertyValue("--nb"));
     document.body.append(host);
     /** Tranches d'encre a liberer apres l'impression. */
     const urls: string[] = [];

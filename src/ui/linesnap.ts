@@ -46,7 +46,7 @@ export function snapLines(root: HTMLElement, all = false): boolean {
   const want = new Map<HTMLElement, { top: number; bottom: number; h: number }>();
   for (const fig of root.querySelectorAll<HTMLElement>(":scope > .doc-img, .dl > .doc-img")) {
     const h = fig.offsetHeight;
-    if (h) want.set(fig, { ...blockMargins(h, line), h: fig.getBoundingClientRect().height });
+    if (h) want.set(fig, { ...blockMargins(h, line, 0.25, ghostAfter(fig)), h: fig.getBoundingClientRect().height });
   }
   // Photo calee a gauche et sa voisine (style.css) : bas alignes sur la
   // plus haute, sinon le texte qui suit se glissait dans l'ecart de
@@ -87,6 +87,19 @@ export function snapLines(root: HTMLElement, all = false): boolean {
     }
   }
   return changed;
+}
+
+/**
+ * Photo (non calee) suivie d'une ligne sans texte : le caractere invisible
+ * qui porte le curseur apres elle (textdoc.ts, anchor), puis un saut de
+ * ligne, une autre photo, une ligne de titre/liste ou la fin du texte.
+ */
+function ghostAfter(fig: HTMLElement): boolean {
+  if (fig.classList.contains("side")) return false;
+  const a = fig.nextSibling;
+  if (!(a instanceof Text) || a.data.replace(/\u200b/g, "")) return false;
+  const b = a.nextSibling;
+  return !b || b.nodeName === "BR" || (b instanceof HTMLElement && (b.classList.contains("doc-img") || b.classList.contains("dl")));
 }
 
 /**

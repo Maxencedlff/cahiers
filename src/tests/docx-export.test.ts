@@ -164,12 +164,12 @@ describe("document Word", () => {
     expect(parts.get("word/_rels/document.xml.rels")).toContain("media/image1.png");
   });
 
-  it("A4, marges normales, fr-FR, Calibri, styles de titres", () => {
+  it("A4, marges normales, fr-FR, Cambria, styles de titres", () => {
     expect(body).toContain("<w:pgSz w:w=\"11906\" w:h=\"16838\"/>");
     expect(body).toContain("w:left=\"1417\"");
     const styles = parts.get("word/styles.xml")!;
     expect(styles).toContain("<w:lang w:val=\"fr-FR\"");
-    expect(styles).toContain("w:ascii=\"Calibri\"");
+    expect(styles).toContain("w:ascii=\"Cambria\"");
     expect(styles).toContain("<w:name w:val=\"heading 1\"/>");
     expect(styles).toContain("<w:outlineLvl w:val=\"0\"/>");
     expect(parts.get("word/settings.xml")).toContain("<m:mathFont m:val=\"Cambria Math\"/>");

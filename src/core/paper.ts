@@ -106,7 +106,10 @@ export function paperLines(kind: PaperKind, zone: Zone, k = 1): PaperLines[] {
       // de 8 mm, une marge.
       if (shows(2)) add("fine", [], ticks(2 * MM, y0, y1, 4));
       const marginIn = SEYES_MARGIN >= x0 && SEYES_MARGIN <= x1;
-      add("main", ticks(8 * MM, x0, x1).filter((x) => Math.abs(x - SEYES_MARGIN) > 0.01), ticks(8 * MM, y0, y1));
+      // Verticales du carreau en trait fin : pas d'effet damier, la ligne
+      // d'ecriture reste le seul repere fort.
+      add("main", [], ticks(8 * MM, y0, y1));
+      add("fine", ticks(8 * MM, x0, x1).filter((x) => Math.abs(x - SEYES_MARGIN) > 0.01), []);
       if (marginIn) add("margin", [SEYES_MARGIN], []);
       break;
     }

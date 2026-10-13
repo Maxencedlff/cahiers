@@ -5,7 +5,7 @@ import { askText, el, toast } from "./dom";
 import { inkCssColor } from "../core/theme";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardLines, docClipboardText, pastedMath, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
+  docClipboardLines, docClipboardText, frenchSpaceAtEnd, pastedMath, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
   texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
@@ -15,7 +15,8 @@ import {
 } from "../core/text/automath";
 import { recordLatex } from "../core/symbols";
 import { appAltKey } from "../core/templates";
-import { linesToReach } from "../core/textlayout";
+import { linesToReach, TEXT_LEFT, TEXT_RIGHT } from "../core/textlayout";
+import { PAGE_W } from "../core/ink/sheet";
 import { BLOCK_MAX_H } from "../core/paginate";
 import { cleanHint, linkUrl, parseLinkMarkdown, pagePathOf, type LinkCandidate } from "../core/links";
 import { pickLink } from "./linkpicker";
@@ -156,7 +157,7 @@ function placeOf(fig: HTMLElement): PhotoPlace {
 }
 
 /** Largeur du texte (feuille moins les marges), en unites de page. */
-const TEXT_W = 772;
+const TEXT_W = PAGE_W - TEXT_LEFT - TEXT_RIGHT;
 /** Ecart entre une photo calee a gauche et ce qui passe a cote. */
 const SIDE_GAP = 16;
 /** Alignement d'une photo seule sur sa ligne (absent = a gauche). */
@@ -505,6 +506,12 @@ export class TextDoc {
         if (this.lastAuto.expectSpace && ie.inputType === "insertText" && ie.data === " ") this.lastAuto.expectSpace = false;
         else this.lastAuto = null;
       }
+      // Espace fine insecable devant : ; ? ! (hors code et formule).
+      if (!this.field && ie.inputType === "insertText" && ie.data && ":;?!".includes(ie.data)) {
+        this.replaceBeforeCaret(frenchSpaceAtEnd);
+      }
+      // `commande` : le texte entre les deux ` passe en chasse fixe.
+      if (!this.field && ie.inputType === "insertText" && ie.data === "`" && this.autoCode()) { this.emit(); return; }
       // Symbole a deux touches remplace tout de suite ("->" -> →), puis
       // la formule se met en forme apres une courte pause de frappe.
       if (autoMath && !this.field && ie.inputType === "insertText") {
@@ -695,6 +702,7 @@ export class TextDoc {
         into.appendChild(anchor());
       } else {
         let node: Node = document.createTextNode(t.text);
+        if (t.code) node = el("code", {}, node);
         if (t.italic) node = el("i", {}, node);
         if (t.bold) node = el("b", {}, node);
         if (t.color) node = colorSpan(t.color, node);
@@ -716,14 +724,14 @@ export class TextDoc {
   /** Jetons d'un morceau de texte (la page, ou une copie de la selection). */
   private readNodes(root: Node, base: { bold: boolean; italic: boolean; color?: ColorKey } = { bold: false, italic: false }): DocToken[] {
     const out: DocToken[] = [];
-    const walk = (node: Node, bold: boolean, italic: boolean, color?: ColorKey) => {
+    const walk = (node: Node, bold: boolean, italic: boolean, color?: ColorKey, code = false) => {
       // Dernier <br> d'un bloc de ligne : il la garde visible quand elle est vide.
       const placeholder = isLine(node) ? lastContent(node) : null;
       for (const child of Array.from(node.childNodes)) {
         if (child === placeholder && child.nodeName === "BR") continue;
         if (child.nodeType === Node.TEXT_NODE) {
           const text = (child.textContent ?? "").replace(/\u00a0/g, " ").replace(/\u200b/g, "");
-          out.push({ kind: "text", text, bold, italic, color });
+          out.push({ kind: "text", text, bold, italic, color, ...(code ? { code } : {}) });
           continue;
         }
         if (child instanceof MathfieldElement) {
@@ -746,14 +754,14 @@ export class TextDoc {
         }
         if (child.classList.contains("tc")) {
           const c = child.dataset.c;
-          walk(child, bold, italic, c && c !== "none" ? c as ColorKey : undefined);
+          walk(child, bold, italic, c && c !== "none" ? c as ColorKey : undefined, code);
           continue;
         }
         if (isLine(child)) {
           // Titre, puce ou numero : sa propre ligne, finie par le bloc.
           if (!endsLine(out)) out.push({ kind: "br" });
           out.push({ kind: "line", ...lineFormatOfEl(child as HTMLElement) });
-          walk(child, bold, italic, color);
+          walk(child, bold, italic, color, code);
           out.push({ kind: "br" });
           continue;
         }
@@ -764,7 +772,7 @@ export class TextDoc {
         if (block && out.length && out[out.length - 1].kind !== "br") out.push({ kind: "br" });
         const b = bold || tag === "B" || tag === "STRONG" || Number(child.style.fontWeight) >= 600;
         const i = italic || tag === "I" || tag === "EM" || child.style.fontStyle === "italic";
-        walk(child, b, i, color);
+        walk(child, b, i, color, code || tag === "CODE");
       }
     };
     walk(root, base.bold, base.italic, base.color);
@@ -1221,7 +1229,7 @@ export class TextDoc {
       const startW = Number(fig.style.getPropertyValue("--w")) || 640;
       const move = (m: PointerEvent) => {
         if (m.pointerId !== e.pointerId) return;
-        const w = Math.round(Math.max(120, Math.min(772, startW + (m.clientX - startX) / k)));
+        const w = Math.round(Math.max(120, Math.min(TEXT_W, startW + (m.clientX - startX) / k)));
         fig.style.setProperty("--w", String(w));
       };
       const up = (u: PointerEvent) => {
@@ -2576,6 +2584,8 @@ export class TextDoc {
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    // Dans une commande (`code`) : "->" ou "pi" restent tels quels.
+    if (node.parentElement?.closest("code")) return false;
     const text = node.textContent ?? "";
     const before = text.slice(0, r.startOffset);
     const next = fn(before);
@@ -2599,6 +2609,32 @@ export class TextDoc {
       sel.removeAllRanges();
       sel.addRange(caret);
     }
+    return true;
+  }
+
+  /**
+   * ` qui ferme un ` tape plus tot sur la meme ligne (meme noeud de texte) :
+   * le texte entre les deux devient du code (chasse fixe, jamais converti en
+   * formule), les deux ` disparaissent, le curseur repart apres, hors du code.
+   */
+  private autoCode(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (!(node instanceof Text) || !this.root.contains(node)) return false;
+    if (node.parentElement?.closest(".eq, code")) return false;
+    const text = node.data, end = r.startOffset - 1;
+    if (text[end] !== "`") return false;
+    const open = text.lastIndexOf("`", end - 1);
+    if (open < 0 || text.slice(open, end).includes("\n")) return false;
+    const inner = text.slice(open + 1, end);
+    if (!inner.replace(/\u200b/g, "").trim()) return false;
+    const tail = document.createTextNode("\u200b" + text.slice(end + 1));
+    const code = el("code", {}, inner);
+    node.data = text.slice(0, open);
+    node.after(code, tail);
+    sel.collapse(tail, 1);
     return true;
   }
 
@@ -2678,7 +2714,7 @@ export class TextDoc {
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return [];
-    if (node.parentElement?.closest(".eq, .raw")) return [];
+    if (node.parentElement?.closest(".eq, .raw, code")) return [];
     const after = (node.textContent ?? "").slice(r.startOffset);
     // Curseur au milieu d'un mot ("Vatt" corrige en "Vbatt") : on attend.
     if (/^[\p{L}\p{N}]/u.test(after.replace(/^\u200b+/, ""))) return [];
@@ -2774,7 +2810,7 @@ export class TextDoc {
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
     if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
-    if (node.parentElement?.closest(".eq, .raw")) return false;
+    if (node.parentElement?.closest(".eq, .raw, code")) return false;
     const after = (node.textContent ?? "").slice(r.startOffset);
     if (/^[\p{L}\p{N}]/u.test(after.replace(/^\u200b+/, ""))) return false;
 
@@ -2990,7 +3026,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
     if (!this.root.contains(r.startContainer)) return false;
-    if (r.startContainer.parentElement?.closest(".eq, .raw")) return false;
+    if (r.startContainer.parentElement?.closest(".eq, .raw, code")) return false;
     const inLine = closestLine(r.startContainer, this.root);
     if (inLine) return this.listToHeading(inLine, r);
     const start = lineStart(this.root, r);

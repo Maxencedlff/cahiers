@@ -5,7 +5,7 @@
  * images PNG/JPEG en ligne. Logique pure, sans DOM ni dependance : le XML
  * est ecrit a la main et empaquete par zip.ts.
  *
- * Page A4, marges normales (2,5 cm), Calibri 11 pt, equations en Cambria
+ * Page A4, marges normales (2,5 cm), Cambria 11 pt (serif proche de la police de l'appli), equations en Cambria
  * Math, langue fr-FR declaree (correction orthographique de Word). Les
  * titres utilisent les styles integres « heading 1-3 » : Word les affiche
  * « Titre 1-3 » et les montre dans le volet de navigation.
@@ -26,7 +26,7 @@ export interface DxImage {
 }
 
 export type DxRun =
-  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; color?: string; size?: number; highlight?: string; underline?: boolean }
+  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean; color?: string; size?: number; highlight?: string; underline?: boolean }
   | { kind: "math"; latex: string; color?: string }
   | { kind: "image"; image: DxImage }
   | { kind: "br" };
@@ -149,7 +149,9 @@ class Builder {
   }
 
   private text(r: Extract<DxRun, { kind: "text" }>, para: DxPara): string {
-    const pr = (r.bold ? "<w:b/><w:bCs/>" : "") + (r.italic ? "<w:i/><w:iCs/>" : "")
+    // Code (commande, chemin) : chasse fixe, comme dans l'appli.
+    const pr = (r.code ? "<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>" : "")
+      + (r.bold ? "<w:b/><w:bCs/>" : "") + (r.italic ? "<w:i/><w:iCs/>" : "")
       + (r.color ? `<w:color w:val="${r.color}"/>` : para.caption ? "<w:color w:val=\"6B7280\"/>" : "")
       + (r.size ? `<w:sz w:val="${r.size}"/><w:szCs w:val="${r.size}"/>` : para.caption ? "<w:sz w:val=\"18\"/><w:szCs w:val=\"18\"/>" : "")
       + (r.underline ? "<w:u w:val=\"single\"/>" : "")
@@ -207,16 +209,16 @@ function stylesXml(): string {
   const heading = (n: number, size: number, color: string, before: number) =>
     `<w:style w:type="paragraph" w:styleId="Heading${n}"><w:name w:val="heading ${n}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="9"/><w:qFormat/>`
     + `<w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="${before}" w:after="80"/><w:outlineLvl w:val="${n - 1}"/></w:pPr>`
-    + `<w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi" w:ascii="Calibri Light" w:hAnsi="Calibri Light"/><w:color w:val="${color}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr></w:style>`;
+    + `<w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria"/><w:color w:val="${color}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr></w:style>`;
   return `${XML_HEAD}<w:styles xmlns:w="${NS.w}">`
-    + `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>`
+    + `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Cambria" w:eastAsia="Cambria" w:hAnsi="Cambria" w:cs="Cambria"/>`
     + `<w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="fr-FR" w:eastAsia="en-US" w:bidi="ar-SA"/></w:rPr></w:rPrDefault>`
     + `<w:pPrDefault><w:pPr><w:spacing w:after="80" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>`
     + `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>`
     + heading(1, 32, "2F5496", 240) + heading(2, 26, "2F5496", 200) + heading(3, 24, "1F3763", 160)
     + `<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="34"/><w:qFormat/><w:pPr><w:spacing w:after="40"/><w:contextualSpacing/></w:pPr></w:style>`
     + `<w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="caption"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="35"/><w:qFormat/><w:pPr><w:spacing w:after="120"/></w:pPr><w:rPr><w:i/><w:color w:val="6B7280"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:style>`
-    + `<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="10"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light"/><w:sz w:val="48"/><w:szCs w:val="48"/></w:rPr></w:style>`
+    + `<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="10"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria"/><w:sz w:val="48"/><w:szCs w:val="48"/></w:rPr></w:style>`
     + `</w:styles>`;
 }
 

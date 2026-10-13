@@ -17,8 +17,11 @@
 import { MM } from "./paper";
 import { PAGE_W } from "./ink/sheet";
 
-/** Corps du texte, unites de page (style.css : 21px * --k). */
-export const TEXT_FONT = 21;
+/**
+ * Corps du texte, unites de page (style.css : 18px * --k) : environ 11,5 pt
+ * imprime, le corps d'une copie soignee sur l'interligne Seyes de 8 mm.
+ */
+export const TEXT_FONT = 18;
 /** Interligne : 8 mm, le pas du fond Ligne et du grand carreau Seyes. */
 export const LINE = 8 * MM;
 export const LINE_EM = LINE / TEXT_FONT;
@@ -37,8 +40,13 @@ export const BASE_LIFT = 1.5;
 export const FIRST_RULE = 2;
 /** Marge haute du texte : la premiere ligne de base tombe sur la ligne FIRST_RULE. */
 export const TEXT_TOP = round2(FIRST_RULE * LINE - BASE - BASE_LIFT);
-/** Marges laterales du texte (style.css). */
-export const TEXT_SIDE = 64;
+/**
+ * Marges laterales du texte (style.css) : a gauche, le texte commence juste
+ * apres la marge rouge du Seyes (32 mm, paper.ts SEYES_MARGIN), comme sur
+ * une copie ; a droite, la marge habituelle d'un cahier.
+ */
+export const TEXT_LEFT = 146;
+export const TEXT_RIGHT = 56;
 /** Blanc minimal garde au-dessus et au-dessous d'une formule haute (em). */
 export const EQ_GAP_EM = 0.12;
 
@@ -104,12 +112,19 @@ function round4(v: number): number {
 
 /**
  * Marges d'un bloc pose dans le texte (photo, calcul, courbe) de hauteur h :
- * un peu d'air au-dessus, et le tout arrondi a un nombre entier de lignes.
+ * au moins `air` ligne de blanc de chaque cote, le tout arrondi a un nombre
+ * entier de lignes, le bloc centre dans ses lignes (meme blanc dessus et
+ * dessous).
+ *
+ * `ghost` : le bloc est suivi d'une ligne sans texte (le caractere invisible
+ * qui porte le curseur apres la photo, puis le saut de ligne). Cette ligne
+ * est comptee dans les lignes du bloc (marge basse diminuee d'une ligne,
+ * parfois negative) : plus de ligne vide fantome sous chaque photo.
  */
-export function blockMargins(h: number, line: number, air = 0.25): { top: number; bottom: number } {
-  const top = air * line;
-  const rows = Math.max(1, Math.ceil((h + 2 * top) / line - 1e-6));
-  return { top, bottom: rows * line - h - top };
+export function blockMargins(h: number, line: number, air = 0.25, ghost = false): { top: number; bottom: number } {
+  const rows = Math.max(1, Math.ceil((h + 2 * air * line) / line - 1e-6));
+  const top = (rows * line - h) / 2;
+  return { top, bottom: rows * line - h - top - (ghost ? line : 0) };
 }
 
 /**
@@ -138,8 +153,8 @@ export function clearOfInk(boxes: readonly InkBox[], top: number, opts: {
   line?: number; left?: number; right?: number; graze?: number; max?: number;
 } = {}): number {
   const line = opts.line ?? LINE;
-  const left = opts.left ?? TEXT_SIDE;
-  const right = opts.right ?? PAGE_W - TEXT_SIDE;
+  const left = opts.left ?? TEXT_LEFT;
+  const right = opts.right ?? PAGE_W - TEXT_RIGHT;
   // Ecriture a la main : les jambages debordent souvent d'un tiers de ligne.
   const graze = opts.graze ?? line * 0.3;
   const max = opts.max ?? 400;

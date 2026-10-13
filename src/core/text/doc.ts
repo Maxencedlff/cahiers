@@ -4,13 +4,15 @@
  * Stocke dans le `content` d'un bloc `text` sans `rect`, en markdown
  * restreint pour rester lisible dans le JSON (section 1) :
  *   **gras**, *italique*, $formule LaTeX$, retour a la ligne = "\n",
+ *   `code` = commande ou chemin en chasse fixe (jamais converti en formule ;
+ *   dedans, seuls \ et ` sont echappes),
  *   ![](img:<id>) = photo posee dans le texte (bloc image de meme id),
  *   [texte en couleur]{.theoreme} = une des 5 couleurs de la palette,
  *   [libellé](cahiers:<pageId>#<blockId> "Maths/Cours/0012") = lien vers
  *   une page (core/links.ts : cible par id de page, chemin lisible en repli),
  *   en debut de ligne (D11) : "# ", "## ", "### " = titres, "- " = puce,
  *   "1. " = liste numerotee, deux espaces devant par niveau de liste.
- * Les caracteres speciaux du texte (\ $ * [ ]) sont echappes par un
+ * Les caracteres speciaux du texte (\ $ * [ ] `) sont echappes par un
  * antislash, et un debut de ligne qui ressemblerait a un marqueur aussi
  * ("\# ", "\- ", "1\. ") : il reste du texte.
  *
@@ -36,7 +38,7 @@ export interface LineFormat {
  * un `br`), il met en forme toute la ligne jusqu'au `br` suivant.
  */
 export type DocToken =
-  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; color?: ColorKey }
+  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean; color?: ColorKey }
   | { kind: "math"; latex: string; color?: ColorKey }
   | { kind: "image"; id: string }
   /**
@@ -192,7 +194,7 @@ export function docLinks(tokens: DocToken[]): Extract<DocToken, { kind: "link" }
 const IMG_OPEN = "![](img:";
 const LINK_OPEN = "](cahiers:";
 
-const ESCAPED = /[\\$*[\]]/g;
+const ESCAPED = /[\\$*[\]`]/g;
 const COLOR_KEYS = new Set<string>(PALETTE.map((p) => p.key));
 
 function colorOfToken(t: DocToken): ColorKey | undefined {
@@ -245,7 +247,7 @@ function serializePlain(tokens: DocToken[]): string {
     parts.forEach((part, i) => {
       if (i > 0) out += "\n";
       if (!part) return;
-      let s = part.replace(ESCAPED, (c) => `\\${c}`);
+      let s = t.code ? `\`${part.replace(/[\\`]/g, (c) => `\\${c}`)}\`` : part.replace(ESCAPED, (c) => `\\${c}`);
       if (t.italic) s = `*${s}*`;
       if (t.bold) s = `**${s}**`;
       out += s;
@@ -327,6 +329,18 @@ function parseFrom(src: string, lineStart: boolean): DocToken[] {
       i = j;
       continue;
     }
+    if (c === "`") {
+      // Code jusqu'au prochain ` non echappe de la meme ligne ; seul : du texte.
+      let j = i + 1, code = "";
+      while (j < src.length && src[j] !== "`" && src[j] !== "\n") {
+        if (src[j] === "\\" && j + 1 < src.length && src[j + 1] !== "\n") { code += src[j + 1]; j += 2; } else code += src[j++];
+      }
+      if (src[j] !== "`") { buf += c; continue; }
+      flush();
+      if (code) out.push({ kind: "text", text: code, code: true, ...(bold ? { bold } : {}), ...(italic ? { italic } : {}) });
+      i = j;
+      continue;
+    }
     if (c === "*") {
       flush();
       if (src[i + 1] === "*") { bold = !bold; i++; } else italic = !italic;
@@ -364,9 +378,9 @@ function colorGroup(src: string, start: number): { innerEnd: number; end: number
   for (let j = start + 1; j < src.length; j++) {
     const c = src[j];
     if (c === "\\") { j++; continue; }
-    if (c === "$") {
+    if (c === "$" || c === "`") {
       let k = j + 1;
-      while (k < src.length && src[k] !== "$") k += src[k] === "\\" ? 2 : 1;
+      while (k < src.length && src[k] !== c) k += src[k] === "\\" ? 2 : 1;
       if (k < src.length) j = k;
       continue;
     }
@@ -386,14 +400,14 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
       if (!t.text) continue;
       const prev = out[out.length - 1];
       if (prev?.kind === "text" && !!prev.bold === !!t.bold && !!prev.italic === !!t.italic
-          && prev.color === t.color) {
+          && !!prev.code === !!t.code && prev.color === t.color) {
         out[out.length - 1] = { ...prev, text: prev.text + t.text };
         continue;
       }
       out.push({
         kind: "text", text: t.text,
         ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}),
-        ...(t.color ? { color: t.color } : {}),
+        ...(t.code ? { code: true } : {}), ...(t.color ? { color: t.color } : {}),
       });
       continue;
     }
@@ -411,6 +425,18 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
     out.push(t);
   }
   return out;
+}
+
+/**
+ * Ponctuation francaise, comme Word : l'espace tapee devant « : ; ? ! »
+ * devient une espace fine insecable (U+202F), qui ne coupe plus la ligne
+ * avant le signe. `before` = texte avant le curseur, signe compris ; null
+ * si rien ne change.
+ */
+export function frenchSpaceAtEnd(before: string): string | null {
+  const m = /[ \u00a0]([:;?!])$/.exec(before);
+  if (!m || before.length < 3 || /\s/.test(before[before.length - 3])) return null;
+  return `${before.slice(0, -2)}\u202f${m[1]}`;
 }
 
 /** Ids des photos posees dans le texte. */

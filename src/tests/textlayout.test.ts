@@ -44,9 +44,9 @@ describe("interligne cale sur le fond", () => {
     expect(cssPx(/--line:\s*calc\(([\d.]+)px \* var\(--k/)).toBeCloseTo(LINE, 3);
     expect(cssPx(/\.text-doc \{[^}]*padding:\s*calc\(([\d.]+)px/s)).toBeCloseTo(TEXT_TOP, 2);
     expect(cssPx(/font:\s*calc\(([\d.]+)px \* var\(--k, 1\)\) \/ 1\.5 KaTeX_Main/)).toBe(TEXT_FONT);
-    expect(cssPx(/\.dl-h1 \{[^}]*top:\s*calc\((-?[\d.]+)px/)).toBeCloseTo(headingShift(1.6, 2) * TEXT_FONT, 1);
-    expect(cssPx(/\.dl-h2 \{[^}]*top:\s*calc\((-?[\d.]+)px/)).toBeCloseTo(headingShift(1.3, 2) * TEXT_FONT, 1);
-    expect(cssPx(/\.dl-h3 \{[^}]*top:\s*calc\((-?[\d.]+)px/)).toBeCloseTo(headingShift(1.1, 1) * TEXT_FONT, 1);
+    expect(cssPx(/\.dl-h1 \{[^}]*top:\s*calc\((-?[\d.]+)px/)).toBeCloseTo(headingShift(1.2, 2) * TEXT_FONT, 1);
+    expect(cssPx(/\.dl-h2 \{[^}]*top:\s*calc\((-?[\d.]+)px/)).toBeCloseTo(headingShift(1, 2) * TEXT_FONT, 1);
+    expect(cssPx(/\.dl-h3 \{[^}]*top:\s*calc\((-?[\d.]+)px/)).toBeCloseTo(headingShift(1, 1) * TEXT_FONT, 1);
   });
 
   it("ligne et bas de ligne d'une ordonnee", () => {
@@ -87,7 +87,8 @@ describe("lignes hautes : un nombre entier de lignes", () => {
   it("ligne de base gardee sur la grille quand le contenu y tient", () => {
     const b = box(1.2, 0.3);
     const s = snapInline(b.boxAsc, b.boxDesc, 1.2, 0.3);
-    expect((((b.boxAsc + s.top) - BASE / TEXT_FONT) / LINE_EM) % 1).toBeCloseTo(0, 3);
+    const r = ((b.boxAsc + s.top) - BASE / TEXT_FONT) / LINE_EM;
+    expect(Math.abs(r - Math.round(r))).toBeCloseTo(0, 3);
   });
 
   it("deux fractions sur deux lignes consecutives ne se chevauchent pas", () => {
@@ -107,6 +108,18 @@ describe("lignes hautes : un nombre entier de lignes", () => {
       expect(total / LINE).toBeCloseTo(Math.round(total / LINE), 6);
       expect(m.top).toBeGreaterThan(0);
       expect(m.bottom).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("photo centree dans ses lignes ; la ligne du curseur qui la suit est comptee dedans", () => {
+    for (const h of [10, LINE, 100, 333.3, 480]) {
+      const m = blockMargins(h, LINE);
+      expect(m.top).toBeCloseTo(m.bottom, 6);
+      expect(m.top).toBeGreaterThanOrEqual(0.25 * LINE - 1e-6);
+      const g = blockMargins(h, LINE, 0.25, true);
+      expect(g.top).toBeCloseTo(m.top, 6);
+      // Bloc + ligne fantome = le meme nombre de lignes que le bloc seul.
+      expect(g.top + h + g.bottom + LINE).toBeCloseTo(m.top + h + m.bottom, 6);
     }
   });
 

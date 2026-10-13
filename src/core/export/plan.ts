@@ -22,7 +22,7 @@ import { PALETTE } from "../palette";
 import { docLines, listNumbers, parseDoc, texToPlain, type DocLine, type DocToken } from "../text/doc";
 import { cachedBounds, unionBounds, type Bounds } from "../ink/stroke";
 import { PAGE_W } from "../ink/sheet";
-import { LINE, TEXT_FONT, TEXT_SIDE, TEXT_TOP } from "../textlayout";
+import { LINE, TEXT_FONT, TEXT_LEFT, TEXT_RIGHT, TEXT_TOP } from "../textlayout";
 import { clusterStrokes, whereLabel, type ReviewItem, type ReviewResult, type ReviewToken } from "../review";
 import { linkLabel } from "../links";
 import { EMU_PER_TWIP, TEXT_W_EMU, type DxImage, type DxPara, type DxRun } from "./docx";
@@ -104,7 +104,7 @@ const TALL_TEX = /\\(?:frac|dfrac|tfrac|int|iint|oint|sum|prod|lim|begin|sqrt|bi
  */
 export function estimateSpans(lines: readonly DocLine[], opts: PlanOptions = {}): VSpan[] {
   let y = TEXT_TOP;
-  const avail = PAGE_W - 2 * TEXT_SIDE;
+  const avail = PAGE_W - TEXT_LEFT - TEXT_RIGHT;
   return lines.map((l) => {
     let rows = 1;
     const f = l.format;
@@ -281,7 +281,7 @@ export function fitEmu(w: number, h: number, maxW = TEXT_W_EMU): { cx: number; c
 
 /** Retrait gauche (twips) d'un element pose a l'abscisse `x` de la page, sans depasser la marge droite. */
 export function indentOf(x: number, cx: number): number {
-  const emu = Math.max(0, Math.min((x - TEXT_SIDE) * EMU_PER_UNIT, TEXT_W_EMU - cx));
+  const emu = Math.max(0, Math.min((x - TEXT_LEFT) * EMU_PER_UNIT, TEXT_W_EMU - cx));
   return Math.round(emu / EMU_PER_TWIP);
 }
 
@@ -290,7 +290,7 @@ export function tokenRuns(tokens: readonly DocToken[], assets: Pick<Assets, "inl
   const out: DxRun[] = [];
   for (const t of tokens) {
     if (t.kind === "text") {
-      out.push({ kind: "text", text: t.text, ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}), ...colorOf(t.color ?? base) });
+      out.push({ kind: "text", text: t.text, ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}), ...(t.code ? { code: true } : {}), ...colorOf(t.color ?? base) });
     } else if (t.kind === "math") {
       out.push({ kind: "math", latex: t.latex, ...colorOf(t.color ?? base) });
     } else if (t.kind === "image") {

@@ -73,7 +73,7 @@
   --topbar-h: 48px;
   /* Feuille (claire par defaut, meme en sombre) */
   --page-bg: #fffffe;
-  --sheet-text: #16181d;
+  --sheet-text: #1d2430;
   --sheet-border: #dfe2e8;
   --rule: #e3e7ef;
   /* Anciens noms, gardes pour les regles existantes */
@@ -843,10 +843,11 @@ kbd { color: var(--text-2); }
      du fond. Valeurs tirees de src/core/textlayout.ts (LINE, TEXT_TOP),
      verifiees par src/tests/textlayout.test.ts. */
   --line: calc(34.2857px * var(--k, 1));
-  padding: calc(43.42px * var(--k, 1)) calc(64px * var(--k, 1)) calc(56px * var(--k, 1));
+  padding: calc(44.35px * var(--k, 1)) calc(56px * var(--k, 1)) calc(56px * var(--k, 1)) calc(146px * var(--k, 1));
   /* Meme police que les formules (Computer Modern de KaTeX) : la page se
-     lit d'un seul tenant, comme un document LaTeX. */
-  font: calc(21px * var(--k, 1)) / 1.5 KaTeX_Main, "Latin Modern Roman", "Times New Roman", serif;
+     lit d'un seul tenant. Corps 18 (environ 11,5 pt imprime), le texte
+     commence apres la marge rouge du Seyes (textlayout.ts TEXT_LEFT). */
+  font: calc(18px * var(--k, 1)) / 1.5 KaTeX_Main, "Latin Modern Roman", "Times New Roman", serif;
   line-height: var(--line);
   color: var(--sheet-text); white-space: pre-wrap; overflow-wrap: anywhere;
   outline: none; cursor: text; caret-color: var(--accent);
@@ -856,7 +857,7 @@ kbd { color: var(--text-2); }
 }
 .text-doc math-field {
   display: inline-block; vertical-align: middle;
-  font-size: 1.05em; padding: 0 2px; margin: 0 1px;
+  font-size: 1em; padding: 0 2px; margin: 0 1px;
   border: none; border-radius: 4px; background: transparent;
   --caret-color: var(--accent); --selection-background-color: #dbe7ff;
   --contains-highlight-background-color: transparent;
@@ -891,7 +892,16 @@ kbd { color: var(--text-2); }
 .text-doc .eq.in-sel { background: rgba(59, 110, 230, .28); }
 .text-doc .eq ::selection { background: transparent; }
 .text-doc .eq:hover { background: rgba(59, 110, 230, .07); box-shadow: 0 0 0 2px rgba(59, 110, 230, .07); }
-.text-doc .eq .katex { font-size: 1.08em; }
+.text-doc .eq .katex { font-size: 1em; }
+/* Commande, chemin, droits (`code`) : chasse fixe sur un fond gris pale,
+   jamais converti en formule. Marges laterales seulement : la ligne garde
+   sa hauteur. */
+.text-doc code {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: .8em;
+  background: #f1f2f5; border: 1px solid #e3e5ea; border-radius: 3px;
+  padding: 0 .25em; -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+.app[data-sheet="dark"] .text-doc code { background: #262b36; border-color: #353b48; }
 
 /* Titres et listes du texte tape (D11) : un bloc par ligne, dans la police
    de la page. Les lignes de texte normal restent a plat entre les blocs. */
@@ -899,9 +909,18 @@ kbd { color: var(--text-2); }
    base calee sur la grille par `top` (textlayout.ts, headingShift) : la
    suite du texte retombe sur les lignes du fond. */
 .text-doc .dl { position: relative; min-height: var(--line); }
-.text-doc .dl-h1 { font-size: 1.6em; font-weight: 700; line-height: calc(2 * var(--line)); margin: 0; top: calc(13.24px * var(--k, 1)); }
-.text-doc .dl-h2 { font-size: 1.3em; font-weight: 700; line-height: calc(2 * var(--line)); margin: 0; top: calc(15.19px * var(--k, 1)); }
-.text-doc .dl-h3 { font-size: 1.1em; font-weight: 700; line-height: var(--line); margin: 0; top: calc(-0.65px * var(--k, 1)); }
+.text-doc .dl-h1 { font-size: 1.2em; font-weight: 700; line-height: calc(2 * var(--line)); margin: 0; top: calc(16.03px * var(--k, 1)); }
+.text-doc .dl-h2 { font-size: 1em; font-weight: 700; line-height: calc(2 * var(--line)); margin: 0; top: calc(17.14px * var(--k, 1)); }
+.text-doc .dl-h3 { font-size: 1em; font-weight: 700; line-height: var(--line); margin: 0; top: calc(0px * var(--k, 1)); }
+/* Comme un eleve soigne : titres a peine plus grands que le texte, le
+   principal dans la couleur du cahier (--nb, pose par PageView), souligne ;
+   les sous-titres soulignes ; la couleur sert de repere, pas de decor. */
+.text-doc .dl-h1 { color: color-mix(in srgb, var(--nb, var(--sheet-text)) 82%, black); }
+.text-doc .dl-h1, .text-doc .dl-h2 {
+  text-decoration: underline; text-decoration-thickness: calc(1.2px * var(--k, 1));
+  text-underline-offset: .2em; text-decoration-skip-ink: auto;
+}
+.app[data-sheet="dark"] .text-doc .dl-h1 { color: color-mix(in srgb, var(--nb, var(--sheet-text)) 60%, white); }
 .text-doc > .dl-h1:first-child, .text-doc > .dl-h2:first-child, .text-doc > .dl-h3:first-child { margin-top: 0; }
 .text-doc .dl-li { padding-left: calc(1.5em * (var(--lvl, 0) + 1)); }
 /* Puce ou numero dans la marge, sur la ligne de base de la premiere ligne
@@ -1073,6 +1092,9 @@ kbd {
 .text-doc .doc-img.flash { outline: 2px solid var(--accent); }
 .text-doc .doc-img.missing { min-height: 40px; background: #f3f4f6; }
 .text-doc .doc-img img { display: block; width: 100%; height: auto; pointer-events: none; }
+/* Filet discret autour des photos et captures : un enonce sur fond blanc ne
+   se fond plus dans la feuille. Hors du flux (ombre), aucune hauteur ne change. */
+.text-doc .doc-img:not(.live) img { border-radius: 3px; box-shadow: 0 0 0 1px rgba(20, 24, 32, .14), 0 1px 4px rgba(20, 24, 32, .08); }
 .text-doc .doc-img.selected { outline: 2px solid var(--accent); }
 /* Poignee de retaille : 22 px visibles, 44 px de prise (section 3), pour
    la souris, le stylet et le doigt. Visible au survol ou photo selectionnee. */
