@@ -109,7 +109,7 @@ describe("messages ephemeres", () => {
 describe("indicateur d'etat", () => {
   const base: StatusInput = {
     online: true, backendReady: false, pending: 0, keysBlocked: false, lastError: null,
-    saving: false, saveError: null, readOnly: false, usage: 0, quota: 2000, penSeen: true, touchWrites: false,
+    saving: false, saveError: null, readOnly: false, usage: 0, quota: 2000, touchWrites: false,
   };
 
   it("tout va bien : point vert, aucun texte", () => {

@@ -11,7 +11,7 @@ import { PHOTO_IMPORT_KEYS } from "./image/photo";
  */
 
 export type Command =
-  | "menu" | "search" | "calc" | "undo" | "redo" | "flag" | "convert" | "finger"
+  | "menu" | "search" | "calc" | "undo" | "redo" | "flag" | "convert"
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
@@ -119,7 +119,6 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: `Alt+${NEUTRAL_INK.shortcut}`, label: `${NEUTRAL_INK.label}, en noir`, group: "Outils et couleurs" },
   ...PALETTE.map((p): Shortcut => ({ keys: `Alt+${p.shortcut}`, label: `${p.label} (recolore la sélection du lasso)`, group: "Outils et couleurs" })),
   ctrl("d", true, "viewMode", "Affichage : une page à la fois ou toutes à la suite (défilement)", "Pages et intercalaires"),
-  ctrl("d", false, "finger", "Doigt : écrire ou naviguer (avec un stylet : l'oublier)", "Outils et couleurs"),
 
   { keys: "Alt+=", label: "Nouvelle formule", group: "Formules" },
   ctrl("m", true, "maths", "Ruban Maths : ouvrir ou fermer le volet (épinglé : il reste ouvert)", "Formules"),

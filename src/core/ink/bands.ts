@@ -2,6 +2,7 @@ import type { InkBlock, InkWord, Stroke } from "../types";
 import type { Bounds } from "./stroke";
 import { cachedBounds } from "./stroke";
 import { carryEdits, dropStrokes, joinWords } from "./words";
+import { DOT_NEAR } from "./pointer";
 
 /**
  * Conversion incrementale par bande de lignes (reco-3, fond).
@@ -173,7 +174,22 @@ export function doneStrokeIds(block: RecoInk): Set<string> {
 /** Traits d'ecriture pas encore lus (ou a relire). */
 export function dirtyStrokes(block: RecoInk): Stroke[] {
   const done = doneStrokeIds(block);
-  return block.strokes.filter((s) => s.tool === "pen" && !done.has(s.id));
+  return recoStrokes(block.strokes).filter((s) => !done.has(s.id));
+}
+
+/**
+ * Traits d'ecriture a envoyer a la reconnaissance. Un trait d'1 ou 2
+ * points isole (appui, aucun trait d'ecriture a moins de DOT_NEAR) n'y
+ * part jamais : il etait lu « . » (audit du lot stylet). Un point pose
+ * contre un autre trait (point du i, accent, virgule decimale) part.
+ */
+export function recoStrokes(strokes: readonly Stroke[]): Stroke[] {
+  const pens = strokes.filter((s) => s.tool === "pen");
+  return pens.filter((s) => {
+    if (s.points.length > 2) return true;
+    const b = cachedBounds(s);
+    return pens.some((o) => o !== s && o.points.length > 2 && near(cachedBounds(o), b, DOT_NEAR));
+  });
 }
 
 export interface IncrementalPlan {
@@ -194,7 +210,7 @@ export interface IncrementalPlan {
 export function planIncremental(
   block: RecoInk, opts: { current?: Bounds; full?: boolean } = {},
 ): IncrementalPlan {
-  const pens = block.strokes.filter((s) => s.tool === "pen");
+  const pens = recoStrokes(block.strokes);
   const bands = groupBands(pens);
   if (opts.full) return { now: pens, all: pens, bands };
   const done = doneStrokeIds(block);

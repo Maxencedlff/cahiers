@@ -26,8 +26,7 @@ export interface StatusInput {
   /** Envois a MyScript ce mois-ci et quota mensuel. */
   usage: number;
   quota: number;
-  /** Un stylet a ete vu ; sinon ce que fait le doigt. */
-  penSeen: boolean;
+  /** Option « Écrire au doigt (sans stylet) ». */
   touchWrites: boolean;
 }
 
@@ -95,9 +94,7 @@ export function statusSummary(s: StatusInput): StatusSummary {
 
   lines.push({
     level: "ok", label: "Saisie",
-    text: s.penSeen
-      ? "Stylet actif, le doigt navigue"
-      : s.touchWrites ? "Pas de stylet, le doigt écrit" : "Pas de stylet, le doigt navigue",
+    text: s.touchWrites ? "Le doigt écrit (sans stylet)" : "Le stylet écrit, le doigt navigue",
   });
 
   const worst = problems.find((p) => p.level === "err") ?? problems[0];

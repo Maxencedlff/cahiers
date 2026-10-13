@@ -18,10 +18,10 @@ export interface Settings {
   /** Couleur du texte tape, null = noir. Toujours alignee sur l'encre. */
   textColor: ColorKey | null;
   /**
-   * Un stylet a deja ete vu sur cette machine : le doigt navigue des le
-   * lancement, sans attendre que le stylet touche l'ecran.
+   * Option « Écrire au doigt (sans stylet) ». Par defaut le doigt navigue
+   * et le stylet ecrit (section 3) ; l'ancien `penSeen` n'est plus lu.
    */
-  penSeen: boolean;
+  touchWrites: boolean;
   /** Calculatrice ouverte (colonne de droite, ou flottante sur un petit ecran). */
   calcOpen: boolean;
   /**
@@ -64,7 +64,7 @@ const DEFAULTS: Settings = {
   autoMath: true,
   spellcheck: false,
   textColor: null,
-  penSeen: false,
+  touchWrites: false,
   myscript: { applicationKey: "", hmacKey: "" },
 };
 
@@ -85,6 +85,9 @@ export function loadSettings(): Settings {
     if (!isThemePref(out.theme)) out.theme = DEFAULTS.theme;
     if (!isSheetTone(out.sheet)) out.sheet = DEFAULTS.sheet;
     out.mathPinned = out.mathPinned === true;
+    out.touchWrites = out.touchWrites === true;
+    // Ancienne detection du stylet (Ctrl+D l'oubliait) : retiree.
+    delete (out as Partial<Settings> & { penSeen?: unknown }).penSeen;
     // Ancien ruban « deplie dans la colonne » : remplace par le volet epinglable.
     delete (out as Partial<Settings> & { mathOpen?: unknown }).mathOpen;
     // Calculatrice ouverte par l'ancien defaut : la feuille perdait 340 px

@@ -1,8 +1,10 @@
 import { el, askText, toast, confirmDialog, pick } from "./dom";
-import { InkSurface, PAGE_W, PAGE_H, type EraserMode, type SurfaceTool } from "./canvas";
+import { InkSurface, PAGE_W, PAGE_H, flingScroll, type EraserMode, type SurfaceTool } from "./canvas";
+import { VelocityTracker } from "../core/kinetic";
+import { isTap } from "../core/ink/pointer";
 import { renderTex } from "./tex";
 import type { Bounds } from "../core/ink/stroke";
-import { cachedBounds, strokeBounds, unionBounds } from "../core/ink/stroke";
+import { cachedBounds, padBounds, strokeBounds, unionBounds } from "../core/ink/stroke";
 import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock,
@@ -24,7 +26,7 @@ import {
 } from "../core/ink/words";
 import { blockKey, isPending, type BlockRef } from "../core/ink/recokey";
 import {
-  AUTO_IDLE_MS, invalidateStrokes, planIncremental, sendSignature, type RecoInk,
+  AUTO_IDLE_MS, invalidateStrokes, planIncremental, recoStrokes, sendSignature, type RecoInk,
 } from "../core/ink/bands";
 import { AUTO_DEBOUNCE_MS } from "../core/ink/recognizer";
 import { confusionCandidates } from "../core/ink/confusions";
@@ -33,8 +35,8 @@ import { labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
 import { inkCssColor } from "../core/theme";
 import {
   PASTE_STEP, clampMove, clampSpace, copySelection, pasteClip, recolorStrokes, replaceStrokes,
-  selectInLasso, selectionBounds, shiftBelow, strokesBelow, strokesById, transformBlocks,
-  type InkClip, type Pt as InkPt, type Transform,
+  pickAt, selBarTop, selectInLasso, selectionBounds, shiftBelow, strokesBelow, strokesById, transformBlocks,
+  type BarBox, type InkClip, type Pt as InkPt, type Transform,
 } from "../core/ink/selection";
 import { TextDoc } from "./textdoc";
 import { buildBacklinks, type PageLinks } from "./linkpicker";
@@ -97,6 +99,11 @@ export interface PageViewHost {
    * ponctuels : l'appli remet l'outil d'avant, le trait suivant ecrit.
    */
   onRegionDone?: () => void;
+  /**
+   * Le lasso est ephemere (lot stylet) : apres une action de sa barre ou un
+   * appui a cote de la selection, l'appli rend le stylo.
+   */
+  onSelectionDone?: () => void;
   /**
    * Demande la reconnaissance d'un bloc math ou texte manuscrit, apres la
    * pause d'ecriture. `auto` = conversion au fil de la plume (pause plus
@@ -387,7 +394,9 @@ export class PageView {
   private touches = new Map<number, Pt>();
   private pinch: { ids: [number, number]; start: [Pt, Pt] } | null = null;
   /** Defilement au doigt hors de la feuille (marges, bandeaux, numeros). */
-  private rootPan: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | null = null;
+  private rootPan: {
+    id: number; x: number; y: number; left: number; top: number; moved: boolean; tracker: VelocityTracker;
+  } | null = null;
   /*
    * Defilement virtualise (donnees-12) : un emplacement par page, dans
    * l'ordre ; `this.list` ne tient que les pages montees.
@@ -1399,6 +1408,9 @@ export class PageView {
         this.host.onRegionDone?.();
         void this.onRegion(loaded, b, tool === "textregion" ? "text" : "math");
       },
+      onTap: (_p, e) => this.onTapAt(loaded, e),
+      onLongPress: (p, e) => this.onLongPressAt(loaded, p, e),
+      onDismiss: () => this.host.onSelectionDone?.(),
     });
     loaded.surface = surface;
     surface.setPaper(this.paperKind);
@@ -1433,7 +1445,7 @@ export class PageView {
       if (b.type === "ink" && !b.rect && !this.host.autoConvert()) continue;
       // Fond de page : seules les lignes pas encore lues repartent (reco-3).
       const main = b.type === "ink" && !b.rect;
-      const strokes = main ? planIncremental(b).all : b.strokes.filter((st) => st.tool === "pen");
+      const strokes = main ? planIncremental(b).all : recoStrokes(b.strokes);
       if (!strokes.length) continue;
       this.host.resumeRecognition(this.keyOf(loaded, b.id), kindOf(b), strokes, main);
     }
@@ -1542,18 +1554,20 @@ export class PageView {
    * La couche texte couvre la page et passe devant l'encre. La souris y
    * place le curseur ; le stylet et le doigt sont rendus au canvas, sinon
    * on ne pourrait plus ecrire ni defiler sur une page qui contient du texte.
-   * Les outils autres que le stylo (gomme, surligneur, zones) gardent la
-   * souris pour l'encre.
+   * Un appui court du stylet ou du doigt n'est pas un trait : le canvas le
+   * rend (onTapAt) et le curseur se pose la (lot stylet). Les outils autres
+   * que le stylo (gomme, surligneur, zones) gardent la souris pour l'encre.
    */
   private routePointers(loaded: LoadedPage): void {
     loaded.doc.root.addEventListener("pointerdown", (e) => {
-      // Photo dans le texte : elle se selectionne, se deplace et se retaille
-      // au stylet comme a la souris (TextDoc). Seul le doigt sur une photo
-      // non selectionnee fait encore defiler la page.
+      // Photo dans le texte : le stylet ecrit dessus comme sur un PDF ; le
+      // doigt sur une photo non selectionnee fait defiler. Deplacer ou
+      // retailler : photo selectionnee (appui long, souris, barre).
       const fig = (e.target as Element).closest?.(".doc-img");
       if (fig) {
-        if (e.pointerType === "touch" && !fig.classList.contains("selected")
-            && this.host.touchRole() === "navigate" && !(e.target as Element).closest(".doc-img-bar, .doc-img-grip")) {
+        if (fig.classList.contains("selected") || (e.target as Element).closest(".doc-img-bar")) return;
+        if (e.pointerType === "pen" || (e.pointerType === "touch" && this.host.touchRole() === "navigate")) {
+          if (e.pointerType === "pen") e.preventDefault();
           loaded.surface?.forwardDown(e);
         }
         return;
@@ -1620,9 +1634,113 @@ export class PageView {
       this.skipInk(loaded);
       this.notePreEdit(loaded);
     }, { capture: true });
-    // Survol relaye au canvas (apercu de la gomme) : la couche texte le couvre.
-    loaded.sheet.addEventListener("pointermove", (e) => loaded.surface?.hover(e));
-    loaded.sheet.addEventListener("pointerleave", () => loaded.surface?.hover(null));
+    // Survol relaye au canvas (apercu de la gomme, point du stylo) : la
+    // couche texte le couvre. Stylet au-dessus de la feuille : plus de I de
+    // texte, le point peint sous la pointe le remplace ; la souris garde le I.
+    loaded.sheet.addEventListener("pointermove", (e) => {
+      const tool = this.host.getTool();
+      const dot = e.pointerType === "pen" && e.buttons === 0 && (tool === "pen" || tool === "highlighter")
+        && !(e.target as Element).closest?.(".lasso-bar, .doc-img-bar, .doc-img.selected, .doc-link");
+      loaded.sheet.classList.toggle("pen-hover", dot);
+      loaded.surface?.hover(e);
+    });
+    loaded.sheet.addEventListener("pointerleave", () => {
+      loaded.sheet.classList.remove("pen-hover");
+      loaded.surface?.hover(null);
+    });
+  }
+
+  /** Photo ou bloc vivant du texte sous un point de l'ecran. */
+  private figAt(loaded: LoadedPage, x: number, y: number): HTMLElement | null {
+    for (const n of document.elementsFromPoint(x, y)) {
+      const fig = (n as Element).closest?.(".doc-img");
+      if (fig instanceof HTMLElement && loaded.doc.root.contains(fig)) return fig;
+    }
+    return null;
+  }
+
+  /**
+   * Appui court du stylet ou du doigt (jamais de l'encre) : sur du texte,
+   * le curseur se pose a cet endroit et la frappe s'y insere ; sur un bloc
+   * vivant, la calculatrice le rouvre (le doigt passe deja par TextDoc).
+   */
+  private onTapAt(loaded: LoadedPage, e: PointerEvent): void {
+    const fig = this.figAt(loaded, e.clientX, e.clientY);
+    if (fig) {
+      if (e.pointerType === "pen" && fig.dataset.live) loaded.doc.tapFigure(fig);
+      return;
+    }
+    if (this.placeCaretAt(loaded, e.clientX, e.clientY)) {
+      loaded.lastEdit = "text";
+      this.lastGestureId = loaded.page.id;
+    }
+  }
+
+  /**
+   * Curseur du texte sous un point de l'ecran (caretPositionFromPoint, ou
+   * caretRangeFromPoint), seulement si le point tombe sur une ligne de
+   * texte : un appui dans le blanc ne fait rien. Vrai si le curseur est pose.
+   */
+  private placeCaretAt(loaded: LoadedPage, x: number, y: number): boolean {
+    const root = loaded.doc.root;
+    const d = document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+    let range: Range | null = null;
+    const pos = d.caretPositionFromPoint?.(x, y);
+    if (pos) {
+      range = document.createRange();
+      range.setStart(pos.offsetNode, pos.offset);
+    } else {
+      range = document.caretRangeFromPoint?.(x, y) ?? null;
+    }
+    if (!range || !root.contains(range.startContainer)) return false;
+    range.collapse(true);
+    // Dans une formule, un lien ou une photo (non editables) : juste apres.
+    const host = (range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer as Element : range.startContainer.parentElement)
+      ?.closest(".eq, .doc-link, .doc-img");
+    if (host && host !== root && root.contains(host)) { range.setStartAfter(host); range.collapse(true); }
+    // Le point doit etre sur la ligne trouvee (a 4 px pres) : sinon c'est du blanc.
+    let box = range.getBoundingClientRect();
+    if (!box.height) {
+      const probe = range.cloneRange();
+      const n = probe.startContainer;
+      if (n.nodeType === Node.TEXT_NODE && probe.startOffset < (n.textContent ?? "").length) {
+        probe.setEnd(n, probe.startOffset + 1);
+      } else if (n.nodeType === Node.TEXT_NODE && probe.startOffset > 0) {
+        probe.setStart(n, probe.startOffset - 1);
+      }
+      box = probe.getBoundingClientRect();
+    }
+    if (!box.height || y < box.top - 4 || y > box.bottom + 4) return false;
+    root.focus({ preventScroll: true });
+    const sel = document.getSelection();
+    if (!sel) return false;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return true;
+  }
+
+  /**
+   * Appui long immobile (stylet ou doigt) : la photo sous le point se
+   * selectionne (deplacer, retailler) ; sinon le mot manuscrit ou les
+   * traits sous le point (core/ink/selection.ts pickAt). Faux : rien.
+   */
+  private onLongPressAt(loaded: LoadedPage, p: InkPt, e: { clientX: number; clientY: number }): boolean {
+    const fig = this.figAt(loaded, e.clientX, e.clientY);
+    if (fig) {
+      if (loaded.readOnly || this.readOnly) return false;
+      loaded.doc.selectImage(fig);
+      return true;
+    }
+    if (loaded.readOnly || this.readOnly) return false;
+    const ids = pickAt(loaded.page.blocks, p.x, p.y);
+    if (!ids.size) return false;
+    this.select(loaded, ids);
+    const a = document.activeElement as HTMLElement | null;
+    if (a && loaded.wrap.contains(a)) a.blur();
+    return true;
   }
 
   /**
@@ -1695,8 +1813,30 @@ export class PageView {
     const d = density ?? this.densityOf(loaded, width, h * k);
     if (force) loaded.surface?.layout(width, h, d);
     else loaded.surface?.fit(width, h, d);
+    this.syncPhotoInk(loaded);
     // Page de PDF en fond : rendue a la taille du canvas (pas pendant l'export, qui l'attend lui-meme).
     if (!this.exporting) this.pdfLayer.sync(loaded, this.viewMode === "scroll" ? this.root : null);
+  }
+
+  /**
+   * Calques d'encre des photos du texte (lot stylet) : un canvas
+   * transparent par photo, ou InkSurface repeint l'encre posee dessus (la
+   * photo, dans la couche texte, cacherait celle du canvas de la page).
+   */
+  private syncPhotoInk(loaded: LoadedPage): void {
+    const surface = loaded.surface;
+    if (!surface) return;
+    const figs = Array.from(loaded.doc.root.querySelectorAll<HTMLElement>(".doc-img"));
+    surface.setPhotoLayers(figs.map((fig) => {
+      let c = fig.querySelector<HTMLCanvasElement>(":scope > canvas.img-ink");
+      if (!c) {
+        c = el("canvas", { class: "img-ink", "aria-hidden": "true" }) as HTMLCanvasElement;
+        c.width = 0;
+        c.height = 0;
+        fig.append(c);
+      }
+      return { canvas: c, frame: fig };
+    }));
   }
 
   /* ---------------- pagination automatique (core/paginate.ts) ---------------- */
@@ -2594,12 +2734,14 @@ export class PageView {
         && y >= p.y - 4 && y <= p.y + p.fontSize * LINE_HEIGHT + 4) ?? null;
     };
     loaded.sheet.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "touch") down = { id: e.pointerId, x: e.clientX, y: e.clientY, t: e.timeStamp };
+      if (e.pointerType === "touch" || e.pointerType === "pen") down = { id: e.pointerId, x: e.clientX, y: e.clientY, t: e.timeStamp };
     });
     loaded.sheet.addEventListener("pointerup", (e) => {
       const d = down;
       down = null;
       if (!d || d.id !== e.pointerId) return;
+      // Stylet : un vrai appui court (le trait commence sur un mot n'en est pas un).
+      if (e.pointerType === "pen" && !isTap(Math.hypot(e.clientX - d.x, e.clientY - d.y), e.timeStamp - d.t)) return;
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || e.timeStamp - d.t > 500) return;
       const p = hit(e);
       if (p) void this.correctWord(loaded, p.index);
@@ -2907,8 +3049,9 @@ export class PageView {
   }
 
   /**
-   * Barre d'actions au-dessus du cadre : couleurs de la palette, copier,
-   * supprimer. Boutons de 44 px, utilisables au doigt.
+   * Barre d'actions au-dessus du cadre : couleurs de la palette, conversion
+   * en texte ou en formule, copier, supprimer. Boutons de 44 px, utilisables
+   * au doigt. Le lasso est ephemere : chaque action rend le stylo.
    */
   private paintSelBar(): void {
     this.selBar?.remove();
@@ -2923,28 +3066,58 @@ export class PageView {
       b.addEventListener("mousedown", (e) => e.preventDefault());
       return b;
     };
+    const done = () => this.host.onSelectionDone?.();
     const swatch = (key: InkColor, ink: string, label: string) => {
-      const b = btn("", `Passer en ${label}`, () => this.recolorSelection(key), "swatch");
+      const b = btn("", `Passer en ${label}`, () => { this.recolorSelection(key); done(); }, "swatch");
       b.append(el("i", { style: { background: ink } }));
       return b;
     };
     const bar = el("div", { class: "lasso-bar" },
       swatch("normal", NEUTRAL_INK.ink, NEUTRAL_INK.label),
       ...PALETTE.map((p) => swatch(p.key, p.ink, p.label)),
-      btn("Copier", "Copier (Ctrl+C), puis Ctrl+V sur n'importe quelle page", () => this.copySelection()),
-      btn("Supprimer", "Supprimer (Suppr)", () => this.deleteSelection(), "danger"),
+      btn("En texte", "Convertir la sélection en texte (l'encre est gardée)", () => this.convertSelection("text")),
+      btn("En formule", "Convertir la sélection en formule (l'encre est gardée)", () => this.convertSelection("math")),
+      btn("Copier", "Copier (Ctrl+C), puis Ctrl+V sur n'importe quelle page", () => { this.copySelection(); done(); }),
+      btn("Supprimer", "Supprimer (Suppr)", () => { this.deleteSelection(); done(); }, "danger"),
     );
     bar.addEventListener("pointerdown", stop);
     s.loaded.sheet.append(bar);
-    // Au-dessus du cadre, sinon dessous ; jamais hors de la feuille.
     const w = bar.offsetWidth || 420, h = bar.offsetHeight || 52;
     const sheetW = s.loaded.sheet.clientWidth;
     const left = Math.max(4, Math.min(f.x * k, sheetW - w - 4));
-    let top = f.y * k - h - 8;
-    if (top < 4) top = (f.y + f.h) * k + 30;
+    const top = selBarTop(this.textLines(s.loaded), {
+      left, width: w, height: h, frameTop: f.y * k, frameBottom: (f.y + f.h) * k,
+      sheetHeight: s.loaded.sheet.clientHeight || Infinity,
+    });
     bar.style.left = `${left}px`;
     bar.style.top = `${top}px`;
     this.selBar = bar;
+  }
+
+  /** Lignes du texte tape (rectangles en pixels relatifs a la feuille). */
+  private textLines(loaded: LoadedPage): BarBox[] {
+    const r = document.createRange();
+    r.selectNodeContents(loaded.doc.root);
+    const sheet = loaded.sheet.getBoundingClientRect();
+    return Array.from(r.getClientRects())
+      .filter((b) => b.width > 1 && b.height > 1)
+      .map((b) => ({ top: b.top - sheet.top, bottom: b.bottom - sheet.top, left: b.left - sheet.left, right: b.right - sheet.left }));
+  }
+
+  /**
+   * « En texte » / « En formule » de la barre du lasso : le chemin de
+   * conversion par zone (onRegion) avec les bornes de la selection. L'encre
+   * d'origine est gardee dans le bloc, comme pour une zone tracee.
+   */
+  private convertSelection(kind: "text" | "math"): void {
+    const s = this.sel;
+    if (!s || !this.canEdit(s.loaded)) return;
+    const strokes = strokesById(s.loaded.page.blocks, s.ids);
+    if (!strokes.length) return;
+    const b = padBounds(selectionBounds(strokes), 2);
+    this.clearSelection();
+    this.host.onSelectionDone?.();
+    void this.onRegion(s.loaded, b, kind);
   }
 
   /**
@@ -3046,7 +3219,7 @@ export class PageView {
     // Une zone collee en attente de lecture repart a la reconnaissance.
     for (const z of out.zones) {
       if (!z.pending) continue;
-      const pens = z.strokes.filter((st) => st.tool === "pen");
+      const pens = recoStrokes(z.strokes);
       if (pens.length) this.host.requestRecognition(this.keyOf(loaded, z.id), kindOf(z), pens);
     }
     if (out.strokes.some((st) => st.tool === "pen") && this.host.autoConvert()) this.scheduleAutoConvert(loaded);
@@ -3106,7 +3279,9 @@ export class PageView {
     this.paintOverlay(loaded);
     this.queueSave(loaded);
 
-    this.host.requestRecognition(this.keyOf(loaded, id), kind, inside);
+    // Appuis isoles d'1 ou 2 points : jamais envoyes (lus « . »).
+    const send = recoStrokes(inside);
+    this.host.requestRecognition(this.keyOf(loaded, id), kind, send.length ? send : inside);
   }
 
   /**
@@ -3154,7 +3329,7 @@ export class PageView {
 
   /** Relance un bloc refuse par la reconnaissance. */
   private retryRecognition(loaded: LoadedPage, block: MathBlock | InkBlock): void {
-    const strokes = block.strokes.filter((st) => st.tool === "pen");
+    const strokes = recoStrokes(block.strokes);
     if (!strokes.length) return;
     delete block.recoError;
     if (block.type === "ink" && !block.rect) { this.scheduleAutoConvert(loaded); return; }
@@ -4443,12 +4618,15 @@ export class PageView {
     root.addEventListener("pointerdown", (e) => {
       if (e.pointerType !== "touch" || this.pinch) return;
       if ((e.target as Element).closest?.("canvas, .text-doc")) return;
-      this.rootPan = { id: e.pointerId, x: e.clientX, y: e.clientY, left: root.scrollLeft, top: root.scrollTop, moved: false };
+      const tracker = new VelocityTracker();
+      tracker.add(e.timeStamp, e.clientX, e.clientY);
+      this.rootPan = { id: e.pointerId, x: e.clientX, y: e.clientY, left: root.scrollLeft, top: root.scrollTop, moved: false, tracker };
     });
     root.addEventListener("pointermove", (e) => {
       const pan = this.rootPan;
       if (!pan || pan.id !== e.pointerId) return;
       const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+      pan.tracker.add(e.timeStamp, e.clientX, e.clientY);
       if (!pan.moved) {
         if (Math.hypot(dx, dy) < 8) return;
         pan.moved = true;
@@ -4457,7 +4635,15 @@ export class PageView {
       root.scrollLeft = pan.left - dx;
       root.scrollTop = pan.top - dy;
     });
-    const panEnd = (e: PointerEvent) => { if (this.rootPan?.id === e.pointerId) this.rootPan = null; };
+    // Doigt lache en mouvement : la page continue sur sa lancee (core/kinetic.ts).
+    const panEnd = (e: PointerEvent) => {
+      const pan = this.rootPan;
+      if (pan?.id !== e.pointerId) return;
+      this.rootPan = null;
+      if (!pan.moved || e.type !== "pointerup") return;
+      const v = pan.tracker.velocity(e.timeStamp);
+      flingScroll(root, -v.vx, -v.vy);
+    };
     root.addEventListener("pointerup", panEnd);
     root.addEventListener("pointercancel", panEnd);
   }
@@ -5152,3 +5338,4 @@ function loadImage(src: string): Promise<HTMLImageElement | null> {
     img.src = src;
   });
 }
+

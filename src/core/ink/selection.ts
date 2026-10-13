@@ -1,5 +1,5 @@
 import type { Block, InkBlock, InkColor, InkPoint, InkWord, MathBlock, Stroke } from "../types";
-import { cachedBounds, roundPoint, unionBounds, type Bounds } from "./stroke";
+import { cachedBounds, roundPoint, strokeHitsCircle, unionBounds, type Bounds } from "./stroke";
 import { PAGE_W } from "./sheet";
 import { dropStrokes, joinWords } from "./words";
 
@@ -81,6 +81,39 @@ export function selectInLasso(blocks: readonly Block[], poly: readonly Pt[]): Se
     const hit = b.strokes.filter((s) => strokeInLasso(s, poly));
     if (!hit.length) continue;
     for (const s of isZone(b) ? b.strokes : hit) ids.add(s.id);
+  }
+  return ids;
+}
+
+/** Rayon de l'appui long, en unites de page (~2 mm). */
+export const PICK_R = 8;
+
+/**
+ * Appui long (lot stylet) : ce qui est sous le point. Un mot manuscrit lu
+ * (sa boite, ou l'un de ses traits) donne tous ses traits ; une zone
+ * reconnue est prise entiere ; sinon les traits touches. Vide : rien.
+ */
+export function pickAt(blocks: readonly Block[], x: number, y: number, r = PICK_R): Set<string> {
+  const ids = new Set<string>();
+  for (const b of blocks) {
+    if (b.type !== "ink" && b.type !== "math") continue;
+    const alive = new Set(b.strokes.map((s) => s.id));
+    const hit = b.strokes.filter((s) => strokeHitsCircle(s, x, y, r));
+    // Zone reconnue : indivisible, comme au lasso.
+    if (b.rect) {
+      if (hit.length) for (const s of b.strokes) ids.add(s.id);
+      continue;
+    }
+    const words: InkWord[] = b.type === "ink" ? b.words ?? [] : [];
+    const hitIds = new Set(hit.map((s) => s.id));
+    for (const w of words) {
+      const box = w.box;
+      const inBox = !!box && x >= box.x - 2 && x <= box.x + box.w + 2 && y >= box.y - 2 && y <= box.y + box.h + 2;
+      if (inBox || w.strokeIds.some((id) => hitIds.has(id))) {
+        for (const id of w.strokeIds) if (alive.has(id)) ids.add(id);
+      }
+    }
+    for (const s of hit) ids.add(s.id);
   }
   return ids;
 }
@@ -472,4 +505,38 @@ export function replaceStrokes(blocks: Block[], repl: ReadonlyMap<string, Stroke
     blocks: blocks.filter((b) => !(b.type === "math" && b.strokes.length === 0)),
     wordsTouched,
   };
+}
+
+
+/* ---------------- barre du lasso ---------------- */
+
+/** Rectangle en pixels de la feuille (barre du lasso, lignes du texte). */
+export interface BarBox { top: number; bottom: number; left: number; right: number }
+
+/**
+ * Hauteur de la barre du lasso : au-dessus du cadre, sinon en dessous,
+ * jamais sur une ligne de texte (lot stylet). Une ligne qui la gene la fait
+ * passer au-dessus (ou au-dessous) d'elle, a 160 px du cadre au plus ; rien
+ * de libre : au-dessus du cadre quand meme.
+ */
+export function selBarTop(lines: readonly BarBox[], o: {
+  left: number; width: number; height: number; frameTop: number; frameBottom: number; sheetHeight: number;
+}): number {
+  const hits = (top: number) => lines.filter((l) =>
+    l.bottom > top && l.top < top + o.height && l.right > o.left && l.left < o.left + o.width);
+  let top = o.frameTop - o.height - 8;
+  for (let i = 0; i < 8 && top >= 4 && o.frameTop - top <= 160 + o.height; i++) {
+    const h = hits(top);
+    if (!h.length) return top;
+    top = Math.min(...h.map((l) => l.top)) - o.height - 4;
+  }
+  // Dessous : la poignee de retaille (44 px) reste libre.
+  let below = o.frameBottom + 30;
+  for (let i = 0; i < 8 && below + o.height <= o.sheetHeight - 4 && below - o.frameBottom <= 160; i++) {
+    const h = hits(below);
+    if (!h.length) return below;
+    below = Math.max(...h.map((l) => l.bottom)) + 4;
+  }
+  const fallback = o.frameTop - o.height - 8;
+  return fallback >= 4 ? fallback : o.frameBottom + 30;
 }
