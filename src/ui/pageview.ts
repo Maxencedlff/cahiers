@@ -58,6 +58,7 @@ import {
 } from "../core/paginate";
 import { measureRows, rowStart, type MeasuredRows } from "./pagebreak";
 import { refreshSuggestions, suggestFor } from "./suggestions";
+import { factorSuggest } from "../core/factor";
 import {
   SizeMemo, anchorIndex, anchoredScroll, estimateSize, isFastScroll, measureSize, pageAt, planWindow,
   slotHeight, visibleRange, type SlotSize,
@@ -1360,7 +1361,9 @@ export class PageView {
     };
     // Formules deja ecrites reproposees en grise (core/suggest.ts), pas sur une copie ou en lecture seule.
     if (!copy && !readOnly) {
-      doc.suggester = (line) => (loaded.readOnly || this.readOnly ? null : suggestFor(this.host.repo, this.notebook, this.divider, line));
+      // Factorisation (« 3p + 4p = p( » -> « 3 + 4) », core/factor.ts) d'abord.
+      doc.suggester = (line) => (loaded.readOnly || this.readOnly ? null
+        : factorSuggest(line) ?? suggestFor(this.host.repo, this.notebook, this.divider, line));
       refreshSuggestions(this.host.repo, this.notebook);
     }
     this.paintNotes(loaded);
