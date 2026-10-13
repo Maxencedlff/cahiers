@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, liveComplete, liveFormula, mathWordsAtEnd, planLine,
+  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type LinePart,
 } from "../core/text/automath";
 
@@ -607,5 +607,17 @@ describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
     expect(liveComplete("1/sqrt(1 + (RCw)^2")).toBe(false);
     expect(liveComplete("5/p(p^")).toBe(false);
     expect(liveComplete("Vz / ")).toBe(false);
+  });
+
+  it("frappe derriere la formule en cours : ce qui la prolonge, ce qui repart en texte", () => {
+    expect(liveSplit("Is = Vs/", "Ru donc")).toEqual({ src: "Is = Vs/Ru", rest: " donc" });
+    expect(liveSplit("1 + R2/", "R1) donc")).toEqual({ src: "1 + R2/R1", rest: ") donc" });
+    expect(liveSplit("G = 1/", "sqrt(1 + (RCw)^2) et")).toEqual({ src: "G = 1/sqrt(1 + (RCw)^2)", rest: " et" });
+    expect(liveSplit("Y(p) = 3/", "p = 1")).toEqual({ src: "Y(p) = 3/p", rest: " = 1" });
+    expect(liveSplit("Y(p) = 3/", "p=1")).toEqual({ src: "Y(p) = 3/p", rest: "=1" });
+    // Exposant d'une touche morte (« ^2 » arrive d'un coup) : dans la formule.
+    expect(liveSplit("y = 1/p", "^2")).toEqual({ src: "y = 1/p^2", rest: "" });
+    // Espace avant le denominateur : il reste dedans.
+    expect(liveSplit("Is = Vz /", " R")).toEqual({ src: "Is = Vz / R", rest: "" });
   });
 });

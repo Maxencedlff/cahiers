@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  cleanMathLive, findFormulas, greekWordAtEnd, liveComplete, liveFormula, mathWordsAtEnd, planLine,
+  cleanMathLive, findFormulas, greekWordAtEnd, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -750,7 +750,12 @@ export class TextDoc {
     const entry = typingColor ? PALETTE.find((p) => p.key === typingColor) : undefined;
     const show = !!entry && !!host && !!r && sel!.isCollapsed && this.root.contains(r.startContainer)
       && this.root.contentEditable !== "false" && document.activeElement === this.root;
-    const rect = show ? caretRect(r!, this.root) : null;
+    let rect = show ? caretRect(r!, this.root) : null;
+    // Page vide : la premiere ligne.
+    if (show && !rect) {
+      const rr = this.root.getBoundingClientRect(), cs = getComputedStyle(this.root);
+      rect = new DOMRect(rr.left, rr.top + (parseFloat(cs.paddingTop) || 0), 0, parseFloat(cs.lineHeight) || 20);
+    }
     if (!show || !rect || !entry || !host) { this.colorTag?.remove(); return; }
     const tag = this.colorTag ?? el("div", { class: "text-color-tag", "aria-hidden": "true" });
     this.colorTag = tag;
@@ -811,16 +816,10 @@ export class TextDoc {
     if (typed.cloneContents().querySelector?.(".eq, .doc-img, br, .dl")) { this.endLive("pause"); return; }
     const text = typed.toString().replace(/\u200b/g, "");
     if (!text) return;
-    let k = 0;
-    for (; k < text.length; k++) {
-      const c = text[k];
-      const balanced = count(lv.src, "(") <= count(lv.src, ")");
-      if (c === ")" && balanced) break;
-      if (c === "\n" || (liveComplete(lv.src) && " =<>,;.:!?≈≤≥≠→⇒⇔".includes(c))) break;
-      lv.src += c;
-    }
+    const split = liveSplit(lv.src, text);
+    lv.src = split.src;
     typed.deleteContents();
-    const rest = text.slice(k);
+    const rest = split.rest;
     this.paintLive();
     this.caretAfterLive(rest);
     if (rest) this.endLive("pause");
@@ -3648,8 +3647,23 @@ export class TextDoc {
       if (k === "b" || k === "g") { e.preventDefault(); document.execCommand("bold"); this.emit(); return; }
       if (k === "i") { e.preventDefault(); document.execCommand("italic"); this.emit(); return; }
     }
-    // Fleches : elles passent la formule d'un bloc (un clic ou Entree sur
-    // la formule selectionnee l'ouvre).
+    // Fleches : elles passent la formule d'un bloc, ancres invisibles
+    // comprises (Maj : la selection la prend entiere) ; un clic ou Entree
+    // sur la formule selectionnee l'ouvre, jamais une fleche.
+    if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const sel = document.getSelection();
+      if (!sel?.rangeCount || !sel.focusNode || (!e.shiftKey && !sel.isCollapsed)) return;
+      const fwd = e.key === "ArrowRight";
+      const at = document.createRange();
+      at.setStart(sel.focusNode, sel.focusOffset);
+      at.collapse(true);
+      const eq = neighbour(at, fwd);
+      if (!(eq instanceof HTMLElement && eq.classList.contains("eq") && this.root.contains(eq))) return;
+      e.preventDefault();
+      const [n, o] = pastNode(eq, fwd);
+      if (e.shiftKey) sel.extend(n, o);
+      else sel.collapse(n, o);
+    }
   }
 
   /** Formule seule dans la selection (rien d'autre que des blancs autour), sinon null. */
@@ -3989,9 +4003,6 @@ function docFromHtml(html: string): string {
   return doc.querySelector("[data-cahiers]")?.getAttribute("data-cahiers") ?? "";
 }
 
-function count(s: string, c: string): number {
-  return s.split(c).length - 1;
-}
 
 
 function insertInField(mf: MathfieldElement, template: string): void {
@@ -4153,6 +4164,18 @@ function endOfSlashDen(mf: MathfieldElement, slashFracs: WeakSet<object>): boole
     if (depth <= 0 && i < items.length - 1) return false;
   }
   return items[0].type === "mopen" && depth === 0;
+}
+
+/** Point juste de l'autre cote de `node` (vers l'avant ou l'arriere), dans un texte s'il y en a un. */
+function pastNode(node: Node, forward: boolean): [Node, number] {
+  const parent = node.parentNode!;
+  const idx = Array.prototype.indexOf.call(parent.childNodes, node);
+  const side = forward ? node.nextSibling : node.previousSibling;
+  if (side instanceof Text) {
+    if (!forward) return [side, side.length];
+    return [side, side.data.startsWith("\u200b") ? 1 : 0];
+  }
+  return [parent, forward ? idx + 1 : idx];
 }
 
 /** Noeud colle au curseur, en ignorant les ancres invisibles. */

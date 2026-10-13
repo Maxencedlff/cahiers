@@ -1164,6 +1164,23 @@ export function liveComplete(src: string): boolean {
   return count(s, "(") === count(s, ")") && /[\p{L}\p{N})\]}²³'!∞]$/u.test(s);
 }
 
+/**
+ * Frappe `typed` arrivee juste apres une formule en cours (`src`) : ce qui
+ * la prolonge, et le reste qui repart en texte. Elle se ferme sur une
+ * parenthese fermante sans ouvrante ("Vz (1 + R2/R1)"), et, terme fini,
+ * sur Espace, relation, virgule, point ("Vs/Ru donc", "3/p = 1").
+ */
+export function liveSplit(src: string, typed: string): { src: string; rest: string } {
+  let k = 0;
+  for (; k < typed.length; k++) {
+    const c = typed[k];
+    if (c === ")" && count(src, "(") <= count(src, ")")) break;
+    if (c === "\n" || (liveComplete(src) && " =<>,;.:!?≈≤≥≠→⇒⇔".includes(c))) break;
+    src += c;
+  }
+  return { src, rest: typed.slice(k) };
+}
+
 function count(s: string, c: string): number {
   let n = 0;
   for (const ch of s) if (ch === c) n++;
