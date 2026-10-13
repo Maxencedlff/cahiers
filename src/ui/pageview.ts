@@ -15,8 +15,9 @@ import { isFutureVersion } from "../core/types";
 import { dayLabel } from "../core/nav";
 import { MAX_DEPTH, childPath, depthOf, dividerLabel } from "../core/dividers";
 import { uuid, nowIso } from "../core/id";
-import type { ConflictCopy, Repo, TrashEntry } from "../core/storage/repo";
+import type { ConflictCopy, PageVersion, Repo, TrashEntry, WriteOutcome } from "../core/storage/repo";
 import { mergeInk } from "../core/sync";
+import { commitPull, textComesBack } from "../core/flowguard";
 import {
   convertedStrokeIds, dropStrokes, joinWords, layoutWords,
   LINE_HEIGHT, type PlacedWord,
@@ -435,6 +436,9 @@ export class PageView {
     });
     this.zoomChip.style.display = "none";
     this.watchZoomGestures();
+    // Retour sur la fenetre : pages changees sur le disque relues (R1).
+    window.addEventListener("focus", this.onWindowBack);
+    document.addEventListener("visibilitychange", this.onWindowBack);
   }
 
   get pageNumber(): number { return this.current; }
@@ -532,6 +536,9 @@ export class PageView {
    */
   async dispose(): Promise<void> {
     this.resizeObserver.disconnect();
+    window.removeEventListener("focus", this.onWindowBack);
+    document.removeEventListener("visibilitychange", this.onWindowBack);
+    if (this.externalTimer) { clearTimeout(this.externalTimer); this.externalTimer = null; }
     this.renderGen++;
     this.teardown();
     await this.flush();
@@ -1867,6 +1874,17 @@ export class PageView {
     this.diskEpoch++;
     this.holdKeys();
     let pulled = false;
+    // Contenu de `from` avant la remontee : rendu tel quel si son ecriture echoue (R3).
+    const origBlocks = JSON.stringify(from.page.blocks);
+    const origHeight = from.page.height;
+    const undoPull = (): void => {
+      from.page.blocks = JSON.parse(origBlocks) as Block[];
+      if (origHeight === undefined) delete from.page.height;
+      else from.page.height = origHeight;
+      this.setFlowText(from, this.bodyText(from.page)?.content ?? "");
+      this.repaintFlowed(from);
+    };
+    let committed = false;
     try {
       const next: Page | null = shownNext?.page
         ?? await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, n)).catch(() => null);
@@ -1893,26 +1911,58 @@ export class PageView {
       const joint = mine ? "\n".repeat(used - textRows) + "\n" : "\n".repeat(used);
       const text = mine + (caretAtJoin ? CARET_MARK : "") + joint + theirs;
       const mainInk = next.blocks.find((b) => b.type === "ink" && !("rect" in b && b.rect));
-      moveFlowBlocks(next, from.page, {
+      // Sur une copie : la page de suite reste intacte en memoire si la remontee est defaite.
+      moveFlowBlocks(structuredClone(next), from.page, {
         strokeIds: mainInk && mainInk.type === "ink" ? mainInk.strokes.map((x) => x.id) : [],
         zoneIds: placed.filter((b) => b.type !== "flag").map((b) => b.id),
         flagIds: placed.filter((b) => b.type === "flag").map((b) => b.id),
         // Photos et blocs vivants du texte (et photos orphelines : rien ne se perd).
         blockIds: next.blocks.filter((b) => b.type !== "text" && b.type !== "ink" && !("rect" in b && b.rect)).map((b) => b.id),
       }, used * LINE, 0, uuid);
-      // La page de suite part a la corbeille (ESEO/.corbeille).
       const nextId = next.id;
-      await this.serial(async () => {
-        await this.host.repo.deletePage(this.notebook, this.divider, n);
-        this.dropSlot(n);
-        for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === nextId)) {
-          p.dead = true;
-          p.number = 0;
-          this.pendingSave.delete(p.page.id);
-          this.history.drop(p.page.id);
-        }
-        this.shiftNumbers(n + 1, -1);
+      // R3 : `from`, avec la suite dedans, est ecrite AVANT que la suite parte
+      // a la corbeille (ESEO/.corbeille) ; si l'ecriture echoue, on defait tout.
+      setPageText(from.page, text.split(CARET_MARK).join(""));
+      const done = await commitPull({
+        writeFrom: () => this.serial(async () => {
+          const out = await this.host.repo.writePage(this.notebook, this.divider, from.number, from.page);
+          if (out.kind === "merged" || (out.kind === "written" && out.n === from.number)) {
+            this.pendingSave.delete(from.page.id);
+            if (out.kind === "merged") setTimeout(() => void this.afterExternal([[from, out]]), 0);
+            return;
+          }
+          setTimeout(() => void this.afterExternal([[from, out]]), 0);
+          throw new Error("la page a changé sur le disque pendant la remontée");
+        }),
+        trashNext: () => this.serial(async () => {
+          await this.host.repo.deletePage(this.notebook, this.divider, n);
+          this.dropSlot(n);
+          for (const p of [...this.list, ...this.pendingSave.values()].filter((x) => x.page.id === nextId)) {
+            p.dead = true;
+            p.number = 0;
+            this.pendingSave.delete(p.page.id);
+            this.history.drop(p.page.id);
+          }
+          this.shiftNumbers(n + 1, -1);
+        }),
+        revert: undoPull,
       });
+      committed = true;
+      if (done.result === "reverted") {
+        toast(`Page suivante non remontée : ${errorText(done.error)}. Rien n'a bougé.`, "err", 6000);
+        return false;
+      }
+      if (done.result === "kept-both") {
+        // La suite est dans `from` (ecrite) ET toujours sur le disque : en double, rien de perdu.
+        this.setFlowText(from, text);
+        from.prevText = undefined;
+        from.lastShift = undefined;
+        this.flowUndo = null;
+        this.repaintFlowed(from);
+        toast(`La page suivante n'a pas pu aller à la corbeille (${errorText(done.error)}) : `
+          + "son contenu est maintenant en double, rien n'est perdu.", "warn", 8000);
+        return false;
+      }
       this.total--;
       if (shownNext && this.list.includes(shownNext)) {
         this.releasePage(shownNext);
@@ -1947,6 +1997,8 @@ export class PageView {
       this.host.onDirty();
       pulled = true;
     } catch (e) {
+      // Rien n'est encore sur le disque : `from` retrouve son contenu d'avant.
+      if (!committed && !from.dead) undoPull();
       toast(`Page suivante impossible à remonter : ${errorText(e)}`, "err", 6000);
     } finally {
       this.flowing = false;
@@ -2182,6 +2234,8 @@ export class PageView {
         // Page d'arrivee preparee sur une copie, ecrite AVANT de toucher a `from`.
         this.holdKeys();
         const target: Page = isFlow ? structuredClone(nextPage!) : { ...emptyPage(uuid(), nowIso()), continues: from.page.id };
+        // La copie s'ecrit comme la page lue : meme garde contre un changement sur le disque.
+        if (isFlow) this.host.repo.shareBase(nextPage!, target);
         undo.toId = target.id;
         undo.toBlocks = isFlow ? JSON.stringify(nextPage!.blocks) : null;
         const existing = isFlow ? this.bodyText(target)?.content ?? "" : "";
@@ -2289,19 +2343,9 @@ export class PageView {
         const check = toShown?.page ?? (await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, toNum)).catch(() => null));
         // Garde-fou : la page creee ne part a la corbeille que si son texte
         // revient bien dans `from` ; sinon on n'annule rien (jamais de perte).
-        const toText = (check ? this.bodyText(check)?.content ?? "" : "").replace(/[\s​]/g, "");
-        const backText = (u.fromText ?? "").replace(/[\s​]/g, "");
+        const toText = check ? this.bodyText(check)?.content ?? "" : "";
         // Ce qu'on vient de taper (un bout d'au plus 10 caracteres d'affilee) n'y est pas encore.
-        const comesBack = (): boolean => {
-          if (backText.includes(toText)) return true;
-          for (let len = 1; len <= 10; len++) {
-            for (let i = 0; i + len <= toText.length; i++) {
-              if (backText.includes(toText.slice(0, i) + toText.slice(i + len))) return true;
-            }
-          }
-          return false;
-        };
-        if (check?.id === u.toId && toText && u.fromText !== null && !comesBack()) {
+        if (check?.id === u.toId && u.fromText !== null && !textComesBack(toText, u.fromText)) {
           toast("Annulation du passage à la page suivante impossible sans perdre du texte : rien n'a été changé", "warn", 6000);
           return;
         }
@@ -4799,14 +4843,27 @@ export class PageView {
       if (!pending.length) return;
       this.pendingSave.clear();
       let error: string | null = null;
-      for (const p of pending) {
+      const external: [LoadedPage, WriteOutcome][] = [];
+      for (let i = 0; i < pending.length; i++) {
+        const p = pending[i];
         try {
-          await this.host.repo.writePage(this.notebook, this.divider, p.number, p.page);
+          const out = await this.host.repo.writePage(this.notebook, this.divider, p.number, p.page);
+          if (out.kind !== "written" || out.n !== p.number) external.push([p, out]);
         } catch (e) {
           error = errorText(e);
-          if (!this.pendingSave.has(p.page.id)) this.pendingSave.set(p.page.id, p);
+          // R4 : au premier echec on s'arrete. Cette page et les suivantes
+          // repartent en tete de file, dans leur ordre (la page d'arrivee
+          // d'un debordement avant celle d'avant) ; une frappe arrivee
+          // pendant l'ecriture garde sa version, plus recente.
+          const newer = new Map(this.pendingSave);
+          this.pendingSave.clear();
+          for (const q of pending.slice(i)) this.pendingSave.set(q.page.id, newer.get(q.page.id) ?? q);
+          for (const [id, q] of newer) if (!this.pendingSave.has(id)) this.pendingSave.set(id, q);
+          break;
         }
       }
+      // Fichiers changes ailleurs : la vue se met a jour hors de la file d'E/S.
+      if (external.length) setTimeout(() => void this.afterExternal(external), 0);
       const before = this.saveError;
       this.saveError = error;
       if (error) {
@@ -4822,6 +4879,167 @@ export class PageView {
   }
 
   get hasUnsaved(): boolean { return this.pendingSave.size > 0; }
+
+  /* ---------------- changements faits ailleurs (OneDrive, autre PC) ---------------- */
+
+  /**
+   * Suite d'ecritures qui ont trouve le fichier change sur le disque (R1,
+   * Repo.writePage) : l'encre venue d'ailleurs rejoint la page, ou la page
+   * est relue (sa version a nous est dans une copie de conflit). Jamais
+   * appele depuis la file d'E/S (render et flush y passent).
+   */
+  private async afterExternal(list: [LoadedPage, WriteOutcome][]): Promise<void> {
+    let rerender = false;
+    let copies = false;
+    for (const [p, out] of list) {
+      const label = `Page ${out.n}`;
+      if (out.n !== p.number && !p.dead) rerender = true;
+      if (out.kind === "merged") {
+        if (!p.dead && out.added) {
+          const r = mergeInk(p.page, out.disk);
+          if (r.added) {
+            p.page.blocks = r.blocks;
+            if (r.height != null) p.page.height = r.height;
+            this.fitSheet(p);
+            this.paintStrokes(p);
+            this.paintOverlay(p);
+            this.resumePending(p);
+          }
+        }
+        if (out.added) toast(`${label} modifiée sur l'autre PC : son encre a rejoint la tienne, rien n'est perdu.`, "info", 7000);
+      } else if (out.kind === "replaced") {
+        if (!p.dead) await this.reloadPage(p);
+        toast(`${label} modifiée sur l'autre PC : sa version est gardée et ton encre y est ajoutée.`, "info", 8000);
+      } else if (out.kind === "conflict") {
+        copies = true;
+        if (!out.page) rerender = true;
+        else if (!p.dead) await this.reloadPage(p);
+        toast(`${label} modifiée ailleurs pendant que tu écrivais : ta version est gardée dans la copie `
+          + `${out.copy} (bandeau « Autre version » de la page), la page montre celle du disque.`, "warn", 12000);
+      }
+    }
+    if (rerender) {
+      await this.render();
+    } else if (copies) {
+      this.conflicts = await this.host.repo.listConflicts(this.notebook, this.divider).catch(() => this.conflicts);
+      for (const p of this.list) if (!p.dead) this.paintNotes(p);
+      this.paintViewNotes();
+    }
+    if (copies) this.host.onConflictsChanged?.();
+  }
+
+  /**
+   * Relit une page du disque a la place de celle affichee. Ce qui a ete
+   * modifie depuis la derniere ecriture (rare : une frappe pendant
+   * l'ecriture) part d'abord dans une copie de conflit : rien ne se perd.
+   */
+  private async reloadPage(p: LoadedPage): Promise<void> {
+    if (p.dead) return;
+    if (this.pendingSave.has(p.page.id)) {
+      this.pendingSave.delete(p.page.id);
+      await this.serial(() => this.host.repo.writeConflictCopy(this.notebook, this.divider, p.number, p.page))
+        .catch((e) => toast(`Copie de conflit impossible : ${errorText(e)}`, "err", 8000));
+    }
+    this.history.drop(p.page.id);
+    if (this.sel?.loaded === p) this.clearSelection();
+    if (this.viewMode === "pages") {
+      await this.render();
+      return;
+    }
+    const s = this.slots.find((x) => x.loaded === p);
+    if (!s) return;
+    this.diskEpoch++;
+    this.unmountSlot(s);
+    await this.mountSlot(s, this.renderGen);
+  }
+
+  /** Retour sur la fenetre (focus, onglet visible) : pages changees ailleurs relues. */
+  private onWindowBack = (): void => {
+    if (document.visibilityState === "hidden") return;
+    if (this.externalTimer) clearTimeout(this.externalTimer);
+    this.externalTimer = setTimeout(() => { this.externalTimer = null; void this.checkExternal(); }, 300);
+  };
+  private externalTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Pages montees sans modification en attente dont le fichier a change sur
+   * le disque (OneDrive a pose la version de l'autre PC) : relues. Une page
+   * en cours d'ecriture (trait, formule, ecriture en file) n'est pas touchee :
+   * son ecriture verra le changement et fusionnera (R1).
+   */
+  async checkExternal(): Promise<number> {
+    if (this.flowing || this.peek || !this.root.isConnected) return 0;
+    const changed: LoadedPage[] = [];
+    for (const p of [...this.list]) {
+      if (p.dead || p.copy || this.pendingSave.has(p.page.id)) continue;
+      if (p.surface?.busyPen || p.doc.editingFormula) continue;
+      try {
+        if (await this.host.repo.diskChanged(this.notebook, this.divider, p.number, p.page)) changed.push(p);
+      } catch { /* fichier tenu : au prochain retour */ }
+    }
+    let done = 0;
+    for (const p of changed) {
+      if (p.dead || this.pendingSave.has(p.page.id) || this.flowing) continue;
+      await this.reloadPage(p);
+      done++;
+    }
+    if (done) {
+      this.conflicts = await this.host.repo.listConflicts(this.notebook, this.divider).catch(() => this.conflicts);
+      for (const p of this.list) if (!p.dead) this.paintNotes(p);
+      this.paintViewNotes();
+      toast(done > 1
+        ? `${done} pages modifiées ailleurs (OneDrive) : relues.`
+        : `Page ${changed[0].number} modifiée ailleurs (OneDrive) : relue.`, "info", 5000);
+    }
+    return done;
+  }
+
+  /* ---------------- versions de la page ---------------- */
+
+  /** Page visee par « Versions de la page… » : la page courante. */
+  private versionTarget(): LoadedPage | null {
+    return this.list.find((p) => p.number === this.current && !p.dead && !p.copy) ?? null;
+  }
+
+  /**
+   * Versions gardees de la page courante (la plus recente d'abord), ou null
+   * sans page. API pour src/ui/versions.ts.
+   */
+  async listVersions(): Promise<{ page: number; versions: PageVersion[] } | null> {
+    const p = this.versionTarget();
+    if (!p) return null;
+    return { page: p.number, versions: await this.host.repo.listVersions(this.notebook, p.page.id) };
+  }
+
+  /**
+   * Restaure une version de la page courante : sa version actuelle est
+   * d'abord ecrite puis gardee dans les versions, rien n'est perdu.
+   */
+  async restoreVersion(file: string): Promise<boolean> {
+    if (this.locked()) return false;
+    const p = this.versionTarget();
+    if (!p) return false;
+    if (p.readOnly) { toast("Page en lecture seule : restauration impossible ici", "warn", 6000); return false; }
+    await this.flush();
+    if (this.pendingSave.has(p.page.id)) {
+      toast("La page attend encore d'être écrite : restauration reportée", "err", 6000);
+      return false;
+    }
+    try {
+      const { outcome } = await this.serial(() =>
+        this.host.repo.restoreVersion(this.notebook, this.divider, p.number, p.page, file));
+      await this.reloadPage(p);
+      if (outcome.kind === "conflict") {
+        toast(`La page avait changé sur le disque : la version restaurée est dans la copie ${outcome.copy}.`, "warn", 9000);
+      } else {
+        toast("Version restaurée. La page d'avant est gardée dans les versions.", "info", 6000);
+      }
+      return true;
+    } catch (e) {
+      toast(`Restauration impossible : ${errorText(e)}`, "err", 6000);
+      return false;
+    }
+  }
 
   /** Message de la derniere ecriture en echec, null si tout est sur le disque. */
   get unsavedError(): string | null { return this.hasUnsaved ? this.saveError : null; }
