@@ -59,6 +59,7 @@ import {
 import { measureRows, rowStart, type MeasuredRows } from "./pagebreak";
 import { refreshSuggestions, suggestFor } from "./suggestions";
 import { factorSuggest } from "../core/factor";
+import { nextStepSuggest } from "../core/calc/nextstep";
 import {
   SizeMemo, anchorIndex, anchoredScroll, estimateSize, isFastScroll, measureSize, pageAt, planWindow,
   slotHeight, visibleRange, type SlotSize,
@@ -1361,9 +1362,10 @@ export class PageView {
     };
     // Formules deja ecrites reproposees en grise (core/suggest.ts), pas sur une copie ou en lecture seule.
     if (!copy && !readOnly) {
-      // Factorisation (« 3p + 4p = p( » -> « 3 + 4) », core/factor.ts) d'abord.
+      // Factorisation (« 3p + 4p = p( » -> « 3 + 4) », core/factor.ts), puis
+      // l'etape suivante derriere un « = » (core/calc/nextstep.ts), puis le cahier.
       doc.suggester = (line) => (loaded.readOnly || this.readOnly ? null
-        : factorSuggest(line) ?? suggestFor(this.host.repo, this.notebook, this.divider, line));
+        : factorSuggest(line) ?? nextStepSuggest(line) ?? suggestFor(this.host.repo, this.notebook, this.divider, line));
       refreshSuggestions(this.host.repo, this.notebook);
     }
     this.paintNotes(loaded);
