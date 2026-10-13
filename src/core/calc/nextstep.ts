@@ -12,6 +12,7 @@
 import { create, all, type MathNode } from "mathjs";
 import { normalizeInput, frNumber } from "./engine";
 import { findFormulas } from "../text/automath";
+import { polynomialCoefficients, polynomialRoots, solveEquation } from "./solve";
 
 type Math = ReturnType<typeof create>;
 let mathInst: Math | null = null;
@@ -70,45 +71,446 @@ function lhsBefore(before: string): string | null {
   return last || null;
 }
 
-/** Formes equivalentes du membre, dans l'ordre de preference, sans le membre lui-meme. */
+/**
+ * Formes equivalentes du membre, dans l'ordre de preference, sans le membre
+ * lui-meme. Ce qu'on ecrit vraiment a la ligne suivante d'un calcul :
+ *  - un nombre : sa valeur exacte (fraction) ou approchee ;
+ *  - un polynome en une lettre : factorise par ses racines, ou developpe
+ *    s'il etait en produit ;
+ *  - une fraction en une lettre : denominateur factorise, puis la
+ *    decomposition en elements simples ;
+ *  - une derivee d/dx(...) : son resultat ;
+ *  - avec des fonctions (y(t), Y(p), γ(t)) ou plusieurs lettres : seulement
+ *    une vraie simplification (facteur commun, termes regroupes).
+ * Rien de sur : rien.
+ */
 export function equivalents(src: string): string[] {
-  // Texte de la page : γ(t) est l'echelon (pas la fonction gamma de mathjs),
-  // « . » entre deux facteurs est un produit (« e^t.γ(t) »).
-  src = src.replace(/\bgamma\s*\(/g, "γ(").replace(/γ\s+\(/g, "γ(")
-    .replace(/(?<![\d\s])\.(?![\d\s])|(?<=\d)\.(?=[^\d\s])|(?<=[^\d\s])\.(?=\d)/g, "*");
-  return equivalentsRaw(src).map((f) => f.replace(/greekmu/g, "μ").replace(/greekOmega/g, "Ω"));
+  const { text, fns } = protect(src);
+  const back = (f: string) => f.replace(/zzf([a-z]+)/g, (_a, k: string) => fns[letterIndex(k)] ?? _a)
+    .replace(/greekmu/g, "μ").replace(/greekOmega/g, "Ω");
+  return equivalentsRaw(text).map(back);
+}
+
+/** Mots qui sont des fonctions connues : « cos(t) » n'est pas c·o·s(t). */
+const FUNC_WORDS = new Set(["sin", "cos", "tan", "exp", "ln", "log", "sqrt", "sh", "ch", "th", "arcsin", "arccos", "arctan",
+  "sinh", "cosh", "tanh", "abs", "frac", "lim", "max", "min"]);
+
+const letterName = (i: number): string => (i < 26 ? String.fromCharCode(97 + i) : letterName(Math.floor(i / 26) - 1) + String.fromCharCode(97 + (i % 26)));
+const letterIndex = (k: string): number => [...k].reduce((a, c) => a * 26 + (c.charCodeAt(0) - 96), 0) - 1;
+
+/**
+ * Texte de la page prepare pour mathjs : γ(t) echelon, « . » produit,
+ * « cos 0 » = cos(0), et chaque fonction inconnue appliquee (y(t), y''(t),
+ * Y(p), s(0), F(p-a), g(βt)) remplacee par un symbole opaque `zzf…` : elle
+ * reste un bloc, jamais un produit. « p(p-1) » (la lettre dans
+ * l'argument) reste un produit.
+ */
+function protect(src: string): { text: string; fns: string[] } {
+  let s = src.replace(/\\?[dt]frac/g, "frac").replace(/\bgamma\s*\(/g, "γ(").replace(/γ\s+\(/g, "γ(")
+    .replace(/(?<![\d\s])\.(?![\d\s])|(?<=\d)\.(?=[^\d\s])|(?<=[^\d\s])\.(?=\d)/g, "*")
+    .replace(/\b(sin|cos|tan|exp|ln|log|sqrt)\s+(-?\d+(?:[.,]\d+)?|[A-Za-zα-ω])(?![\w(])/g, "$1($2)");
+  const fns: string[] = [];
+  let out = "";
+  const isLetter = (c: string | undefined) => !!c && /[A-Za-zα-ωΑ-Ω]/.test(c);
+  for (let i = 0; i < s.length;) {
+    if (!isLetter(s[i])) { out += s[i++]; continue; }
+    let j = i;
+    while (isLetter(s[j])) j++;
+    const word = s.slice(i, j);
+    let k = j;
+    while (s[k] === "'" || s[k] === "′" || s[k] === "″" || s[k] === "‴") k++;
+    if (s[k] === "(" && !FUNC_WORDS.has(word)) {
+      let depth = 0, close = -1;
+      for (let q = k; q < s.length; q++) {
+        if (s[q] === "(") depth++;
+        else if (s[q] === ")" && --depth === 0) { close = q; break; }
+      }
+      const name = word[word.length - 1];
+      const arg = close > 0 ? s.slice(k + 1, close).replace(/\s+/g, "") : "";
+      if (close > 0 && funcArg(arg, name)) {
+        // La meme fonction ecrite deux fois est le meme bloc (facteur commun).
+        const text = `${name}${s.slice(j, k)}(${arg})`;
+        let idx = fns.indexOf(text);
+        if (idx < 0) { idx = fns.length; fns.push(text); }
+        out += `${word.slice(0, -1)} zzf${letterName(idx)} `;
+        i = close + 1;
+        continue;
+      }
+    }
+    out += s.slice(i, k);
+    i = k;
+  }
+  return { text: out, fns };
+}
+
+/** Argument d'une fonction appliquee : t, 0, p-a, βt, 2t ; pas « p-1 » derriere p (produit). */
+function funcArg(arg: string, name: string): boolean {
+  if (!arg || new RegExp(`(^|[^A-Za-zα-ω])${name}(?![A-Za-zα-ω])`).test(arg)) return false;
+  return /^-?\d+(?:[.,]\d+)?$/.test(arg) || /^[A-Za-zα-ω]$/.test(arg)
+    || /^[A-Za-zα-ω][+-][A-Za-z0-9α-ω]+$/.test(arg) || /^\d*[A-Za-zα-ω]{1,2}$/.test(arg);
 }
 
 function equivalentsRaw(src: string): string[] {
   const m = M();
   // μ et Ω sont ici des grandeurs (normalizeInput les lit en unites).
-  const node = toProducts(m.parse(normalizeInput(src.replace(/\s+/g, " ").replace(/μ/g, "greekmu").replace(/Ω/g, "greekOmega"))));
-  const self = compact(print(node));
+  const norm = normalizeInput(src.replace(/\s+/g, " ").replace(/μ/g, "greekmu").replace(/Ω/g, "greekOmega"));
   const out: string[] = [];
+  const deriv = derivativeOf(norm);
+  if (deriv) return [deriv];
+  const node = toProducts(m.parse(norm));
+  const self = compact(print(node));
+  // Meme ecriture aux parentheses pres (« S(p)/(E(p)) ») : pas une etape.
+  const bare = (x: string) => x.replace(/[()]/g, "");
   const add = (s: string | null) => {
     if (!s) return;
     const c = compact(s);
-    if (c && c !== self && !out.some((o) => compact(o) === c)) out.push(s);
+    if (c && bare(c) !== bare(self) && !out.some((o) => compact(o) === c)) out.push(s);
   };
-  const slashes = (s: string) => (s.match(/\//g) ?? []).length;
+  const syms = symbolsOf(node);
+  // Mot illisible (« mathcalLe », reste de LaTeX) : on ne devine pas.
+  if (syms.some((x) => !x.startsWith("zzf") && !x.startsWith("greek") && x.length > 4)) return out;
+  const vars = syms.filter((x) => !x.startsWith("zzf"));
+  const opaque = syms.length > vars.length;
+  if (!syms.length) {
+    add(numericValue(node, /\d[.,]\d/.test(src)));
+    return out;
+  }
+  if (vars.length === 1 && !opaque) {
+    for (const f of oneVariable(node, vars[0])) add(f);
+    return out;
+  }
+  // Plusieurs lettres, ou des fonctions : seulement une vraie simplification.
+  add(factored(node, true));
+  if (!opaque) add(collectBy(node, vars));
   let simp: MathNode | null = null;
   try { simp = m.simplify(node); } catch { simp = null; }
   if (simp) {
     const s = print(simp);
-    if (slashes(s) <= slashes(self)) add(s);
-  }
-  add(factored(node));
-  try { add(print(m.rationalize(node))); } catch { /* pas un polynome */ }
-  // Developpe : seulement s'il ouvre vraiment des parentheses.
-  const ex = expanded(node), parens = (x: string) => (x.match(/\(/g) ?? []).length;
-  if (ex && parens(ex) < parens(print(node))) add(ex);
-  if (!hasSymbols(node)) {
-    try {
-      const v = node.evaluate();
-      if (typeof v === "number" && Number.isFinite(v)) add(frNumber(v));
-    } catch { /* rien */ }
+    const count = (x: string, c: RegExp) => (x.match(c) ?? []).length;
+    // Des termes regroupes, sans fraction ni parenthese de plus (« 3a + 2a » -> « 5a »).
+    if (termCount(simp) < termCount(node) && count(s, /\//g) <= count(self, /\//g) && count(s, /\(/g) <= count(print(node), /\(/g)) add(s);
   }
   return out;
+}
+
+/**
+ * Plusieurs lettres, une principale (celle de plus haut degre, p) :
+ * regroupee par puissances, coefficients litteraux entre parentheses
+ * (« a p^3 + b p^2 + c p - a p^2 - b p - c » -> « a p^3 + (b - a)p^2 + (c - b)p - c »).
+ */
+function collectBy(node: MathNode, vars: string[]): string | null {
+  const m = M();
+  let best: { v: string; deg: number } | null = null;
+  for (const v of vars) {
+    let deg = 0;
+    node.traverse((n: any) => {
+      if (n.type === "OperatorNode" && n.op === "^" && strip(n.args[0]).name === v && strip(n.args[1]).type === "ConstantNode") deg = Math.max(deg, strip(n.args[1]).value);
+    });
+    if (deg >= 2 && (!best || deg > best.deg)) best = { v, deg };
+  }
+  if (!best || best.deg > 8) return null;
+  const v = best.v;
+  const coeffs: MathNode[] = [];
+  let d: MathNode = node;
+  let fact = 1;
+  try {
+    for (let k = 0; k <= best.deg; k++) {
+      if (k > 0) { d = m.derivative(d, v); fact *= k; }
+      const at0 = d.transform((n: any) => (n.type === "SymbolNode" && n.name === v ? new m.ConstantNode(0) : n));
+      const ck = new m.OperatorNode("/", "divide", [at0, new m.ConstantNode(fact)]);
+      // rationalize regroupe mieux les coefficients litteraux (« (2b - 2a)/2 » -> « b - a »).
+      let c: MathNode;
+      try { c = m.rationalize(ck); } catch { c = m.simplify(ck); }
+      coeffs.push(c);
+    }
+  } catch {
+    return null;
+  }
+  // Le reste doit etre vraiment un polynome en v de ce degre.
+  const nonZero = coeffs.filter((c) => c.toString() !== "0").length;
+  if (nonZero >= termCount(node)) return null;
+  let out = "";
+  for (let k = coeffs.length - 1; k >= 0; k--) {
+    const c = coeffs[k];
+    const s = print(c);
+    if (s === "0") continue;
+    const mono = k === 0 ? "" : k === 1 ? v : `${v}^${k}`;
+    const neg = s.startsWith("-") && termCount(c) === 1;
+    const body = neg ? s.slice(1) : s;
+    const coef = termCount(c) > 1 ? `(${body})` : body === "1" && mono ? "" : body;
+    const glue = coef && mono && !coef.endsWith(")") && !/\d$/.test(coef) ? " " : "";
+    out += `${out ? (neg ? " - " : " + ") : neg ? "-" : ""}${coef}${glue}${mono}`;
+  }
+  return out || null;
+}
+
+/** Nombre de termes de la somme du haut. */
+function termCount(n: any): number {
+  n = strip(n);
+  if (n.type === "OperatorNode" && (n.op === "+" || n.op === "-") && n.args.length === 2) return termCount(n.args[0]) + termCount(n.args[1]);
+  return 1;
+}
+
+/** Lettres libres (pas pi, e, ni les noms de fonctions). */
+function symbolsOf(node: MathNode): string[] {
+  const found = new Set<string>();
+  node.traverse((n: any, _p: string, parent: any) => {
+    if (n.type !== "SymbolNode" || (parent?.type === "FunctionNode" && parent.fn === n)) return;
+    if (n.name === "pi" || n.name === "e" || n.name === "i") return;
+    found.add(n.name);
+  });
+  return [...found];
+}
+
+/** Valeur d'un calcul sans lettre : fraction exacte si elle existe, sinon decimal. */
+function numericValue(node: MathNode, decimal = false): string | null {
+  let v: unknown;
+  try { v = node.evaluate(); } catch { return null; }
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  if (Number.isInteger(v)) return String(v);
+  // Calcul ecrit en decimaux (« 3 × 0,5 ») : resultat en decimal (« 1,5 »).
+  if (decimal) return frNumber(v);
+  for (let q = 2; q <= 1000; q++) {
+    const p = Math.round(v * q);
+    if (Math.abs(v - p / q) < 1e-10 * Math.max(1, Math.abs(v))) return `${p}/${q}`;
+  }
+  return frNumber(v);
+}
+
+/** « d/dp(1/(p+3)) », « -d/dx(x^2) » : la derivee, simplifiee. */
+function derivativeOf(src: string): string | null {
+  const m = /^\s*(-?)\s*d\s*\/\s*d([A-Za-z])\s*\((.*)\)\s*$/.exec(src);
+  if (!m) return null;
+  try {
+    const M0 = M();
+    const d = M0.simplify(M0.derivative(M0.parse(m[3]), m[2]));
+    return print(m[1] ? M0.simplify(new M0.OperatorNode("-", "unaryMinus", [d])) : d);
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------- une seule lettre : polynomes et fractions ---------------- */
+
+/** Polynome (coefficients du constant au dominant) ecrit comme on le tape. */
+function polyText(c: number[], v: string): string {
+  let out = "";
+  for (let k = c.length - 1; k >= 0; k--) {
+    const a = c[k];
+    if (Math.abs(a) < 1e-12) continue;
+    const mono = k === 0 ? "" : k === 1 ? v : `${v}^${k}`;
+    const abs = Math.abs(a);
+    const num = mono && Math.abs(abs - 1) < 1e-12 ? "" : coefText(abs);
+    out += `${a < 0 ? (out ? " - " : "-") : out ? " + " : ""}${num}${num.includes("/") && mono ? " " : ""}${mono}`;
+  }
+  return out || "0";
+}
+
+interface Factored { lc: number; factors: { text: string; mult: number; root?: number }[] }
+
+/**
+ * Factorisation sur Q : racines rationnelles (facteurs du premier degre) et
+ * trinomes sans racine reelle a coefficients rationnels. null si une racine
+ * est irrationnelle (la forme factorisee ne s'ecrirait pas proprement).
+ */
+function factorPoly(c: number[], v: string): Factored | null {
+  if (c.length < 2) return null;
+  const roots = polynomialRoots(c);
+  if (!roots) return null;
+  let lc = c[c.length - 1];
+  const factors: Factored["factors"] = [];
+  const rational = (x: number): { p: number; q: number } | null => {
+    for (let q = 1; q <= 12; q++) { const p = Math.round(x * q); if (Math.abs(x - p / q) < 1e-9) return { p, q }; }
+    return null;
+  };
+  for (const r of roots) {
+    const mult = r.multiplicity ?? 1;
+    if (typeof r.value === "number") {
+      const f = rational(r.value);
+      if (!f) return null;
+      if (f.p === 0) factors.push({ text: v, mult, root: 0 });
+      else if (f.q === 1) factors.push({ text: `(${v} ${f.p < 0 ? "+" : "-"} ${Math.abs(f.p)})`, mult, root: r.value });
+      else { factors.push({ text: `(${f.q}${v} ${f.p < 0 ? "+" : "-"} ${Math.abs(f.p)})`, mult, root: r.value }); lc /= f.q ** mult; }
+    } else if (r.value.im > 0) {
+      const { re, im } = r.value;
+      const q = [re * re + im * im, -2 * re, 1];
+      if (!q.every((x) => rational(x))) return null;
+      factors.push({ text: `(${polyText(q.map((x) => Math.round(x * 1e9) / 1e9), v)})`, mult });
+    }
+  }
+  const key = (f: { root?: number }) => (f.root === undefined ? [2, 0, 0] : f.root === 0 ? [0, 0, 0] : [1, Math.abs(f.root), -f.root]);
+  factors.sort((a, b) => { const x = key(a), y = key(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]; });
+  return { lc, factors };
+}
+
+function factoredText(f: Factored): string {
+  const body = f.factors.map((x) => `${x.text}${x.mult > 1 ? `^${x.mult}` : ""}`).join("");
+  const lc = Math.abs(f.lc - 1) < 1e-12 ? "" : Math.abs(f.lc + 1) < 1e-12 ? "-" : coefText(f.lc);
+  return `${lc}${lc.includes("/") ? " " : ""}${body}`;
+}
+
+/** Nombre de facteurs d'un produit tel qu'il est ecrit (« p(p-1)(p^2-p-2) » : 3). */
+function factorCount(n: any): number {
+  n = strip(n);
+  if (n.type === "OperatorNode" && n.op === "*") return n.args.reduce((a: number, x: any) => a + factorCount(x), 0);
+  if (n.type === "ConstantNode") return 0;
+  return 1;
+}
+
+/** Polynome ou fraction en une seule lettre `v`. */
+function oneVariable(node: MathNode, v: string): string[] {
+  const out: string[] = [];
+  let num: number[], den: number[];
+  try {
+    ({ num, den } = rationalParts(node, v));
+  } catch {
+    return out;
+  }
+  // Facteurs communs du premier degre : simplifies (racine commune).
+  let cancelled = false;
+  for (let guard = 0; guard < 12 && den.length > 1; guard++) {
+    const roots = polynomialRoots(den);
+    const common = roots?.find((r) => typeof r.value === "number" && Math.abs(evalPoly(num, r.value as number)) < 1e-9);
+    if (!common || num.length < 2) break;
+    num = divideRoot(num, common.value as number);
+    den = divideRoot(den, common.value as number);
+    cancelled = true;
+  }
+  const top = strip(node);
+  if (den.length === 1) {
+    // Polynome.
+    const c = num.map((x) => x / den[0]);
+    const expandedText = polyText(c, v);
+    const f = factorPoly(c, v);
+    const isSum = top.type === "OperatorNode" && (top.op === "+" || top.op === "-") && top.args.length === 2;
+    const factoredT = f && (f.factors.length > 1 || f.factors.some((x) => x.mult > 1) || Math.abs(f.lc - 1) > 1e-12) ? factoredText(f) : null;
+    if (isSum) {
+      // Termes a regrouper d'abord (« 3p + 4p » -> « 7p »), sinon la forme factorisee.
+      if (termCount(top) > c.filter((x) => Math.abs(x) > 1e-12).length) out.push(expandedText);
+      if (factoredT && f!.factors.length > 1) out.push(factoredT);
+    } else {
+      out.push(expandedText);
+      if (factoredT) out.push(factoredT);
+    }
+    return out;
+  }
+  // Fraction : num/den.
+  const fd = factorPoly(den, v);
+  const numText = (c: number[]) => {
+    const t = polyText(c, v);
+    return /[+-]/.test(t.replace(/^-/, "")) ? `(${t})` : t;
+  };
+  const single = top.type === "OperatorNode" && top.op === "/";
+  if (fd) {
+    // den = fd.lc x (facteurs) : la constante passe au numerateur.
+    const nc = num.map((x) => x / fd.lc);
+    const fdText = factoredText({ ...fd, lc: 1 });
+    // Un seul facteur (« (p + 3)^2 », « p ») : pas de parentheses en plus.
+    const oneFactor = fd.factors.length === 1;
+    const combined = `${numText(nc)}/${oneFactor ? fdText : `(${fdText})`}`;
+    const typedFactors = single ? factorCount(top.args[1]) : 0;
+    const full = fd.factors.length;
+    // Denominateur pas encore factorise, ou plusieurs fractions : une seule fraction, denominateur factorise.
+    // ... ou simplifiee (« p × 2/(p(p+1)(p+2)) » -> « 2/((p + 1)(p + 2)) »).
+    if (!single || full > typedFactors || cancelled) out.push(combined);
+    if (num.length < den.length) {
+      const pf = partialFractions(nc, fd, v);
+      if (pf) out.push(pf);
+    }
+  }
+  return out;
+}
+
+/**
+ * Numerateur et denominateur (coefficients) d'une expression rationnelle en
+ * `v`. mathjs.rationalize d'abord ; il echoue sur certaines sommes de
+ * fractions (« 1/p - 2/(p+1) + 1/(p+2) ») : on les ajoute alors une a une.
+ */
+function rationalParts(node: MathNode, v: string): { num: number[]; den: number[] } {
+  const m = M();
+  try {
+    const r: any = m.rationalize(node, {}, true);
+    const num = polynomialCoefficients(r.numerator.toString(), v, 12);
+    // Un polynome n'a pas de denominateur.
+    const den = r.denominator ? polynomialCoefficients(r.denominator.toString(), v, 12) : [1];
+    return { num, den };
+  } catch (e) {
+    const n = strip(node);
+    if (!(n.type === "OperatorNode" && (n.op === "+" || n.op === "-") && n.args.length === 2)) throw e;
+    const a = rationalParts(n.args[0], v), b = rationalParts(n.args[1], v);
+    const s = n.op === "-" ? -1 : 1;
+    return {
+      num: polyAdd(polyMul(a.num, b.den), polyMul(b.num, a.den).map((x) => s * x)),
+      den: polyMul(a.den, b.den),
+    };
+  }
+}
+
+function polyMul(a: number[], b: number[]): number[] {
+  const out = new Array(a.length + b.length - 1).fill(0);
+  a.forEach((x, i) => b.forEach((y, j) => { out[i + j] += x * y; }));
+  return out;
+}
+
+function polyAdd(a: number[], b: number[]): number[] {
+  const out = Array.from({ length: Math.max(a.length, b.length) }, (_, i) => (a[i] ?? 0) + (b[i] ?? 0));
+  while (out.length > 1 && Math.abs(out[out.length - 1]) < 1e-12) out.pop();
+  return out;
+}
+
+function evalPoly(c: number[], x: number): number {
+  return c.reduceRight((a, k) => a * x + k, 0);
+}
+
+/** Division par (x - r) (Horner) ; c du constant au dominant. */
+function divideRoot(c: number[], r: number): number[] {
+  const hi = [...c].reverse();
+  const q: number[] = [];
+  let acc = 0;
+  for (let i = 0; i < hi.length - 1; i++) { acc = acc * r + hi[i]; q.push(acc); }
+  return q.reverse().map((x) => (Math.abs(x - Math.round(x)) < 1e-9 ? Math.round(x) : x));
+}
+
+/**
+ * Decomposition en elements simples de num / (facteurs) : resolue par
+ * identification (solve.ts), ecrite comme on la tape :
+ * « 1/p - 2/(p + 1) + 1/(p + 2) », « -(p + 3)/(4(p^2 + p + 2)) ».
+ */
+function partialFractions(num: number[], f: Factored, v: string): string | null {
+  const names: string[] = [];
+  const terms: { fac: string; pow: number; quad: boolean; names: string[] }[] = [];
+  const fresh = () => { const n = `K${letterName(names.length)}`; names.push(n); return n; };
+  for (const x of f.factors) {
+    const quad = x.root === undefined;
+    for (let j = 1; j <= x.mult; j++) terms.push({ fac: x.text, pow: j, quad, names: quad ? [fresh(), fresh()] : [fresh()] });
+  }
+  if (names.length > 8) return null;
+  const den = (t: { fac: string; pow: number }) => `${t.fac}${t.pow > 1 ? `^${t.pow}` : ""}`;
+  const ansatz = terms.map((t) => (t.quad ? `(${t.names[0]} ${v} + ${t.names[1]})/${den(t)}` : `${t.names[0]}/${den(t)}`)).join(" + ");
+  const F = `(${polyText(num, v)})/(${f.factors.map((x) => `${x.text}${x.mult > 1 ? `^${x.mult}` : ""}`).join(" * ")})`;
+  const r = solveEquation(`${F} = ${ansatz}`);
+  if (!r.ok || !r.values) return null;
+  const val = new Map(r.values.map((x) => [x.name, Number(M().evaluate(x.text))]));
+  let out = "";
+  for (const t of terms) {
+    const cs = t.names.map((n) => val.get(n) ?? NaN);
+    if (cs.some((c) => !Number.isFinite(c))) return null;
+    if (cs.every((c) => Math.abs(c) < 1e-12)) continue;
+    // Coefficients rationnels mis au meme denominateur q : numerateur entier.
+    let q = 1;
+    for (const c of cs) { const t0 = coefText(Math.abs(c)); const mm = /\/(\d+)$/.exec(t0); if (mm) q = (q * Number(mm[1])) / gcd(q, Number(mm[1])); }
+    let ints = cs.map((c) => Math.round(c * q));
+    const lead = t.quad ? (ints[0] !== 0 ? ints[0] : ints[1]) : ints[0];
+    const neg = lead < 0;
+    if (neg) ints = ints.map((c) => -c);
+    const numT = t.quad ? polyText([ints[1], ints[0]], v) : String(ints[0]);
+    const numW = /[+-]/.test(numT.replace(/^-/, "")) ? `(${numT})` : numT;
+    // « 1/p », « 2/(p + 1) », « 1/(p + 3)^2 », « 1/(2p) », « 1/(4(p + 2)) ».
+    const d = den(t);
+    const dFinal = q === 1 ? d : `(${q}${d})`;
+    out += `${out ? (neg ? " - " : " + ") : neg ? "-" : ""}${numW}/${dFinal}`;
+  }
+  return out || null;
 }
 
 /** « p(3+4) » : p n'est pas une fonction connue, c'est un produit. « f(t) » reste une fonction. */
@@ -125,34 +527,17 @@ function toProducts(node: MathNode): MathNode {
   });
 }
 
-function hasSymbols(node: MathNode): boolean {
-  let found = false;
-  node.traverse((n: any, _path: string, parent: any) => {
-    if (n.type === "SymbolNode" && !(parent?.type === "FunctionNode" && parent.fn === n) && n.name !== "pi" && n.name !== "e") found = true;
-  });
-  return found;
-}
-
-/** Distribue les produits sur les sommes (« 5(1 - cos(t)) » -> « 5 - 5cos(t) »), sans autre recriture. */
-const EXPAND = [
-  "n1*(n2+n3) -> n1*n2+n1*n3", "n1*(n2-n3) -> n1*n2-n1*n3",
-  "(n1+n2)*n3 -> n1*n3+n2*n3", "(n1-n2)*n3 -> n1*n3-n2*n3",
-];
-function expanded(node: MathNode): string | null {
-  const m = M();
-  try {
-    const out = m.simplify(node, [...EXPAND, ...(m.simplify as any).rules.filter((r: any) => typeof r === "function")]);
-    return print(out);
-  } catch {
-    return null;
-  }
-}
 
 /* ---------------- factorisation ---------------- */
 
 interface Term { sign: 1 | -1; coef: number; atoms: Map<string, { base: string; pow: number }> }
 
-function factored(node: MathNode): string | null {
+/**
+ * Facteur commun. `strict` (plusieurs lettres, fonctions) : seulement un
+ * facteur litteral commun (pas un simple pgcd des coefficients), et la mise
+ * en facteur partielle seulement d'une fonction (γ(t), Y(p)).
+ */
+function factored(node: MathNode, strict = false): string | null {
   const terms: Term[] = [];
   if (!collect(strip(node), 1, terms) || terms.length < 2) return null;
   const ints = terms.every((t) => Number.isInteger(t.coef));
@@ -163,7 +548,8 @@ function factored(node: MathNode): string | null {
     for (const t of terms.slice(1)) pow = Math.min(pow, t.atoms.get(k)?.pow ?? 0);
     if (pow > 0) common.set(k, { base: a.base, pow });
   }
-  if (g <= 1 && !common.size) return partial(terms);
+  if (g <= 1 && !common.size) return partial(terms, strict);
+  if (strict && !common.size) return null;
   // Somme de nombres : rien a mettre en facteur (« 2 + 12 »).
   if (!common.size && terms.every((t) => !t.atoms.size)) return null;
   if (g < 1) g = 1;
@@ -181,11 +567,14 @@ function factored(node: MathNode): string | null {
  * Facteur commun a une partie des termes seulement : « γ(t) - e^t γ(t) +
  * e^(2t) » -> « γ(t)(1 - e^t) + e^(2t) ». Le facteur le plus frequent.
  */
-function partial(terms: Term[]): string | null {
+function partial(terms: Term[], onlyFunctions = false): string | null {
   const count = new Map<string, number>();
   for (const t of terms) for (const k of t.atoms.keys()) count.set(k, (count.get(k) ?? 0) + 1);
   let best: string | null = null;
-  for (const [k, n] of count) if (n >= 2 && n < terms.length && (!best || n > count.get(best)!)) best = k;
+  for (const [k, n] of count) {
+    if (onlyFunctions && !k.startsWith("zzf")) continue;
+    if (n >= 2 && n < terms.length && (!best || n > count.get(best)!)) best = k;
+  }
   if (!best) return null;
   const inG = terms.filter((t) => t.atoms.has(best!)), rest = terms.filter((t) => !t.atoms.has(best!));
   const pow = Math.min(...inG.map((t) => t.atoms.get(best!)!.pow));
@@ -287,7 +676,9 @@ export function print(n: any): string {
         case "+": return `${print(a)} + ${print(b)}`;
         case "-": return `${print(a)} - ${wrapIf(b, sum(b))}`;
         case "*": {
-          const l = wrapIf(a, sum(a)), r = wrapIf(b, sum(b));
+          // « A(-x) », jamais « A -x ».
+          const neg = (x: any) => x.type === "OperatorNode" && x.op === "-" && x.args.length === 1;
+          const l = wrapIf(a, sum(a)), r = wrapIf(b, sum(b) || neg(b));
           if (/\d$/.test(l) && /^\d/.test(r)) return `${l}·${r}`;
           if (/\d$/.test(l) || r.startsWith("(")) return `${l}${r}`;
           return `${l} ${r}`;

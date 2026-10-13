@@ -609,7 +609,8 @@ export function texToPlain(tex: string): string {
     (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) || productParens(x) ? `(${x.trim()})` : x.trim());
   // Indice compose : entre parentheses, comme on le tape ("u_(n+1)").
   const sub = (x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `(${x.trim()})` : x.trim());
-  let s = tex.replace(/\\left|\\right|\\displaystyle/g, "")
+  // \dfrac, \tfrac : des fractions comme les autres (« \dfrac1p » -> « 1/p »).
+  let s = tex.replace(/\\left|\\right|\\displaystyle/g, "").replace(/\\[dt]frac(?![A-Za-z])/g, "\\frac")
     // Fractions abregees de MathLive : \frac12, \frac1{x}, \frac{a}2.
     .replace(/\\frac\s*([0-9A-Za-z])\s*([0-9A-Za-z])/g, "\\frac{$1}{$2}")
     .replace(/\\frac\s*([0-9A-Za-z])\s*\{/g, "\\frac{$1}{");
