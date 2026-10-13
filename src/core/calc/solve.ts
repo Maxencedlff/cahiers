@@ -135,6 +135,8 @@ function solveCore(equation: string, variable?: string): SolveOutcome {
       return Math.abs(val) < 1e-12
         ? { ok: true, degree: 0, message: "Égalité toujours vraie", roots: [] }
         : { ok: false, message: "Égalité fausse : aucune solution" };
+    } else if (!/(?<![=<>!])=(?!=)/.test(normalizeInput(equation))) {
+      return { ok: false, message: "Pas de signe = : copie toute l'égalité (par exemple F(p) = α/p + …), pas seulement un membre." };
     } else {
       return {
         ok: false,
@@ -787,7 +789,7 @@ function identify(equation: string): SolveOutcome | null {
     const steps = [`\\text{Identification, pour tout } ${xt} :\\; ${greekTex(texOf(L))} = ${greekTex(texOf(R))}`];
     K.forEach((k, i) => {
       const kt = greekTex(texOf(k));
-      let line = `${kt} = ${values[i].latex}`;
+      let line = `${kt} = ${values[i].latex} \\quad \\text{(identification des coefficients)}`;
       try {
         // Terme k/D(x), D du premier degre : on multiplie par D et on prend x au pole.
         // Le terme de k dans R (somme) : k fois c(x) ; D = 1/c.

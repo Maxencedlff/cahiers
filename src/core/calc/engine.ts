@@ -1,3 +1,4 @@
+import { texToPlain } from "../text/doc";
 import { create, all, type MathJsInstance, type MathNode } from "mathjs";
 
 /**
@@ -322,6 +323,9 @@ export class CalcEngine {
  * - µ et Ω pour les unites (10 µF, 2,2 kΩ).
  */
 export function normalizeInput(expr: string, reserved: (name: string) => boolean = () => false): string {
+  // LaTeX colle (copie depuis l'editeur de formule : « $$ \frac{\alpha}{p} $$ ») :
+  // relu comme on le tape (« alpha/p »).
+  if (/\\[A-Za-z]|\$/.test(expr)) expr = texToPlain(expr.replace(/\$/g, " "));
   const s = imagJ(greekNames(expr), reserved)
     .replace(/π/g, "pi")
     .replace(/×|·/g, "*")

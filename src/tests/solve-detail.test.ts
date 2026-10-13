@@ -29,3 +29,13 @@ describe("resolution avec le detail", () => {
     expect(r.values?.map((v) => `${v.name}=${v.text}`)).toEqual(["a=2", "b=1"]);
   });
 });
+
+describe("LaTeX colle dans la calculatrice", () => {
+  it("elements simples avec un trinome, copie en LaTeX", () => {
+    const r = solveEquation("$$ \\frac{2}{p\\left(p+2\\right)\\left(p^2+p+2\\right)}=\\frac{\\alpha}{p}+\\frac{\\beta}{p+2}+\\frac{\\mu p+\\nu}{p^2+p+2} $$");
+    expect(r.values?.map((v) => `${v.name}=${v.text}`)).toEqual(["α=1/2", "β=-1/4", "μ=-1/4", "ν=-3/4"]);
+  });
+  it("un seul membre colle : message clair", () => {
+    expect(solveEquation("$$ \\frac{\\alpha}{p}+\\frac{\\beta}{p+2} $$").message).toMatch(/signe =/);
+  });
+});
