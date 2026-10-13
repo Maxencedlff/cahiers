@@ -238,12 +238,12 @@ describe("reglages de l'encre", () => {
   };
   afterEach(() => { store.clear(); delete (globalThis as { localStorage?: unknown }).localStorage; });
 
-  it("encre noire par defaut, stylet jamais vu", () => {
+  it("encre noire par defaut, le doigt navigue", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     const s = loadSettings();
     expect(s.color).toBe("normal");
     expect(s.textColor).toBeNull();
-    expect(s.penSeen).toBe(false);
+    expect(s.touchWrites).toBe(false);
   });
 
   it("anciens reglages : l'encre suit la couleur du texte (une seule pastille)", () => {
@@ -253,6 +253,8 @@ describe("reglages de l'encre", () => {
     store.set("cahiers.settings.v1", JSON.stringify({ color: "definition", textColor: "theoreme", penSeen: true }));
     const s = loadSettings();
     expect(s.color).toBe("theoreme");
-    expect(s.penSeen).toBe(true);
+    // Ancienne detection du stylet : oubliee, le doigt navigue.
+    expect((s as unknown as { penSeen?: boolean }).penSeen).toBeUndefined();
+    expect(s.touchWrites).toBe(false);
   });
 });

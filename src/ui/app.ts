@@ -190,9 +190,14 @@ export class App {
   /** Couleur du texte tape ; null = noir, le texte normal. */
   private textColor: ColorKey | null = null;
   private width = 2.2;
-  private sawPen = false;
-  /** Ce que fait le doigt tant qu'aucun stylet n'a ete vu (section 3). */
-  private touchWrites = true;
+  /**
+   * Le doigt ecrit (option « Écrire au doigt (sans stylet) ») ; par defaut
+   * il navigue : defilement avec inertie, pinch-zoom, appui = curseur,
+   * appui long = selection (lot stylet).
+   */
+  private touchWrites = false;
+  /** Outil d'avant le lasso : le lasso est ephemere, on y revient. */
+  private beforeLasso: Tool = "pen";
   private renderMode: RenderMode = "ink";
   /** Convertir l'ecriture au fil de la plume plutot qu'a la demande. */
   private autoConvert = false;
@@ -234,9 +239,7 @@ export class App {
     this.tool = isZone(this.settings.tool) ? "pen" : this.settings.tool;
     this.eraserMode = this.settings.eraserMode === "precise" ? "precise" : "stroke";
     this.color = this.settings.color;
-    // Stylet deja vu sur cette machine : le doigt navigue des le lancement,
-    // il ne trace plus sur les notes en attendant le premier contact.
-    this.sawPen = this.settings.penSeen;
+    this.touchWrites = this.settings.touchWrites;
     this.textColor = this.settings.textColor;
     setTypingColor(this.textColor);
     this.width = this.settings.width;
@@ -312,17 +315,6 @@ export class App {
         if (this.screen === "notebook") this.paintToolbar();
       }, 200);
     });
-    // Le premier stylet vu bascule l'application en separation stylet/doigt.
-    window.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "pen" && !this.sawPen) {
-        this.sawPen = true;
-        this.settings.penSeen = true;
-        saveSettings(this.settings);
-        this.paintToolbar();
-        this.paintStatus();
-        toast("Stylet détecté : le doigt sert maintenant à naviguer");
-      }
-    }, true);
     // Bouton « retour » de la souris : comme Alt+←, revient d'avant le saut.
     window.addEventListener("mousedown", (e) => { if (e.button === 3) e.preventDefault(); });
     window.addEventListener("mouseup", (e) => {
@@ -343,12 +335,36 @@ export class App {
   get element(): HTMLElement { return this.root; }
 
   /**
-   * Un stylet detecte impose la separation : le doigt navigue, la paume ne
-   * trace plus. Sans stylet, c'est l'utilisateur qui decide.
+   * Le stylet ecrit, le doigt navigue (section 3) ; « Écrire au doigt (sans
+   * stylet) » est une simple option, pour une machine sans stylet.
    */
   private touchRole(): "write" | "navigate" {
-    if (this.sawPen) return "navigate";
     return this.touchWrites ? "write" : "navigate";
+  }
+
+  /** Option « Écrire au doigt (sans stylet) » (a placer dans les Réglages). */
+  get fingerWrites(): boolean { return this.touchWrites; }
+
+  /** Change l'option « Écrire au doigt (sans stylet) », retenue sur la machine. */
+  setFingerWrites(on: boolean): void {
+    if (this.touchWrites === on) return;
+    this.touchWrites = on;
+    this.settings.touchWrites = on;
+    saveSettings(this.settings);
+    this.paintToolbar();
+    this.paintStatus();
+    toast(on ? "Le doigt écrit (sans stylet)" : "Le doigt fait défiler la page");
+  }
+
+  /**
+   * Lasso ephemere : apres une action de sa barre ou un appui a cote de la
+   * selection, l'outil d'avant revient (le stylo, en general).
+   */
+  private endLasso(): void {
+    if (this.tool !== "lasso") return;
+    this.tool = this.beforeLasso;
+    this.persist();
+    this.paintToolbar();
   }
 
   /** Charge la calculatrice a la demande, une seule fois. */
@@ -758,6 +774,7 @@ export class App {
       getWidth: () => this.width,
       touchRole: () => this.touchRole(),
       onRegionDone: () => this.restoreTool(),
+      onSelectionDone: () => this.endLasso(),
       requestRecognition: (key, kind, strokes, auto, partial) => this.enqueue(key, kind, strokes, auto, partial),
       resumeRecognition: (key, kind, strokes, partial) => this.resume(key, kind, strokes, partial),
       cancelRecognition: (key) => this.cancelRecognition(key),
@@ -1945,10 +1962,10 @@ export class App {
       { on: this.tool === "lasso", name: "lasso", text: "Entourer", hint: "Déplacer, retailler, recolorer, copier", run: () => this.selectTool("lasso") },
       { on: this.tool === "space", name: "space", text: "Insérer de l'espace", hint: "Glisser une ligne : tout ce qui est dessous descend", run: () => this.selectTool("space") },
     ]);
-    // Sans stylet, ce que fait le doigt : un sous-choix du stylo.
-    const penSub = this.sawPen ? undefined : (a: HTMLElement) => optionList(a, "Doigt (pas de stylet)", [
-      { on: this.touchWrites, name: "pen", text: "Le doigt écrit", hint: keysOf("finger"), run: () => { if (!this.touchWrites) this.toggleFinger(); } },
-      { on: !this.touchWrites, name: "hand", text: "Le doigt navigue", hint: "Défilement, pinch-zoom", run: () => { if (this.touchWrites) this.toggleFinger(); } },
+    // Ce que fait le doigt : un sous-choix du stylo (option, en attendant les Réglages).
+    const penSub = (a: HTMLElement) => optionList(a, "Doigt", [
+      { on: !this.touchWrites, name: "hand", text: "Le doigt navigue", hint: "Défilement, pinch-zoom, appui = curseur", run: () => this.setFingerWrites(false) },
+      { on: this.touchWrites, name: "pen", text: "Écrire au doigt (sans stylet)", hint: "Pour une machine sans stylet", run: () => this.setFingerWrites(true) },
     ]);
 
     const eraserTip = this.eraserMode === "precise" ? "Gomme précise" : "Gomme";
@@ -2857,7 +2874,6 @@ export class App {
         return true;
       }
       case "convert": this.setAutoConvert(!this.autoConvert); return true;
-      case "finger": this.toggleFinger(); return true;
       case "viewMode": {
         const v = this.focusedTab()?.view;
         if (v) void this.setViewMode(v.mode === "scroll" ? "pages" : "scroll")
@@ -3009,28 +3025,6 @@ export class App {
     toast(on ? "Correcteur orthographique activé" : "Correcteur orthographique coupé");
   }
 
-  /**
-   * Ctrl+D. Sans stylet : le doigt ecrit ou navigue. Avec un stylet
-   * memorise : l'oublier, sinon un stylet a plat ou oublie laisserait le
-   * doigt sans moyen d'ecrire. Le prochain contact du stylet remet la
-   * separation.
-   */
-  private toggleFinger(): void {
-    if (this.sawPen) {
-      this.sawPen = false;
-      this.touchWrites = true;
-      this.settings.penSeen = false;
-      saveSettings(this.settings);
-      this.paintToolbar();
-      this.paintStatus();
-      toast("Stylet oublié : le doigt écrit jusqu'au prochain contact du stylet");
-      return;
-    }
-    this.touchWrites = !this.touchWrites;
-    this.paintToolbar();
-    this.paintStatus();
-    toast(this.touchWrites ? "Le doigt écrit" : "Le doigt fait défiler la page");
-  }
 
   /** Raccourcis Alt. Renvoie true si la touche a ete prise. */
   private onAltKey(e: KeyboardEvent, inDoc: boolean): boolean {
@@ -3113,6 +3107,7 @@ export class App {
         this.toolLocked = false;
       }
     } else {
+      if (t === "lasso" && (this.tool === "pen" || this.tool === "highlighter")) this.beforeLasso = this.tool;
       this.tool = t;
       this.toolLocked = false;
     }
@@ -3212,7 +3207,6 @@ export class App {
       readOnly: !!tab && this.isLocked(tab.notebook),
       usage: this.usage.count,
       quota: MONTHLY_QUOTA,
-      penSeen: this.sawPen,
       touchWrites: this.touchWrites,
     });
   }

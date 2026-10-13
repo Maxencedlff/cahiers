@@ -34,3 +34,56 @@ export const PALM_DELAY_MS = 400;
 export function isPalm(now: number, penWriting: boolean, lastPenAt: number): boolean {
   return penWriting || now - lastPenAt < PALM_DELAY_MS;
 }
+
+/* ---------------- appui court, appui long ---------------- */
+
+/** Deplacement maximal (pixels d'ecran) d'un appui qui n'est pas un trait. */
+export const TAP_MOVE_PX = 3;
+/** Duree maximale d'un appui court (ms). */
+export const TAP_MS = 200;
+/** Appui long : immobile (a TAP_MOVE_PX pres) pendant ce delai (ms). */
+export const LONG_PRESS_MS = 500;
+/** Doigt : deplacement (pixels) avant de decider que c'est un defilement. */
+export const PAN_SLOP_PX = 6;
+/** Doigt : duree maximale d'un appui court (ms). */
+export const TOUCH_TAP_MS = 350;
+
+/**
+ * Appui court : moins de TAP_MOVE_PX de deplacement et moins de TAP_MS.
+ * Ce n'est jamais de l'encre (audit : les seuls « traits » de 116 pages
+ * reelles etaient des appuis involontaires de 2 points, lus « . »), sauf
+ * point voulu (isWantedDot).
+ */
+export function isTap(movedPx: number, durationMs: number, kind: "pen" | "touch" = "pen"): boolean {
+  // Le doigt est plus large et plus lent qu'une pointe : marge de
+  // defilement (PAN_SLOP_PX) et appui jusqu'a TOUCH_TAP_MS.
+  if (kind === "touch") return movedPx < PAN_SLOP_PX && durationMs < TOUCH_TAP_MS;
+  return movedPx < TAP_MOVE_PX && durationMs < TAP_MS;
+}
+
+/** Trait recent, pour reconnaitre un point voulu (bornes en unites de page). */
+export interface RecentStroke {
+  bounds: { x: number; y: number; w: number; h: number };
+  endedAt: number;
+}
+
+/** Un point voulu touche un trait pose a moins de cette distance (unites de page, ~7 mm). */
+export const DOT_NEAR = 30;
+/** ... et pose depuis moins de ce delai (ms). */
+export const DOT_WINDOW_MS = 1500;
+
+/**
+ * Point voulu : un autre trait a ete pose tout pres dans les 1,5 s (point
+ * du i, accent, virgule decimale). Un appui isole n'en est pas un.
+ */
+export function isWantedDot(
+  p: { x: number; y: number }, now: number, recent: readonly RecentStroke[],
+): boolean {
+  return recent.some((r) => {
+    if (now - r.endedAt > DOT_WINDOW_MS || now < r.endedAt - 50) return false;
+    const b = r.bounds;
+    const dx = Math.max(b.x - p.x, 0, p.x - (b.x + b.w));
+    const dy = Math.max(b.y - p.y, 0, p.y - (b.y + b.h));
+    return Math.hypot(dx, dy) <= DOT_NEAR;
+  });
+}

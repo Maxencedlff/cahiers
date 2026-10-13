@@ -1172,6 +1172,9 @@ export class TextDoc {
     });
     grip.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
+      // Stylet ou doigt : poignees seulement sur une photo selectionnee
+      // (appui long), sinon le stylet ecrit sur la photo (PageView).
+      if (e.pointerType !== "mouse" && !fig.classList.contains("selected")) return;
       e.preventDefault();
       e.stopPropagation();
       grip.setPointerCapture(e.pointerId);
@@ -1258,6 +1261,11 @@ export class TextDoc {
     return !this.root.querySelector(`.doc-img[data-id="${CSS.escape(id)}"]`);
   }
 
+  /** Appui court du stylet sur un bloc vivant (PageView) : comme un appui sans glisser. */
+  tapFigure(fig: HTMLElement): void {
+    if (this.root.contains(fig)) this.tapImage(fig);
+  }
+
   /** Appui sans glisser sur une photo (selection) ou un bloc vivant (selection + calculatrice). */
   private tapImage(fig: HTMLElement): void {
     this.selectImage(fig);
@@ -1268,6 +1276,7 @@ export class TextDoc {
   private gripResize(id: string, fig: HTMLElement, grip: HTMLElement): void {
     grip.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
+      if (e.pointerType !== "mouse" && !fig.classList.contains("selected")) return;
       e.preventDefault();
       e.stopPropagation();
       grip.setPointerCapture(e.pointerId);
@@ -1357,15 +1366,17 @@ export class TextDoc {
   }
 
   /**
-   * Appui sur une photo. Le doigt sur une photo non selectionnee : un appui
-   * la selectionne, un glisser fait defiler (PageView le rend au canvas).
-   * Sinon : glisser deplace la photo, au relachement elle se pose a
-   * l'endroit du texte sous le pointeur ; sans mouvement, elle est
-   * selectionnee.
+   * Appui sur une photo. Le stylet sur une photo non selectionnee ecrit
+   * dessus (PageView le rend au canvas ; un appui long la selectionne).
+   * Le doigt sur une photo non selectionnee : un appui la selectionne, un
+   * glisser fait defiler (PageView le rend au canvas). Sinon : glisser
+   * deplace la photo, au relachement elle se pose a l'endroit du texte sous
+   * le pointeur ; sans mouvement, elle est selectionnee.
    */
   private onImageDown(e: PointerEvent, fig: HTMLElement): void {
     if ((e.target as Element).closest?.(".doc-img-bar, .doc-img-grip")) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.pointerType === "pen" && !fig.classList.contains("selected")) return;
     if (this.field || this.root.contentEditable === "false") return;
     const x0 = e.clientX, y0 = e.clientY;
     const far = (m: PointerEvent) => Math.hypot(m.clientX - x0, m.clientY - y0) > 8;

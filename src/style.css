@@ -554,6 +554,16 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
    defiler la page. Le defilement au doigt est gere dans InkSurface. */
 .sheet canvas { touch-action: none; }
 .sheet canvas { display: block; width: 100%; height: 100%; }
+/* Stylet au-dessus de la feuille : plus de I de texte, le canvas peint un
+   point de la couleur et de l'epaisseur du stylo (lot stylet). */
+.sheet.pen-hover, .sheet.pen-hover * { cursor: none !important; }
+/* Poignees d'une photo non selectionnee : pas au stylet (il ecrit dessus). */
+.sheet.pen-hover .text-doc .doc-img:not(.selected) .doc-img-grip { opacity: 0; }
+.sheet.pen-hover .text-doc .doc-img:not(.selected):hover { outline-color: transparent; }
+/* Calque d'encre d'une photo du texte : l'encre posee dessus (InkSurface). */
+.text-doc .doc-img > canvas.img-ink {
+  position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; border-radius: 3px;
+}
 .sheet .overlay { position: absolute; inset: 0; pointer-events: none; }
 .sheet .overlay > * { pointer-events: auto; }
 /* Barre d'actions de la selection au lasso (encre-13) : cibles de 44 px. */

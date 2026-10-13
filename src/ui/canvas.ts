@@ -5,7 +5,11 @@ import {
   widthAt, boundsIntersect, roundPoint, HIGHLIGHT_FACTOR, type Bounds,
 } from "../core/ink/stroke";
 import { PAGE_W, PAGE_H } from "../core/ink/sheet";
-import { gestureTool, isPalm } from "../core/ink/pointer";
+import {
+  gestureTool, isPalm, isTap, isWantedDot, LONG_PRESS_MS, PAN_SLOP_PX, TAP_MOVE_PX, type RecentStroke,
+} from "../core/ink/pointer";
+import { HOLD_MS, isScribble, scribbleTargets, straighten } from "../core/ink/gestures";
+import { Fling, VelocityTracker } from "../core/kinetic";
 import { paperLines, paperDots, PAPER_STYLE, DOT_STYLE, type PaperKind } from "../core/paper";
 import {
   applyBounds, clampMove, resizeTransform, splitStroke, translation, isIdentity, polygonBounds,
@@ -67,6 +71,28 @@ export interface InkSurfaceOptions {
    * secours de la section 3, pour une machine sans stylet.
    */
   touchRole: () => Exclude<PointerRole, "ignore">;
+  /**
+   * Appui court (stylet ou doigt, jamais de l'encre) : la vue place le
+   * curseur du texte sous le point (lot stylet). Point en unites de page.
+   */
+  onTap?: (p: Pt, e: PointerEvent) => void;
+  /**
+   * Appui long immobile (stylet ou doigt) : la vue selectionne le mot ou
+   * les traits sous le point, ou la photo. Vrai si quelque chose a ete pris
+   * (le trait commence est alors abandonne).
+   */
+  onLongPress?: (p: Pt, e: { clientX: number; clientY: number; pointerType: string }) => boolean;
+  /**
+   * Appui court a cote de la selection : elle est tombee (onSelectionCleared)
+   * et rien d'autre ne se fait. Le lasso ephemere rend le stylo.
+   */
+  onDismiss?: () => void;
+}
+
+/** Element couvert par une photo du texte, avec son calque d'encre transparent. */
+export interface PhotoLayer {
+  canvas: HTMLCanvasElement;
+  frame: HTMLElement;
 }
 
 /**
@@ -83,6 +109,55 @@ function watchPen(): void {
   for (const t of ["pointerdown", "pointermove", "pointerup"] as const) {
     window.addEventListener(t, note, { capture: true, passive: true });
   }
+}
+
+/* ---------------- inertie du defilement (core/kinetic.ts) ---------------- */
+
+let flingRaf = 0;
+let flingWatched = false;
+
+/** Arrete toute glisse en cours (appui, molette, touche). */
+export function stopFlings(): void {
+  if (flingRaf) cancelAnimationFrame(flingRaf);
+  flingRaf = 0;
+}
+
+function watchFlings(): void {
+  if (flingWatched || typeof window === "undefined") return;
+  flingWatched = true;
+  for (const t of ["pointerdown", "wheel", "keydown"] as const) {
+    window.addEventListener(t, stopFlings, { capture: true, passive: true });
+  }
+}
+
+/**
+ * Lance une glisse sur `box` a la vitesse (vx, vy) en px/ms (sens du
+ * defilement). Courte, arretee au moindre appui ou au bord : jamais de
+ * boucle en fond (section 9).
+ */
+export function flingScroll(box: HTMLElement, vx: number, vy: number): void {
+  stopFlings();
+  watchFlings();
+  if (!Fling.worth(vx, vy)) return;
+  const f = new Fling(vx, vy);
+  let last = performance.now();
+  let x = box.scrollLeft, y = box.scrollTop;
+  const tick = (now: number) => {
+    flingRaf = 0;
+    if (!box.isConnected) return;
+    const d = f.step(now - last);
+    last = now;
+    x += d.dx; y += d.dy;
+    box.scrollLeft = x;
+    box.scrollTop = y;
+    // Bord atteint sur les deux axes : la glisse s'arrete.
+    const stuckY = Math.abs(box.scrollTop - y) > 1 || Math.abs(d.dy) < 0.05;
+    const stuckX = Math.abs(box.scrollLeft - x) > 1 || Math.abs(d.dx) < 0.05;
+    x = box.scrollLeft; y = box.scrollTop;
+    if (f.done || (stuckX && stuckY)) return;
+    flingRaf = requestAnimationFrame(tick);
+  };
+  flingRaf = requestAnimationFrame(tick);
 }
 
 /**
@@ -170,10 +245,36 @@ export class InkSurface {
    * attendant le rendu net. `rect` sans `img` : cadre seul (rendu a venir).
    */
   private backdrop: { img: CanvasImageSource | null; w: number; h: number; rect: Bounds } | null = null;
-  /** Defilement au doigt, pris en charge ici faute de geste natif. */
+  /**
+   * Defilement au doigt, pris en charge ici faute de geste natif. Il ne
+   * commence qu'apres PAN_SLOP_PX : un appui reste un appui (curseur), un
+   * appui long une selection.
+   */
   private pan: {
     pointerId: number; startX: number; startY: number; startLeft: number; startScroll: number;
+    moved: boolean; t0: number; tracker: VelocityTracker;
   } | null = null;
+  /** Debut du geste en cours : heure, point d'ecran, plus grand ecart (px). */
+  private downAt = 0;
+  private downClient = { x: 0, y: 0 };
+  private maxMovePx = 0;
+  /** Dernier point du geste (ecran et page), pour l'appui long et le redressement. */
+  private lastClient = { x: 0, y: 0 };
+  /** Pointe immobile depuis `t` autour de (x, y) : appui long ou redressement. */
+  private hold: { id: number; x: number; y: number; t: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Trait redresse (segment, rectangle) : la suite du geste ne le change plus. */
+  private snapped = false;
+  /** Appui long sans rien a prendre : s'il reste immobile, ce n'est pas un point. */
+  private pressed = false;
+  /** Selection tombee par cet appui : un appui court ne fait rien d'autre. */
+  private dismissed = false;
+  /** Derniers traits poses (point voulu : isWantedDot). */
+  private recent: RecentStroke[] = [];
+  /** Apercu de la pointe au survol du stylet (couleur et epaisseur du stylo). */
+  private hoverDot = false;
+  /** Photos du texte : l'encre posee dessus est peinte dans leur calque. */
+  private layers: PhotoLayer[] = [];
+  private layerRects: (Bounds | null)[] = [];
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -382,18 +483,26 @@ export class InkSurface {
   }
 
   private onDown = (e: PointerEvent) => {
-    // Le doigt deplace une selection meme quand il navigue : c'est le geste
-    // attendu au doigt, et sur le cadre il n'y a rien a faire defiler.
-    const grab = this.selection && this.activePointer === null
-      && (e.pointerType !== "mouse" || e.button === 0)
-      && gestureTool(e, "lasso") !== "eraser"
-      && !(e.pointerType === "touch" && isPalm(e.timeStamp, this.penWriting, lastPenAt))
-      && (this.opts.getTool() === "lasso" || this.opts.getTool() === "space")
-      ? this.hitSelection(this.toPage(e)) : null;
+    stopFlings();
+    this.dismissed = false;
+    const palm = e.pointerType === "touch" && isPalm(e.timeStamp, this.penWriting, lastPenAt);
+    // Une selection (lasso ou appui long) se deplace au stylet, a la souris
+    // ET au doigt, quel que soit l'outil : sur le cadre il n'y a rien a
+    // faire defiler. Un appui a cote la fait tomber.
+    let grab: "resize" | "move" | null = null;
+    if (this.selection && this.activePointer === null && !palm
+        && (e.pointerType !== "mouse" || e.button === 0) && gestureTool(e, "lasso") !== "eraser") {
+      grab = this.hitSelection(this.toPage(e));
+      if (!grab && !this.drag) {
+        this.opts.onSelectionCleared?.();
+        this.setSelection(null);
+        this.dismissed = true;
+      }
+    }
     if (this.roleOf(e) === "navigate" && !grab) {
       // Paume posee pendant ou juste apres un trait : elle ne fait pas
       // defiler la page sous la plume.
-      if (!isPalm(e.timeStamp, this.penWriting, lastPenAt)) this.startPan(e);
+      if (!palm) this.startPan(e);
       return;
     }
     if (this.roleOf(e) !== "write" && !grab) return;
@@ -404,6 +513,12 @@ export class InkSurface {
     this.tool = tool;
     this.activePointer = e.pointerId;
     this.activeType = e.pointerType;
+    this.downAt = e.timeStamp;
+    this.downClient = { x: e.clientX, y: e.clientY };
+    this.lastClient = { x: e.clientX, y: e.clientY };
+    this.maxMovePx = 0;
+    this.snapped = false;
+    this.pressed = false;
     if (e.pointerType === "pen") lastPenAt = e.timeStamp;
     // Un defilement au doigt deja lance s'arrete quand le stylet se pose.
     if (this.pan && e.pointerType === "pen") this.stopPan();
@@ -421,13 +536,11 @@ export class InkSurface {
       return;
     }
     if (tool === "lasso") {
-      if (this.selection) { this.opts.onSelectionCleared?.(); this.setSelection(null); }
       this.lasso = [p];
       return;
     }
     if (tool === "space") {
       const below = this.opts.spaceBelow?.(p.y);
-      if (this.selection) { this.opts.onSelectionCleared?.(); this.setSelection(null); }
       this.drag = {
         kind: "space", start: p, ids: below?.ids ?? new Set(), bounds: { x: 0, y: p.y, w: PAGE_W, h: 0 },
         started: false, clamp: below?.clamp,
@@ -451,17 +564,121 @@ export class InkSurface {
     const width = tool === "highlighter" ? Math.round(base * HIGHLIGHT_FACTOR * 10) / 10 : base;
     this.live = newStroke(this.opts.getColor(), width, tool);
     this.liveLast = null;
+    this.refreshLayerRects();
     this.addPoint(e, p);
+    // Appui long (selection) ou pointe tenue en fin de trait (redressement).
+    if (e.pointerType !== "mouse") this.armHold(e);
   };
+
+  /** Note le mouvement du geste : ecart maximal, pointe qui repart. */
+  private noteMove(e: PointerEvent): void {
+    this.lastClient = { x: e.clientX, y: e.clientY };
+    const d = Math.hypot(e.clientX - this.downClient.x, e.clientY - this.downClient.y);
+    if (d > this.maxMovePx) this.maxMovePx = d;
+    const h = this.hold;
+    // Tremblement de la main (4 px) toleré : la pointe reste « immobile ».
+    if (h && h.id === e.pointerId && Math.hypot(e.clientX - h.x, e.clientY - h.y) > TAP_MOVE_PX + 1) {
+      h.x = e.clientX; h.y = e.clientY; h.t = e.timeStamp;
+    }
+  }
+
+  /** Arme le minuteur de la pointe immobile (un seul, relance s'il le faut). */
+  private armHold(e: PointerEvent): void {
+    this.disarmHold();
+    const id = e.pointerId;
+    const delay = () => (this.live && this.maxMovePx >= TAP_MOVE_PX ? HOLD_MS : LONG_PRESS_MS);
+    const check = () => {
+      const h = this.hold;
+      if (!h || h.id !== id) return;
+      const left = h.t + delay() - performance.now();
+      if (left > 15) { h.timer = setTimeout(check, left); return; }
+      this.hold = null;
+      this.onHold(id);
+    };
+    this.hold = { id, x: e.clientX, y: e.clientY, t: e.timeStamp, timer: setTimeout(check, LONG_PRESS_MS) };
+  }
+
+  private disarmHold(): void {
+    if (this.hold) clearTimeout(this.hold.timer);
+    this.hold = null;
+  }
+
+  /** Point d'ecran -> unites de page (sans evenement). */
+  private clientToPage(x: number, y: number): Pt {
+    const r = this.canvas.getBoundingClientRect();
+    const k = r.width > 0 ? r.width / PAGE_W : this.scale;
+    return { x: (x - r.left) / k, y: (y - r.top) / k };
+  }
+
+  /**
+   * Pointe (ou doigt) immobile. Sans avoir bouge : appui long, la vue
+   * prend ce qui est sous le point (et le geste devient un deplacement de
+   * la selection). Apres un trait : redressement en segment ou rectangle.
+   */
+  private onHold(id: number): void {
+    const c = this.lastClient;
+    const p = this.clientToPage(c.x, c.y);
+    const info = { clientX: c.x, clientY: c.y, pointerType: this.pan?.pointerId === id ? "touch" : this.activeType };
+    if (this.pan && this.pan.pointerId === id) {
+      if (this.pan.moved) return;
+      if (!this.opts.onLongPress?.(p, info)) return;
+      this.pan = null;
+      this.takeSelection(id, "touch", p);
+      return;
+    }
+    if (this.activePointer !== id || !this.live) return;
+    if (this.maxMovePx < TAP_MOVE_PX) {
+      this.pressed = true;
+      if (!this.opts.onLongPress?.(p, info)) return;
+      this.dropLive();
+      this.takeSelection(id, this.activeType, p);
+      return;
+    }
+    if (this.activeType !== "pen" || this.snapped) return;
+    const shape = straighten(this.live.points);
+    if (!shape) return;
+    const before = cachedBounds(this.live, 2);
+    this.live.points = shape.points;
+    this.liveLast = shape.points[shape.points.length - 1];
+    this.snapped = true;
+    this.markDirty(unionBounds([before, cachedBounds(this.live, 2)]));
+  }
+
+  /** Abandonne le trait en cours (appui court, appui long, gribouillage). */
+  private dropLive(): void {
+    const live = this.live;
+    this.live = null;
+    this.liveLast = null;
+    if (live?.points.length) this.markDirty(cachedBounds(live, 2));
+  }
+
+  /**
+   * Apres un appui long qui a pris quelque chose : si c'est une selection
+   * sous le point, le geste continue en la deplacant (comme sur GoodNotes) ;
+   * sinon il est simplement avale.
+   */
+  private takeSelection(id: number, type: string, p: Pt): void {
+    this.activePointer = id;
+    this.activeType = type;
+    this.tool = "lasso";
+    this.capture(id);
+    if (this.selection && this.hitSelection(p) === "move") {
+      this.drag = { kind: "move", start: p, ids: this.selection.ids, bounds: this.selection.bounds, started: false };
+    } else {
+      this.drag = null;
+    }
+  }
 
   private onMove = (e: PointerEvent) => {
     if (this.pan && e.pointerId === this.pan.pointerId) { this.movePan(e); return; }
     if (e.pointerId !== this.activePointer) return;
     const tool = this.tool;
     e.preventDefault();
+    this.noteMove(e);
 
     if (this.drag) { this.moveDrag(this.toPage(e)); return; }
-    if (this.lasso) {
+    if (tool === "lasso") {
+      if (!this.lasso) return; // appui long avale : rien a suivre
       const p = this.toPage(e);
       const last = this.lasso[this.lasso.length - 1];
       if (Math.hypot(p.x - last.x, p.y - last.y) < 1.5) return;
@@ -488,7 +705,7 @@ export class InkSurface {
       }
       return;
     }
-    if (!this.live) return;
+    if (!this.live || this.snapped) return;
 
     // getCoalescedEvents rend les points perdus entre deux frames :
     // sans ca un trait rapide devient un polygone.
@@ -500,16 +717,27 @@ export class InkSurface {
 
   private onUp = (e: PointerEvent) => {
     if (this.pan && e.pointerId === this.pan.pointerId) {
-      this.stopPan();
+      const pan = this.pan;
+      this.disarmHold();
+      const tap = !pan.moved && e.type === "pointerup" && isTap(0, e.timeStamp - pan.t0, "touch");
+      this.stopPan(e.type === "pointerup" ? e.timeStamp : undefined);
+      if (tap) {
+        if (this.dismissed) this.opts.onDismiss?.();
+        else this.opts.onTap?.(this.toPage(e), e);
+      }
       return;
     }
     if (e.type === "pointerleave") this.clearHover();
     if (e.pointerId !== this.activePointer) return;
     const tool = this.tool;
+    const type = this.activeType;
+    this.disarmHold();
     this.activePointer = null;
     this.activeType = "";
     this.tool = null;
     this.release(e.pointerId);
+    const dur = e.timeStamp - this.downAt;
+    const tapped = e.type === "pointerup" && isTap(this.maxMovePx, dur);
 
     if (this.drag) { this.endDrag(); return; }
     if (this.lasso) {
@@ -518,6 +746,7 @@ export class InkSurface {
       this.markDirty(padBounds(polygonBounds(poly), 4));
       const b = polygonBounds(poly);
       if (poly.length >= 3 && (b.w > 4 || b.h > 4)) this.opts.onLasso?.(poly);
+      else if (tapped) this.opts.onDismiss?.();
       return;
     }
     if (this.regionStart && this.regionNow) {
@@ -534,13 +763,31 @@ export class InkSurface {
       this.eraserPos = null;
       return;
     }
-    if (!this.live) return;
+    if (!this.live) {
+      if (tool === "lasso" && tapped) this.opts.onDismiss?.();
+      return;
+    }
 
     const stroke = this.live;
+    // Appui court : jamais de l'encre (sauf point voulu, tout pres d'un
+    // trait pose a l'instant : point du i, accent, virgule). Il place le
+    // curseur du texte, ou fait tomber la selection.
+    // Appui long immobile sur rien : pas un point non plus (main posee).
+    if (this.pressed && this.maxMovePx < TAP_MOVE_PX) { this.dropLive(); return; }
+    if (!this.snapped && (tapped || (e.type !== "pointerup" && isTap(this.maxMovePx, dur)))) {
+      const at = stroke.points[0] ?? this.toPage(e);
+      if (!isWantedDot(at, e.timeStamp, this.recent)) {
+        this.dropLive();
+        if (!tapped) return;
+        if (this.dismissed) this.opts.onDismiss?.();
+        else this.opts.onTap?.(at, e);
+        return;
+      }
+    }
     this.live = null;
     this.liveLast = null;
     if (stroke.points.length < 2) {
-      // Un point isole reste un point : utile pour un accent ou une virgule.
+      // Point voulu : il reste un point (accent, virgule).
       if (stroke.points.length === 1) {
         stroke.points.push({ ...stroke.points[0], x: stroke.points[0].x + 0.6 });
       } else {
@@ -548,12 +795,37 @@ export class InkSurface {
       }
     }
     const before = cachedBounds(stroke, 2);
-    stroke.points = simplify(stroke.points, 0.55);
+    // Gribouillage au stylet par-dessus de l'encre : il l'efface.
+    if (type === "pen" && stroke.tool === "pen" && !this.snapped && isScribble(stroke.points)) {
+      const ids = scribbleTargets(stroke.points, [...this.strokes, ...this.hidden]);
+      if (ids.length) {
+        this.markDirty(before);
+        this.opts.onEraseStart?.();
+        this.removeStrokes(new Set(ids));
+        this.opts.onErase(ids);
+        return;
+      }
+    }
+    if (!this.snapped) stroke.points = simplify(stroke.points, 0.55);
     this.strokes.push(stroke);
+    this.recent.push({ bounds: cachedBounds(stroke), endedAt: e.timeStamp });
+    if (this.recent.length > 8) this.recent.shift();
     // Repeint le trait simplifie : l'aspect apres coup est celui du fichier.
     this.markDirty(before);
     this.opts.onStrokeEnd(stroke);
   };
+
+  /** Retire des traits de la surface (gribouillage), zone repeinte. */
+  private removeStrokes(ids: ReadonlySet<string>): void {
+    const boxes: Bounds[] = [];
+    this.strokes = this.strokes.filter((s) => {
+      if (!ids.has(s.id)) return true;
+      boxes.push(cachedBounds(s, 2));
+      return false;
+    });
+    this.hidden = this.hidden.filter((s) => !ids.has(s.id));
+    if (boxes.length) this.markDirty(unionBounds(boxes));
+  }
 
   /**
    * Survol de la page (relaye par la feuille, car la couche texte couvre le
@@ -567,18 +839,33 @@ export class InkSurface {
       return;
     }
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
-    const eraser = (e.pointerType === "pen" && (e.buttons & 32) !== 0)
-      || this.opts.getTool() === "eraser";
-    if (!eraser) { this.clearHover(); return; }
+    const tool = this.opts.getTool();
+    const eraser = (e.pointerType === "pen" && (e.buttons & 32) !== 0) || tool === "eraser";
+    // Stylet au-dessus de la feuille : un point de la couleur et de
+    // l'epaisseur du stylo montre ou il va ecrire (la souris garde le I).
+    const dot = !eraser && e.pointerType === "pen" && (tool === "pen" || tool === "highlighter");
+    if (!eraser && !dot) { this.clearHover(); return; }
     const p = this.toPage(e);
-    if (this.hoverPos) this.markDirty(circleBounds(this.hoverPos));
+    if (this.hoverPos) this.markDirty(this.hoverZone(this.hoverPos));
     this.hoverPos = p;
-    this.markDirty(circleBounds(p));
+    this.hoverDot = dot;
+    this.markDirty(this.hoverZone(p));
+  }
+
+  /** Rayon du point de survol (unites de page) : le trait que le stylo va tracer. */
+  private dotRadius(): number {
+    const w = this.opts.getWidth();
+    return this.opts.getTool() === "highlighter" ? (w * HIGHLIGHT_FACTOR) / 2 : Math.max(0.9, widthAt(w, 0.5) / 2);
+  }
+
+  private hoverZone(p: { x: number; y: number }): Bounds {
+    const r = Math.max(ERASER_R, this.hoverDot ? this.dotRadius() : 0) + 2;
+    return { x: p.x - r, y: p.y - r, w: 2 * r, h: 2 * r };
   }
 
   private clearHover(): void {
     if (!this.hoverPos) return;
-    this.markDirty(circleBounds(this.hoverPos));
+    this.markDirty(this.hoverZone(this.hoverPos));
     this.hoverPos = null;
   }
 
@@ -601,10 +888,17 @@ export class InkSurface {
     const box = this.scroller();
     if (!box) return;
     this.capture(e.pointerId);
+    const tracker = new VelocityTracker();
+    tracker.add(e.timeStamp, e.clientX, e.clientY);
     this.pan = {
       pointerId: e.pointerId, startX: e.clientX, startY: e.clientY,
-      startLeft: box.scrollLeft, startScroll: box.scrollTop,
+      startLeft: box.scrollLeft, startScroll: box.scrollTop, moved: false, t0: e.timeStamp, tracker,
     };
+    this.lastClient = { x: e.clientX, y: e.clientY };
+    this.downClient = { x: e.clientX, y: e.clientY };
+    this.maxMovePx = 0;
+    // Doigt immobile 500 ms sur un mot ou des traits : selection directe.
+    this.armHold(e);
   }
 
   /**
@@ -614,6 +908,7 @@ export class InkSurface {
    */
   cancelPan(): void {
     this.stopPan();
+    this.disarmHold();
     if (this.activePointer === null || this.activeType !== "touch") return;
     const id = this.activePointer;
     const live = this.live;
@@ -683,10 +978,19 @@ export class InkSurface {
     return this.activePointer !== null && this.activeType !== "touch";
   }
 
-  private stopPan(): void {
-    if (!this.pan) return;
-    this.release(this.pan.pointerId);
+  /**
+   * Fin du defilement au doigt. `liftAt` = heure du lever : le doigt
+   * lache en mouvement lance l'inertie (core/kinetic.ts).
+   */
+  private stopPan(liftAt?: number): void {
+    const pan = this.pan;
+    if (!pan) return;
+    this.release(pan.pointerId);
     this.pan = null;
+    if (liftAt === undefined || !pan.moved) return;
+    const box = this.scroller();
+    const v = pan.tracker.velocity(liftAt);
+    if (box) flingScroll(box, -v.vx, -v.vy);
   }
 
   /** La capture est un confort, pas une condition : elle ne doit rien casser. */
@@ -704,14 +1008,26 @@ export class InkSurface {
 
   private movePan(e: PointerEvent) {
     const box = this.scroller();
-    if (!box || !this.pan) return;
+    const pan = this.pan;
+    if (!box || !pan) return;
     // Le stylet s'est pose pendant le geste : c'etait la paume.
-    if (this.penWriting) { this.stopPan(); return; }
+    if (this.penWriting) { this.stopPan(); this.disarmHold(); return; }
     e.preventDefault();
-    box.scrollTop = this.pan.startScroll - (e.clientY - this.pan.startY);
+    this.noteMove(e);
+    pan.tracker.add(e.timeStamp, e.clientX, e.clientY);
+    if (!pan.moved) {
+      // Sous PAN_SLOP_PX, c'est encore un appui (curseur, appui long).
+      if (Math.hypot(e.clientX - pan.startX, e.clientY - pan.startY) < PAN_SLOP_PX) return;
+      pan.moved = true;
+      this.disarmHold();
+      // Le defilement part d'ici : pas de saut des premiers pixels.
+      pan.startX = e.clientX; pan.startY = e.clientY;
+      pan.startLeft = box.scrollLeft; pan.startScroll = box.scrollTop;
+    }
+    box.scrollTop = pan.startScroll - (e.clientY - pan.startY);
     // Feuille zoomee plus large que la vue : le doigt la deplace aussi
     // de cote (sans largeur a defiler, scrollLeft reste a 0).
-    box.scrollLeft = this.pan.startLeft - (e.clientX - this.pan.startX);
+    box.scrollLeft = pan.startLeft - (e.clientX - pan.startX);
   }
 
   private addPoint(e: PointerEvent, p: { x: number; y: number }) {
@@ -841,10 +1157,85 @@ export class InkSurface {
     if (this.paper !== "uni") this.drawPaper(ctx, x, y, w, h, k);
     if (this.backdrop) this.drawBackdrop(ctx, x, y, w, h, k);
     ctx.scale(k, k);
+    const zone: Bounds = { x: x / k, y: y / k, w: w / k, h: h / k };
+    this.paintInk(ctx, zone);
+    ctx.restore();
+    if (this.layers.length) this.flushLayers(zone);
+  }
 
+  /* ---------------- calques des photos ---------------- */
+
+  /**
+   * Photos du texte (lot stylet) : la couche texte passe devant le canvas,
+   * l'encre posee sur une photo y serait cachee. Chaque photo porte donc un
+   * calque transparent ou l'on repeint, decoupee a la photo, la meme encre
+   * que sur la page. Le calque suit la photo dans le texte.
+   */
+  setPhotoLayers(layers: PhotoLayer[]): void {
+    const same = layers.length === this.layers.length && layers.every((l, i) => l.canvas === this.layers[i].canvas);
+    this.layers = layers;
+    this.refreshLayerRects();
+    if (same) return;
+    for (const r of this.layerRects) if (r) this.markDirty(r);
+  }
+
+  /** Place des photos sur la page (unites de page), relue avant de peindre. */
+  private refreshLayerRects(): void {
+    if (!this.layers.length) { this.layerRects = []; return; }
+    const c = this.canvas.getBoundingClientRect();
+    const k = c.width > 0 ? c.width / PAGE_W : this.scale || 1;
+    this.layerRects = this.layers.map((l) => {
+      if (!l.frame.isConnected) return null;
+      const r = l.frame.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return null;
+      return { x: (r.left - c.left) / k, y: (r.top - c.top) / k, w: r.width / k, h: r.height / k };
+    });
+  }
+
+  /** Repeint la zone sale dans les calques des photos qu'elle touche. */
+  private flushLayers(zone: Bounds): void {
+    this.refreshLayerRects();
+    this.layers.forEach((l, i) => {
+      const r = this.layerRects[i];
+      if (!r) return;
+      const cw = Math.max(1, Math.round(l.frame.getBoundingClientRect().width * this.dpr));
+      const ch = Math.max(1, Math.round(cw * (r.h / r.w)));
+      let z = zone;
+      if (l.canvas.width !== cw || l.canvas.height !== ch) {
+        l.canvas.width = cw;
+        l.canvas.height = ch;
+        z = r; // nouvelle taille : tout le calque
+      } else if (!boundsIntersect(zone, r)) {
+        return;
+      }
+      const ctx = l.canvas.getContext("2d");
+      if (!ctx) return;
+      const ko = cw / r.w;
+      const x = Math.max(0, Math.floor((z.x - r.x) * ko) - 2);
+      const y = Math.max(0, Math.floor((z.y - r.y) * ko) - 2);
+      const w = Math.min(cw - x, Math.ceil(z.w * ko) + 4);
+      const h = Math.min(ch - y, Math.ceil(z.h * ko) + 4);
+      if (w <= 0 || h <= 0) return;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(x, y, w, h);
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
+      ctx.setTransform(ko, 0, 0, ko, -r.x * ko, -r.y * ko);
+      this.paintInk(ctx, { x: r.x + x / ko, y: r.y + y / ko, w: w / ko, h: h / ko });
+      ctx.restore();
+    });
+  }
+
+  /**
+   * Encre de la zone (unites de page, transformation deja posee) :
+   * surligneurs, traits, apercu d'un deplacement, selection, gomme, zone,
+   * point de survol.
+   */
+  private paintInk(ctx: CanvasRenderingContext2D, zone: Bounds): void {
     // Surligneurs d'abord, stylos ensuite : le surlignage passe sous
     // l'encre, meme pose apres elle.
-    const zone: Bounds = { x: x / k, y: y / k, w: w / k, h: h / k };
     const marks: Stroke[] = [], pens: Stroke[] = [];
     const pv = this.preview;
     const moving: Stroke[] = [];
@@ -868,7 +1259,17 @@ export class InkSurface {
     }
     this.drawSelection(ctx);
 
-    const circle = this.eraserPos ?? this.hoverPos;
+    const hp = this.hoverPos;
+    if (hp && this.hoverDot && !this.eraserPos) {
+      ctx.beginPath();
+      ctx.arc(hp.x, hp.y, this.dotRadius(), 0, Math.PI * 2);
+      const tool = this.opts.getTool() === "highlighter" ? "highlighter" : "pen";
+      ctx.fillStyle = inkDisplayColor(this.opts.getColor(), tool, this.tone);
+      ctx.globalAlpha = tool === "highlighter" ? HIGHLIGHT_ALPHA : 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    const circle = this.eraserPos ?? (this.hoverDot ? null : hp);
     if (circle) {
       ctx.beginPath();
       ctx.arc(circle.x, circle.y, ERASER_R, 0, Math.PI * 2);
@@ -886,7 +1287,6 @@ export class InkSurface {
       ctx.fillStyle = "rgba(37,99,235,.07)";
       ctx.fillRect(r.x, r.y, r.w, r.h);
     }
-    ctx.restore();
   }
 
   /** Cadre de selection, trace du lasso, ligne d'insertion d'espace. */
@@ -1014,6 +1414,24 @@ export class InkSurface {
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
     ctx.restore();
+    // Sur une photo : le meme segment dans son calque, sinon la photo le cache.
+    this.layers.forEach((l, i) => {
+      const r = this.layerRects[i];
+      if (!r || !l.canvas.width || !boundsIntersect(r, padBounds(rectOf(a, b), s.width))) return;
+      const lc = l.canvas.getContext("2d");
+      if (!lc) return;
+      const ko = l.canvas.width / r.w;
+      lc.save();
+      lc.setTransform(ko, 0, 0, ko, -r.x * ko, -r.y * ko);
+      lc.lineCap = "round";
+      lc.strokeStyle = inkDisplayColor(s.color, s.tool, this.tone);
+      lc.lineWidth = widthAt(s.width, (a.p + b.p) / 2);
+      lc.beginPath();
+      lc.moveTo(a.x, a.y);
+      lc.lineTo(b.x, b.y);
+      lc.stroke();
+      lc.restore();
+    });
   }
 
   private drawStroke(ctx: CanvasRenderingContext2D, s: Stroke) {
