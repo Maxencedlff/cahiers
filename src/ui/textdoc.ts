@@ -332,7 +332,8 @@ export class TextDoc {
    * apres le curseur. Fleche droite la pose, toute autre frappe l'oublie.
    * Posee par PageView ; absente = pas de suggestion.
    */
-  suggester: ((line: string) => { insert: string; replace: number } | null) | null = null;
+  /** `prev` : la derniere ligne non vide au-dessus, formules relues en clair (suite d'un calcul « = … »). */
+  suggester: ((line: string, prev: string) => { insert: string; replace: number } | null) | null = null;
   /** Calque de la suggestion : frere du texte (jamais dans le contenu, la pagination ou l'annulation). */
   private ghost: HTMLElement | null = null;
   /** Curseur et suggestion montres. */
@@ -363,7 +364,7 @@ export class TextDoc {
     if ((eol < 0 ? rest : rest.slice(0, eol)).replace(/[\s\u200b]/g, "")) return;
     if (eol < 0 && after.cloneContents().querySelector(".eq, .doc-img")) return;
     const line = this.lineAt(node as Text, r.startOffset);
-    const s = this.suggester(line.full);
+    const s = this.suggester(line.full, line.full.trim().startsWith("=") ? this.prevLinePlain(r) : "");
     if (!s) return;
     const rect = caretRect(r, this.root);
     const host = this.root.parentElement;
@@ -388,6 +389,19 @@ export class TextDoc {
       g.classList.add("below");
     } else g.classList.remove("below");
     this.ghostAt = { node: node as Text, offset: r.startOffset, insert: s.insert, replace: s.replace };
+  }
+
+  /** Derniere ligne non vide avant celle du curseur, formules en clair (texToPlain). */
+  private prevLinePlain(r: Range): string {
+    const before = document.createRange();
+    before.setStart(this.root, 0);
+    before.setEnd(r.startContainer, r.startOffset);
+    const lines = docLines(normalizeTokens(this.readNodes(before.cloneContents())));
+    for (let i = lines.length - 2; i >= 0; i--) {
+      const text = lines[i].tokens.map((t) => (t.kind === "text" ? t.text : t.kind === "math" ? texToPlain(t.latex) : "")).join("");
+      if (text.trim()) return text;
+    }
+    return "";
   }
 
   /** Retire la suggestion grisee. */
@@ -2665,7 +2679,7 @@ export class TextDoc {
     const cur: LineSeg = { node, kind: "cur", str: raw.slice(nl + 1).replace(/\u200b/g, ""), a: 0, b: 0, head: raw.slice(0, nl + 1) };
     const back: LineSeg[] = [];
     // La ligne commence dans ce noeud : rien a reprendre avant.
-    let prev: Node | null = nl >= 0 ? null : node.previousSibling;
+    let prev: Node | null = nl >= 0 ? null : prevInLine(node, this.root);
     while (prev) {
       if (prev.nodeType === Node.TEXT_NODE) {
         // Un "\n" tape par Entree finit la ligne precedente : on s'arrete.
@@ -2675,10 +2689,10 @@ export class TextDoc {
         if (n >= 0) break;
       } else if (prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src) {
         back.push({ node: prev, kind: "eq", str: prev.dataset.src, a: 0, b: 0, head: "" });
-      } else {
+      } else if (!(prev instanceof HTMLElement && inlineWrap(prev))) {
         break;
       }
-      prev = prev.previousSibling;
+      prev = prevInLine(prev, this.root);
     }
     const segs = [...back.reverse(), cur];
     let pos = 0;
@@ -2745,7 +2759,7 @@ export class TextDoc {
     const touched = segs.slice(fi);
     // Repere pose avant de deplacer quoi que ce soit.
     const marker = document.createTextNode("");
-    parent.insertBefore(marker, first.node);
+    (first.node.parentNode ?? parent).insertBefore(marker, first.node);
 
     const pieces: (string | Node)[] = [];
     if (first.kind !== "eq") pieces.push(first.head + first.str.slice(0, start - first.a));
@@ -2786,7 +2800,7 @@ export class TextDoc {
     const tail = document.createTextNode("\u200b" + tailText + after);
     frag.append(tail);
     for (const s of touched) if (!kept.has(s.node)) s.node.parentNode?.removeChild(s.node);
-    parent.insertBefore(frag, marker);
+    marker.parentNode!.insertBefore(frag, marker);
     marker.remove();
 
     const caret = document.createRange();
@@ -2841,12 +2855,12 @@ export class TextDoc {
     const prevLatex = touched.filter((s) => s.kind === "eq").map((s) => (s.node as HTMLElement).dataset.latex ?? "").join(" ");
     const lead = first.kind === "eq" ? "" : first.head + first.str.slice(0, found.start - first.a);
     const marker = document.createTextNode("");
-    parent.insertBefore(marker, first.node);
+    (first.node.parentNode ?? parent).insertBefore(marker, first.node);
     for (const s of touched) s.node.parentNode?.removeChild(s.node);
     const eq = makeEq("");
-    if (lead) parent.insertBefore(document.createTextNode(lead), marker);
-    parent.insertBefore(eq, marker);
-    parent.insertBefore(document.createTextNode("\u200b" + after), marker);
+    if (lead) marker.parentNode!.insertBefore(document.createTextNode(lead), marker);
+    marker.parentNode!.insertBefore(eq, marker);
+    marker.parentNode!.insertBefore(document.createTextNode("\u200b" + after), marker);
     marker.remove();
     recordLatex(found.latex.replace(MARK, ""), prevLatex);
     this.editEq(eq, "end", found.latex.replace(MARK, "#?"), num);
@@ -3694,6 +3708,28 @@ function styleAt(node: Node, root: HTMLElement): { bold: boolean; italic: boolea
   }
   const color = colorAt(node, root);
   return { bold, italic, ...(color ? { color } : {}) };
+}
+
+/**
+ * Mise en forme sans effet sur la ligne : couleur (span.tc), gras,
+ * italique. Le texte d'une ligne y est parfois coupe (touche morte « ^ »
+ * dans une ligne en couleur) : la relecture des formules passe au travers.
+ */
+function inlineWrap(el: HTMLElement): boolean {
+  return el.matches("span.tc, b, i, strong, em, span:not([class])");
+}
+
+/** Noeud precedent sur la ligne, en entrant et sortant des mises en forme (inlineWrap). */
+function prevInLine(n: Node, root: HTMLElement): Node | null {
+  let cur: Node = n;
+  while (!cur.previousSibling) {
+    const p = cur.parentNode;
+    if (!p || p === root || !(p instanceof HTMLElement) || !inlineWrap(p)) return null;
+    cur = p;
+  }
+  let prev: Node | null = cur.previousSibling;
+  while (prev instanceof HTMLElement && inlineWrap(prev) && prev.lastChild) prev = prev.lastChild;
+  return prev;
 }
 
 /** Morceau interne retrouve dans le HTML du presse-papiers (copie de secours). */

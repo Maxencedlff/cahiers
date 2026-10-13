@@ -25,20 +25,25 @@ const REL = /=|⇒|⇔|→|≈|≤|≥|<|>/;
 let memo: { line: string; out: StepSuggestion | null } | null = null;
 
 /** Suite a proposer pour la ligne `line` (relue jusqu'au curseur), ou null. */
-export function nextStepSuggest(line: string): StepSuggestion | null {
-  if (memo?.line === line) return memo.out;
+export function nextStepSuggest(line: string, prev = ""): StepSuggestion | null {
+  const key = `${prev}\n${line}`;
+  if (memo?.line === key) return memo.out;
   let out: StepSuggestion | null = null;
-  try { out = compute(line); } catch { out = null; }
-  memo = { line, out };
+  try { out = compute(line, prev); } catch { out = null; }
+  memo = { line: key, out };
   return out;
 }
 
-function compute(line: string): StepSuggestion | null {
+function compute(line: string, prev: string): StepSuggestion | null {
   const at = line.lastIndexOf("=");
   if (at < 0 || /[<>!=]/.test(line[at - 1] ?? "")) return null;
   const typed = line.slice(at + 1);
   if (/[=\n]/.test(typed)) return null;
-  const lhs = lhsBefore(line.slice(0, at));
+  // Ligne qui commence par « = » : la suite du calcul de la ligne du dessus,
+  // son dernier membre (texte de la page, formules relues en clair).
+  const head = line.slice(0, at);
+  const lhs = head.trim() ? lhsBefore(head)
+    : prev.includes("=") ? prev.split(REL).pop()!.replace(/[\s;,.\u202f]+$/, "").trim() || null : null;
   if (!lhs) return null;
   const forms = equivalents(lhs);
   if (!forms.length) return null;
@@ -67,6 +72,10 @@ function lhsBefore(before: string): string | null {
 
 /** Formes equivalentes du membre, dans l'ordre de preference, sans le membre lui-meme. */
 export function equivalents(src: string): string[] {
+  // Texte de la page : γ(t) est l'echelon (pas la fonction gamma de mathjs),
+  // « . » entre deux facteurs est un produit (« e^t.γ(t) »).
+  src = src.replace(/\bgamma\s*\(/g, "γ(").replace(/γ\s+\(/g, "γ(")
+    .replace(/(?<![\d\s])\.(?![\d\s])|(?<=\d)\.(?=[^\d\s])|(?<=[^\d\s])\.(?=\d)/g, "*");
   return equivalentsRaw(src).map((f) => f.replace(/greekmu/g, "μ").replace(/greekOmega/g, "Ω"));
 }
 
@@ -146,15 +155,15 @@ interface Term { sign: 1 | -1; coef: number; atoms: Map<string, { base: string; 
 function factored(node: MathNode): string | null {
   const terms: Term[] = [];
   if (!collect(strip(node), 1, terms) || terms.length < 2) return null;
-  if (!terms.every((t) => Number.isInteger(t.coef))) return null;
-  let g = terms.reduce((a, t) => gcd(a, Math.abs(t.coef)), 0);
+  const ints = terms.every((t) => Number.isInteger(t.coef));
+  let g = ints ? terms.reduce((a, t) => gcd(a, Math.abs(t.coef)), 0) : 1;
   const common = new Map<string, { base: string; pow: number }>();
   for (const [k, a] of terms[0].atoms) {
     let pow = a.pow;
     for (const t of terms.slice(1)) pow = Math.min(pow, t.atoms.get(k)?.pow ?? 0);
     if (pow > 0) common.set(k, { base: a.base, pow });
   }
-  if (g <= 1 && !common.size) return null;
+  if (g <= 1 && !common.size) return partial(terms);
   // Somme de nombres : rien a mettre en facteur (« 2 + 12 »).
   if (!common.size && terms.every((t) => !t.atoms.size)) return null;
   if (g < 1) g = 1;
@@ -164,16 +173,50 @@ function factored(node: MathNode): string | null {
     const body = product(c, atoms);
     return i === 0 ? (t.sign < 0 ? `-${body}` : body) : `${t.sign < 0 ? "-" : "+"} ${body}`;
   }).join(" ");
-  const out = product(g, [...common.values()], true);
+  const out = product(g, [...common.values()]);
   return `${out === "1" ? "" : out}(${inner})`;
 }
 
-function product(c: number, atoms: { base: string; pow: number }[], forFactor = false): string {
+/**
+ * Facteur commun a une partie des termes seulement : « γ(t) - e^t γ(t) +
+ * e^(2t) » -> « γ(t)(1 - e^t) + e^(2t) ». Le facteur le plus frequent.
+ */
+function partial(terms: Term[]): string | null {
+  const count = new Map<string, number>();
+  for (const t of terms) for (const k of t.atoms.keys()) count.set(k, (count.get(k) ?? 0) + 1);
+  let best: string | null = null;
+  for (const [k, n] of count) if (n >= 2 && n < terms.length && (!best || n > count.get(best)!)) best = k;
+  if (!best) return null;
+  const inG = terms.filter((t) => t.atoms.has(best!)), rest = terms.filter((t) => !t.atoms.has(best!));
+  const pow = Math.min(...inG.map((t) => t.atoms.get(best!)!.pow));
+  const atom = { ...inG[0].atoms.get(best)!, pow };
+  const termStr = (t: Term, i: number, drop?: string) => {
+    const atoms = [...t.atoms].map(([k, a]) => ({ base: a.base, pow: a.pow - (k === drop ? pow : 0) })).filter((a) => a.pow > 0);
+    const body = product(t.coef, atoms);
+    return i === 0 ? (t.sign < 0 ? `-${body}` : body) : `${t.sign < 0 ? "-" : "+"} ${body}`;
+  };
+  const inner = inG.map((t, i) => termStr(t, i, best!)).join(" ");
+  const tail = rest.map((t) => termStr(t, 1)).join(" ");
+  return `${product(1, [atom])}(${inner}) ${tail}`;
+}
+
+function product(c: number, atoms: { base: string; pow: number }[]): string {
   const a = atoms.map((x) => (x.pow === 1 ? x.base : `${x.base}^${x.pow}`));
-  if (!a.length) return String(c);
+  const cs = coefText(c);
+  if (!a.length) return cs;
   const body = a.join(" ");
-  if (c === 1) return forFactor && a.length > 1 ? body : body;
-  return `${c}${body}`;
+  if (Math.abs(c - 1) < 1e-12) return body;
+  return cs.includes("/") ? `${cs} ${body}` : `${cs}${body}`;
+}
+
+/** Coefficient ecrit comme on le tape : entier, fraction (1/3) ou decimal a virgule. */
+function coefText(c: number): string {
+  if (Number.isInteger(c)) return String(c);
+  for (let q = 2; q <= 100; q++) {
+    const p = Math.round(c * q);
+    if (Math.abs(c - p / q) < 1e-9) return `${p}/${q}`;
+  }
+  return frNumber(c);
 }
 
 function strip(n: any): any {
@@ -197,6 +240,11 @@ function collect(n: any, sign: 1 | -1, out: Term[]): boolean {
 function factorsOf(n: any, t: Term): boolean {
   n = strip(n);
   if (n.type === "OperatorNode" && n.op === "*") return n.args.every((a: any) => factorsOf(a, t));
+  // « 1/3 e^(-t) », « x/2 » : diviseur numerique dans le coefficient.
+  if (n.type === "OperatorNode" && n.op === "/" && strip(n.args[1]).type === "ConstantNode" && typeof strip(n.args[1]).value === "number") {
+    t.coef /= strip(n.args[1]).value;
+    return factorsOf(n.args[0], t);
+  }
   if (n.type === "ConstantNode" && typeof n.value === "number") { t.coef *= n.value; return true; }
   let base = n, pow = 1;
   if (n.type === "OperatorNode" && n.op === "^") {
@@ -209,7 +257,7 @@ function factorsOf(n: any, t: Term): boolean {
   }
   const s = print(base);
   const key = compact(s);
-  const wrapped = /^[\p{L}\d]+$/u.test(s) || /^\p{L}+\(.*\)$/u.test(s) ? s : `(${s})`;
+  const wrapped = /^[\p{L}\d]+(?:\^(?:[\p{L}\d]+|\(.*\)))?$/u.test(s) || /^\p{L}+\(.*\)$/u.test(s) ? s : `(${s})`;
   const prev = t.atoms.get(key);
   t.atoms.set(key, { base: wrapped, pow: (prev?.pow ?? 0) + pow });
   return true;
@@ -252,7 +300,7 @@ export function print(n: any): string {
         case "^": {
           const base = wrapIf(a, a.type === "OperatorNode" || a.type === "FunctionNode");
           const e = print(strip(b));
-          return /^[\p{L}\d,]+$/u.test(e) ? `${base}^${e}` : `${base}^(${e})`;
+          return /^(?:\d+(?:,\d+)?|\p{L})$/u.test(e) ? `${base}^${e}` : `${base}^(${e})`;
         }
         default: return `${print(a)} ${n.op} ${print(b)}`;
       }

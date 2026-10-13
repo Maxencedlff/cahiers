@@ -322,7 +322,7 @@ export class CalcEngine {
  * - µ et Ω pour les unites (10 µF, 2,2 kΩ).
  */
 export function normalizeInput(expr: string, reserved: (name: string) => boolean = () => false): string {
-  const s = imagJ(expr, reserved)
+  const s = imagJ(greekNames(expr), reserved)
     .replace(/π/g, "pi")
     .replace(/×|·/g, "*")
     .replace(/÷/g, "/")
@@ -331,9 +331,33 @@ export function normalizeInput(expr: string, reserved: (name: string) => boolean
     .replace(/²/g, "^2")
     .replace(/³/g, "^3")
     .replace(/⁻¹/g, "^(-1)")
-    .replace(/[µμ]/g, "u")
-    .replace(/Ω/g, "ohm");
+    // µ (signe micro) : toujours le prefixe ; μ grec seulement colle a un
+    // nombre (« 4,7μ ») ou entre un nombre et une unite (« 10 μF ») ; sinon
+    // c'est une grandeur (« 2 μ + 3 », copie du texte de la page).
+    .replace(/µ/g, "u")
+    .replace(/(\d)μ/g, "$1u")
+    .replace(/(\d\s)μ(?=[FHAVsWgmlLC]\b)/g, "$1u")
+    // Ω : l'ohm derriere une valeur (« 100 Ω », « 2,2 kΩ ») ; seul, une grandeur.
+    .replace(/(\d\s?[kMmGu]?)Ω/g, "$1ohm");
   return renameLogs(parallel(decimalCommas(s)));
+}
+
+/**
+ * Lettres grecques en toutes lettres (texte copie de la page : « mu »,
+ * « omega », « tau ») : la lettre, une grandeur comme une autre. Sans cela
+ * mathjs lit tau = 2π et phi = nombre d'or. pi reste la constante ; un nom
+ * suivi d'une parenthese reste une fonction (gamma(5)).
+ */
+const GREEK_NAMES: Record<string, string> = {
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", varepsilon: "ε", eta: "η",
+  theta: "θ", kappa: "κ", lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", rho: "ρ", sigma: "σ",
+  tau: "τ", phi: "φ", varphi: "φ", chi: "χ", psi: "ψ", omega: "ω", zeta: "ζ",
+  Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ", Sigma: "Σ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
+};
+const GREEK_WORD = new RegExp(`(?<![A-Za-z_])(${Object.keys(GREEK_NAMES).join("|")})(?![A-Za-z_(])`, "g");
+
+export function greekNames(s: string): string {
+  return s.replace(GREEK_WORD, (w) => GREEK_NAMES[w]);
 }
 
 /* ------------------------------------------------------------------ */

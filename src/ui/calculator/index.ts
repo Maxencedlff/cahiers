@@ -1,6 +1,6 @@
 import { el, toast } from "../dom";
 import { renderTex } from "../tex";
-import { CalcEngine, normalizeInput, format, frNumber, engFormat, type AngleMode, type ImagUnit } from "../../core/calc/engine";
+import { CalcEngine, greekNames, normalizeInput, format, frNumber, engFormat, type AngleMode, type ImagUnit } from "../../core/calc/engine";
 import { derivative, nthDerivative, simplifyExpr, substitute, type DerivStep } from "../../core/calc/derive";
 import { antiderivative, definiteIntegral } from "../../core/calc/integrate";
 import { solveEquation, solveSystem, type Root } from "../../core/calc/solve";
@@ -57,7 +57,7 @@ export interface CalculatorHost {
 interface TabState {
   courbes: { fn: string; from: string; to: string; ymin: string; ymax: string; logX: boolean; db: boolean };
   matrices: { a: string; b: string };
-  resoudre: { eq: string; sys: string };
+  resoudre: { eq: string; sys: string; v: string };
   litteral: { expr: string; v: string; subst: string; a: string; b: string };
 }
 
@@ -86,7 +86,7 @@ export class Calculator {
   private state: TabState = {
     courbes: { fn: "", from: "-8", to: "8", ymin: "", ymax: "", logX: false, db: false },
     matrices: { a: "", b: "" },
-    resoudre: { eq: "", sys: "" },
+    resoudre: { eq: "", sys: "", v: "" },
     litteral: { expr: "", v: "x", subst: "", a: "0", b: "1" },
   };
   /**
@@ -161,6 +161,14 @@ export class Calculator {
       const text = e.clipboardData?.getData("text/plain").replace(/\s+/g, " ").trim();
       if (!text) return;
       e.preventDefault();
+      // Calcul copie de la page avec une inconnue (« 2μ + 3 = 13 », elements
+      // simples) : il part dans Résoudre, resolu tout de suite.
+      if (/(?<![=<>!])=(?!=)/.test(text) && /\p{L}/u.test(text.replace(/\b(?:sin|cos|tan|exp|ln|log|sqrt|pi|e)\b/g, ""))) {
+        this.state.resoudre.eq = text;
+        this.selectTab("resoudre");
+        this.body.querySelector<HTMLButtonElement>("button.primary")?.click();
+        return;
+      }
       this.typeText(text);
     });
     // Texte qui arrive sans keydown utilisable (voir `sink`) : repris avant
@@ -1086,8 +1094,12 @@ export class Calculator {
 
   private renderResoudre() {
     const st = this.state.resoudre;
-    const eq = el("input", { type: "text", placeholder: "x^2 - 3x + 2 = 0" });
+    const eq = el("input", { type: "text", placeholder: "x^2 - 3x + 2 = 0   (ou un calcul copié de la page)" });
     eq.value = st.eq;
+    // Inconnue a isoler quand l'equation a plusieurs lettres (« U = R I » : I).
+    const unk = el("input", { type: "text", placeholder: "auto", style: { width: "72px" }, title: "Inconnue à isoler (vide : déduite)" });
+    unk.value = st.v;
+    unk.addEventListener("input", () => { st.v = unk.value; });
     const sys = el("textarea", { rows: "3", placeholder: "x + y = 10\nx - y = 2   (Ctrl+Entrée)" });
     sys.value = st.sys;
     const out = el("div", {});
@@ -1096,8 +1108,11 @@ export class Calculator {
     sys.addEventListener("input", () => { st.sys = sys.value; });
 
     const rootLine = (v: string, root: Root, index: number, count: number): { node: HTMLElement; tex: string } => {
-      const name = count > 1 ? `${v}_{${index + 1}}` : v;
-      const tex = root.latex && root.latex !== root.text
+      const name = count > 1 ? `${greekLatex(v)}_{${index + 1}}` : greekLatex(v);
+      // Resultat litteral (« U/R ») : pas de valeur approchee a montrer.
+      const literal = typeof root.value === "number" && Number.isNaN(root.value);
+      const tex = literal && root.latex ? `${name} = ${root.latex}`
+        : root.latex && root.latex !== root.text
         ? `${name} = ${root.latex} \\approx ${root.text.replace(/i$/, "\\,i")}`
         : `${name} = ${root.text.replace(/i$/, "\\,i")}`;
       const mult = root.multiplicity
@@ -1109,8 +1124,34 @@ export class Calculator {
     const solveOne = () => {
       out.replaceChildren();
       if (!eq.value.trim()) return;
-      const r = solveEquation(eq.value);
+      const r = solveEquation(eq.value, unk.value.trim() ? greekNames(unk.value.trim()) : undefined);
       if (!r.ok) { out.append(el("div", { class: "calc-read err" }, r.message ?? "Échec")); return; }
+      const detail = () => {
+        if (!r.steps?.length) return;
+        let shown = false;
+        const box = el("div", { class: "steps", style: { display: "none" } },
+          ...r.steps.map((t) => el("div", { class: "step" }, renderTex(t))));
+        const btn = el("button", {
+          onclick: () => {
+            shown = !shown;
+            box.style.display = shown ? "block" : "none";
+            btn.textContent = shown ? "Masquer le détail" : "Afficher le détail";
+          },
+        }, "Afficher le détail");
+        out.append(btn, box);
+      };
+      // Identification : plusieurs inconnues trouvees ensemble.
+      if (r.values?.length) {
+        const box = el("div", { class: "calc-read" },
+          el("div", { class: "small muted" }, `Identification, pour tout ${r.variable}`));
+        const texs = r.values.map((x) => `${greekLatex(x.name)} = ${x.latex}`);
+        for (const t of texs) box.append(el("div", {}, renderTex(t)));
+        out.append(box);
+        const send = this.sendButton("solution", eq.value, r.values.map((x) => `${x.name} = ${x.text}`).join(" ; "), texs.join(",\\; "));
+        if (send) out.append(send);
+        detail();
+        return;
+      }
       const v = r.variable ?? "x";
       const box = el("div", { class: "calc-read" });
       const lines: string[] = [];
@@ -1137,6 +1178,7 @@ export class Calculator {
       const latex = lines.length ? `${eqTex} \\;:\\; ${lines.join(",\\; ")}` : `${eqTex} \\;:\\; \\text{${r.message ?? ""}}`;
       const send = this.sendButton("solution", eq.value, roots.map((x) => x.text).join(" ; ") || (r.message ?? ""), latex);
       if (send) out.append(send);
+      detail();
     };
 
     const solveSys = () => {
@@ -1160,7 +1202,8 @@ export class Calculator {
       el("span", { class: "lbl small muted" }, "Équation (l'inconnue est déduite)"),
       eq,
       lu.node,
-      el("div", { class: "row" }, el("button", { class: "primary", onclick: solveOne }, "Résoudre")),
+      el("div", { class: "row" }, el("button", { class: "primary", onclick: solveOne }, "Résoudre"),
+        el("span", { class: "small muted" }, "Inconnue"), unk),
       el("span", { class: "lbl small muted" }, "Système, une équation par ligne"),
       sys,
       el("div", { class: "row" }, el("button", { onclick: solveSys }, "Résoudre le système")),
@@ -1341,6 +1384,16 @@ function multName(m: number): string {
 }
 
 /** Arbre des regles de derivation, replie par defaut au dela du premier niveau. */
+/** Nom d'inconnue en LaTeX : lettre grecque comprise (μ -> \\mu). */
+function greekLatex(name: string): string {
+  const g: Record<string, string> = {
+    α: "alpha", β: "beta", γ: "gamma", δ: "delta", ε: "varepsilon", η: "eta", θ: "theta", κ: "kappa", λ: "lambda",
+    μ: "mu", ν: "nu", ξ: "xi", ρ: "rho", σ: "sigma", τ: "tau", φ: "varphi", χ: "chi", ψ: "psi", ω: "omega", ζ: "zeta",
+    Γ: "Gamma", Δ: "Delta", Θ: "Theta", Λ: "Lambda", Σ: "Sigma", Φ: "Phi", Ψ: "Psi", Ω: "Omega",
+  };
+  return name.replace(/[α-ωΑ-Ω]/g, (c) => (g[c] ? `\\${g[c]} ` : c)).trim();
+}
+
 function renderSteps(step: DerivStep, depth = 0): HTMLElement {
   const node = el("div", { class: "step" },
     el("div", { class: "rule" }, step.label),

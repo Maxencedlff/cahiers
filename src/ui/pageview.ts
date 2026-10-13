@@ -1364,8 +1364,8 @@ export class PageView {
     if (!copy && !readOnly) {
       // Factorisation (« 3p + 4p = p( » -> « 3 + 4) », core/factor.ts), puis
       // l'etape suivante derriere un « = » (core/calc/nextstep.ts), puis le cahier.
-      doc.suggester = (line) => (loaded.readOnly || this.readOnly ? null
-        : factorSuggest(line) ?? nextStepSuggest(line) ?? suggestFor(this.host.repo, this.notebook, this.divider, line));
+      doc.suggester = (line, prev) => (loaded.readOnly || this.readOnly ? null
+        : factorSuggest(line) ?? nextStepSuggest(line, prev) ?? suggestFor(this.host.repo, this.notebook, this.divider, line));
       refreshSuggestions(this.host.repo, this.notebook);
     }
     this.paintNotes(loaded);

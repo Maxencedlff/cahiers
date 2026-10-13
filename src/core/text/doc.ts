@@ -601,8 +601,12 @@ export function texToPlain(tex: string): string {
     const t = top(x).replace(/^[-−+]\s*/, "");
     return /[+\-−=<>]|\\(?:pm|leq|geq|neq|approx|to|ll|gg)(?![A-Za-z])/.test(t) ? `(${x.trim()})` : x.trim();
   };
+  // Produit avec des parentheses (« p(p-1)(p+2) ») : entre parentheses
+  // aussi, sinon « 2/p(p-1) » se relirait (2/p)(p-1). Un appel de fonction seul reste nu.
+  const productParens = (x: string) => /[\w)}]\s*\(/.test(x)
+    && !/^\\?(?:sqrt|sin|cos|tan|exp|ln|log|sh|ch|th|arcsin|arccos|arctan)\s*\([^()]*\)$/.test(x.trim());
   const wrapDen = (x: string) =>
-    (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) ? `(${x.trim()})` : x.trim());
+    (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) || productParens(x) ? `(${x.trim()})` : x.trim());
   // Indice compose : entre parentheses, comme on le tape ("u_(n+1)").
   const sub = (x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `(${x.trim()})` : x.trim());
   let s = tex.replace(/\\left|\\right|\\displaystyle/g, "")
@@ -620,7 +624,8 @@ export function texToPlain(tex: string): string {
       .replace(/\\(int|sum|prod|lim)_\{([^{}]*)\}/g, (_a, op: string, b: string) => `\\${op}\u0001${sub(b)}`)
       .replace(/\\(int|sum|prod|lim)_/g, "\\$1\u0001")
       .replace(/_\{([^{}]*)\}/g, (_a, x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `_${sub(x)}` : x))
-      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${wrapDen(e)}`)
+      // Exposant : nu s'il tient en un nombre ou une lettre (« e^(2t) », « x^10 »).
+      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${/^\s*(?:-?\d+(?:[.,]\d+)?|\\?[A-Za-z]+|[A-Za-z])\s*$/.test(e) && !/^\s*[A-Za-z]{2,}\s*$/.test(e) ? e.trim() : wrapDen(e).startsWith("(") ? wrapDen(e) : `(${e.trim()})`}`)
       .replace(/\{,\}/g, ",");
     if (next === s) break;
     s = next;

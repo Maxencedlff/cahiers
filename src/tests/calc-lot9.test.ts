@@ -133,7 +133,7 @@ describe("calc-racines", () => {
   it("plusieurs inconnues : message clair", () => {
     const r = solveEquation("a*x + 1 = 0");
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/inconnues/);
+    expect(r.message).toMatch(/lettres/);
   });
   it("x = x : toujours vrai, pas 4000 racines", () => {
     const r = solveEquation("x = x");

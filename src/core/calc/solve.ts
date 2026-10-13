@@ -32,7 +32,11 @@ export interface SolveOutcome {
   roots?: Root[];
   /** Racines trouvees mais non affichees (on en garde 10, les plus proches de 0). */
   more?: number;
-  method?: "exacte" | "numerique";
+  method?: "exacte" | "numerique" | "litterale";
+  /** Detail de la resolution, une ligne LaTeX par etape (« Afficher le détail »). */
+  steps?: string[];
+  /** Identification (plusieurs inconnues trouvees ensemble) : « α = 1 », … */
+  values?: { name: string; text: string; latex: string }[];
 }
 
 /** Nombre maximal de racines affichees par la resolution numerique. */
@@ -40,7 +44,7 @@ export const MAX_ROOTS = 10;
 
 /** "2x^2 - 3x = 1" devient l'expression "2x^2 - 3x - 1". */
 export function toZeroForm(equation: string): string {
-  const src = normalizeInput(equation);
+  const src = implicitProducts(normalizeInput(equation));
   // « == » et « <= » ne sont pas des egalites a resoudre.
   const parts = src.split(/(?<![=<>!])=(?!=)/);
   if (parts.length === 1) return src;
@@ -99,7 +103,25 @@ export function freeSymbols(expr: string): string[] {
   return [...found].sort();
 }
 
+/**
+ * Resolution d'une equation, avec son detail. `variable` : l'inconnue
+ * choisie ; sans elle, le seul symbole libre. Plusieurs lettres et une
+ * inconnue choisie : resolution litterale (« U = R I » pour I -> U/R).
+ */
 export function solveEquation(equation: string, variable?: string): SolveOutcome {
+  // « F(p) = α/p + β/(p-1) » : identification, toutes les constantes d'un coup.
+  if (!variable) {
+    try {
+      const id = identify(equation);
+      if (id) return id;
+    } catch { /* pas une identite */ }
+  }
+  const r = solveCore(equation, variable);
+  if (!r.ok || r.steps || !r.variable) return r;
+  try { return { ...r, steps: stepsOf(equation, r) }; } catch { return r; }
+}
+
+function solveCore(equation: string, variable?: string): SolveOutcome {
   let zero: string;
   let v: string;
   try {
@@ -116,7 +138,7 @@ export function solveEquation(equation: string, variable?: string): SolveOutcome
     } else {
       return {
         ok: false,
-        message: `Plusieurs inconnues (${symbols.join(", ")}) : donne une valeur aux paramètres ou utilise un système.`,
+        message: `Plusieurs lettres (${symbols.join(", ")}) : indique l'inconnue à isoler, donne une valeur aux autres, ou utilise un système.`,
       };
     }
   } catch (e) {
@@ -127,6 +149,8 @@ export function solveEquation(equation: string, variable?: string): SolveOutcome
   try {
     coeffs = polynomialCoefficients(zero, v);
   } catch { coeffs = null; }
+  // D'autres lettres que l'inconnue : resolution litterale.
+  if (!coeffs && freeSymbols(zero).some((x) => x !== v)) return symbolicSolve(equation, zero, v);
 
   if (coeffs) {
     const degree = coeffs.length - 1;
@@ -520,4 +544,281 @@ function detectSymbols(equations: string[]): string[] {
   const found = new Set<string>();
   for (const eq of equations) for (const name of freeSymbols(toZeroForm(eq))) found.add(name);
   return [...found].sort();
+}
+
+/* ------------------------------------------------------------------ */
+/* Detail de la resolution et resolution litterale                     */
+/* ------------------------------------------------------------------ */
+
+function texOf(n: MathNode | string): string {
+  const node = typeof n === "string" ? math.parse(n) : n;
+  // mathjs ecrit m, C, V... en unites (\mathrm) : ce sont des grandeurs.
+  return node.toTex({ parenthesis: "auto", implicit: "hide" }).replace(/\\mathrm\{([A-Za-z])\}/g, "$1").replace(/~/g, "\\,");
+}
+
+/** Membres de l'equation en LaTeX : « 2x + 3 = 13 ». */
+function equationLatex(equation: string): string {
+  const parts = normalizeInput(equation).split(/(?<![=<>!])=(?!=)/);
+  return parts.map((p) => texOf(p)).join(" = ");
+}
+
+/** Polynome (coefficients du constant au dominant) en LaTeX. */
+function polyLatex(coeffs: number[], v: string): string {
+  const vt = texOf(v);
+  let out = "";
+  for (let k = coeffs.length - 1; k >= 0; k--) {
+    const c = coeffs[k];
+    if (Math.abs(c) < 1e-12) continue;
+    const mono = k === 0 ? "" : k === 1 ? vt : `${vt}^{${k}}`;
+    const abs = Math.abs(c);
+    const num = mono && Math.abs(abs - 1) < 1e-12 ? "" : fmt(abs);
+    const sign = c < 0 ? (out ? " - " : "-") : out ? " + " : "";
+    out += `${sign}${num}${num && mono ? "\\," : ""}${mono}`;
+  }
+  return out || "0";
+}
+
+const par = (x: number) => (x < 0 ? `\\left(${fmt(x)}\\right)` : fmt(x));
+
+function stepsOf(equation: string, r: SolveOutcome): string[] {
+  const v = texOf(r.variable!);
+  const steps = [equationLatex(equation)];
+  const c = r.coefficients;
+  if (c && r.degree === 1) {
+    const [c0, c1] = c;
+    steps.push(`\\iff ${polyLatex(c, r.variable!)} = 0`);
+    if (Math.abs(c0) > 1e-12) steps.push(`\\iff ${polyLatex([0, c1], r.variable!)} = ${fmt(-c0)}`);
+    const x = r.roots?.[0];
+    if (x) steps.push(`\\iff ${v} = ${Math.abs(c1 - 1) > 1e-12 ? `\\frac{${fmt(-c0)}}{${fmt(c1)}} = ` : ""}${x.latex ?? x.text}`);
+    return steps;
+  }
+  if (c && r.degree === 2) {
+    const [c0, b, a] = c;
+    steps.push(`\\iff ${polyLatex(c, r.variable!)} = 0`);
+    steps.push(`a = ${fmt(a)},\\; b = ${fmt(b)},\\; c = ${fmt(c0)}`);
+    steps.push(`\\Delta = b^{2} - 4ac = ${par(b)}^{2} - 4 \\times ${par(a)} \\times ${par(c0)} = ${fmt(b * b - 4 * a * c0)}`);
+    const d = b * b - 4 * a * c0;
+    if (d > 1e-12) steps.push(`\\Delta > 0 : ${v}_{1,2} = \\frac{-b \\pm \\sqrt{\\Delta}}{2a} = \\frac{${fmt(-b)} \\pm \\sqrt{${fmt(d)}}}{${fmt(2 * a)}}`);
+    else if (d < -1e-12) steps.push(`\\Delta < 0 : ${v}_{1,2} = \\frac{-b \\pm i\\sqrt{-\\Delta}}{2a} = \\frac{${fmt(-b)} \\pm i\\sqrt{${fmt(-d)}}}{${fmt(2 * a)}}`);
+    else steps.push(`\\Delta = 0 : ${v}_{0} = \\frac{-b}{2a} = \\frac{${fmt(-b)}}{${fmt(2 * a)}}`);
+    return steps;
+  }
+  if (c && r.degree && r.degree > 2) {
+    steps.push(`\\iff ${polyLatex(c, r.variable!)} = 0`);
+    steps.push(`\\text{Polynôme de degré ${r.degree} : racines par la méthode de Durand-Kerner}`);
+    return steps;
+  }
+  if (r.method === "numerique") {
+    steps.push(`\\iff ${texOf(math.simplify(toZeroForm(equation)))} = 0`);
+    steps.push("\\text{Pas de forme polynomiale : racines cherchées par balayage puis dichotomie sur } [-100, 100]");
+  }
+  return steps;
+}
+
+function depends(n: MathNode, v: string): boolean {
+  let found = false;
+  n.traverse((x: any) => { if (x.type === "SymbolNode" && x.name === v) found = true; });
+  return found;
+}
+
+/** Exposants essayes pour isoler l'inconnue : a v^n + b = 0. */
+const POWERS = [1, 2, 3, 4, -1, -2, 0.5, -0.5];
+
+/**
+ * Inconnue isolee parmi d'autres lettres : l'equation s'ecrit a v^n + b = 0
+ * avec a et b sans v (n dans POWERS) : v^n = -b/a, puis la racine.
+ * « U = R I » pour I -> U/R ; « 1/2 m v^2 = E » pour v -> ±√(2E/m) ;
+ * « ω = 1/√(LC) » pour C -> 1/(L ω²).
+ */
+function symbolicSolve(equation: string, zero: string, v: string): SolveOutcome {
+  const vt = texOf(v);
+  const fail = (message: string): SolveOutcome => ({ ok: false, variable: v, message });
+  let f: MathNode;
+  try { f = math.simplify(zero); } catch (e) { return fail(humanError(e)); }
+  if (!depends(f, v)) return fail(`${v} n'apparaît pas dans l'équation`);
+  const df = math.simplify(math.derivative(f, v));
+  for (const n of POWERS) {
+    let a: MathNode, b: MathNode;
+    try {
+      a = math.simplify(`(${df.toString()}) / (${n} * ${v}^(${n - 1}))`);
+      if (depends(a, v)) continue;
+      b = math.simplify(`${f.toString()} - (${a.toString()}) * ${v}^(${n})`);
+      if (depends(b, v)) continue;
+    } catch { continue; }
+    // a v^n = -b, signe tourne pour que a ne commence pas par « - ».
+    let lhsA = a, rhs = math.simplify(`-(${b.toString()})`);
+    if (lhsA.toString().startsWith("-")) { lhsA = math.simplify(`-(${a.toString()})`); rhs = math.simplify(b.toString()); }
+    const steps = [equationLatex(equation), `\\iff ${texOf(f)} = 0`];
+    const vn = n === 1 ? vt : n === 0.5 ? `\\sqrt{${vt}}` : `${vt}^{${n === -0.5 ? "-\\frac{1}{2}" : n}}`;
+    const aOne = lhsA.toString() === "1";
+    if (!aOne) steps.push(`\\iff ${texOf(lhsA)} \\cdot ${vn} = ${texOf(rhs)}`);
+    const inside = math.simplify(`(${rhs.toString()}) / (${lhsA.toString()})`);
+    if (n !== 1) steps.push(`\\iff ${vn} = ${texOf(inside)}`);
+    let sol: MathNode, latex: string, text: string;
+    if (n === 2) {
+      sol = math.parse(`sqrt(${inside.toString()})`);
+      latex = `\\pm\\sqrt{${texOf(inside)}}`;
+      text = `±${sol.toString({ implicit: "hide" })}`;
+    } else {
+      sol = n === 1 ? inside : math.simplify(`(${inside.toString()})^(${1 / n})`);
+      latex = texOf(sol);
+      text = sol.toString({ implicit: "hide" });
+      if (n === 4) { latex = `\\pm ${latex}`; text = `±${text}`; }
+    }
+    steps.push(`\\iff ${vt} = ${latex}`);
+    return { ok: true, variable: v, degree: Math.abs(n) >= 1 ? Math.abs(n) : 1, method: "litterale", roots: [{ text, value: NaN, latex }], steps };
+  }
+  return fail(`Pas de résolution littérale simple pour ${v} (donne des valeurs aux autres lettres)`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Identification (elements simples, coefficients)                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * « p(p-1) » : p n'est pas une fonction connue, c'est un produit (texte
+ * copie de la page). « f(t) » (une seule lettre en argument) reste une fonction.
+ */
+export function implicitProducts(src: string): string {
+  return src.split(/((?<![=<>!])=(?!=))/).map((part) => {
+    if (part === "=" || !part.trim()) return part;
+    try {
+      const node = math.parse(part).transform((n: any) => {
+        if (n.type === "FunctionNode" && n.fn?.type === "SymbolNode" && typeof (math as any)[n.fn.name] !== "function"
+            && n.args.length === 1 && n.args[0].type !== "SymbolNode") {
+          return new math.OperatorNode("*", "multiply", [new math.SymbolNode(n.fn.name), new math.ParenthesisNode(n.args[0])]);
+        }
+        return n;
+      });
+      return node.toString();
+    } catch {
+      return part;
+    }
+  }).join("");
+}
+
+const GREEK_TEX: Record<string, string> = {
+  α: "\\alpha", β: "\\beta", γ: "\\gamma", δ: "\\delta", ε: "\\varepsilon", η: "\\eta", θ: "\\theta",
+  κ: "\\kappa", λ: "\\lambda", μ: "\\mu", ν: "\\nu", ξ: "\\xi", ρ: "\\rho", σ: "\\sigma", τ: "\\tau",
+  φ: "\\varphi", χ: "\\chi", ψ: "\\psi", ω: "\\omega", ζ: "\\zeta",
+  Γ: "\\Gamma", Δ: "\\Delta", Θ: "\\Theta", Λ: "\\Lambda", Σ: "\\Sigma", Φ: "\\Phi", Ψ: "\\Psi", Ω: "\\Omega",
+};
+function greekTex(t: string): string {
+  return t.replace(/[α-ωΑ-Ω]/g, (c) => (GREEK_TEX[c] ? `${GREEK_TEX[c]} ` : c));
+}
+
+/** Rationnel p/q (q <= 10000) proche de x, en LaTeX, sinon le decimal. */
+function niceNumber(x: number): { text: string; latex: string } {
+  if (Math.abs(x - Math.round(x)) < 1e-9) { const r = fmt(Math.round(x)); return { text: r, latex: r }; }
+  for (let q = 2; q <= 10000; q++) {
+    const p = Math.round(x * q);
+    if (Math.abs(x - p / q) < 1e-9 * Math.max(1, Math.abs(x))) {
+      return { text: `${p}/${q}`, latex: fractionLatex(p, q) ?? `${p}/${q}` };
+    }
+  }
+  return { text: fmt(x), latex: fmt(x) };
+}
+
+/** Gauss avec pivot partiel ; null si singulier. */
+function gauss(a: number[][], b: number[]): number[] | null {
+  const n = b.length;
+  const m = a.map((row, i) => [...row, b[i]]);
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(m[r][c]) > Math.abs(m[piv][c])) piv = r;
+    if (Math.abs(m[piv][c]) < 1e-12) return null;
+    [m[c], m[piv]] = [m[piv], m[c]];
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = m[r][c] / m[c][c];
+      for (let k = c; k <= n; k++) m[r][k] -= f * m[c][k];
+    }
+  }
+  return m.map((row, i) => row[n] / row[i]);
+}
+
+const SAMPLES = [0.317, 1.731, -2.373, 2.917, -0.829, 4.173, -3.611, 0.571, 5.303, -1.471, 2.213, 3.709, -4.43, 6.07];
+
+/**
+ * Egalite vraie pour tout `x` (une lettre), lineaire en d'autres lettres
+ * (les inconnues) : premier et dernier membre identifies sur des valeurs de
+ * x, systeme lineaire, verification sur d'autres valeurs. null si ce n'en
+ * est pas une. Detail : methode des poles pour un terme k/(x-a).
+ */
+function identify(equation: string): SolveOutcome | null {
+  const parts = implicitProducts(normalizeInput(equation)).split(/(?<![=<>!])=(?!=)/);
+  if (parts.length < 2) return null;
+  const L = parts[0], R = parts[parts.length - 1];
+  if (!L.trim() || !R.trim()) return null;
+  const f = math.parse(`(${L}) - (${R})`);
+  const syms = freeSymbols(f.toString());
+  if (syms.length < 2) return null;
+  const lSyms = freeSymbols(L);
+  // La variable : la seule lettre du premier membre si possible.
+  const candidates = lSyms.length === 1 ? lSyms : syms;
+  for (const x of candidates) {
+    const K = syms.filter((k) => k !== x);
+    const dk = K.map((k) => math.simplify(math.derivative(f, k)));
+    if (dk.some((d) => K.some((k) => depends(d, k)))) continue;
+    const zero = Object.fromEntries(K.map((k) => [k, 0]));
+    const f0 = f.compile(), dks = dk.map((d) => d.compile());
+    const rows: number[][] = [], rhs: number[] = [], extra: number[] = [];
+    for (const t of SAMPLES) {
+      try {
+        const scope = { ...zero, [x]: t };
+        const r = dks.map((d) => Number(d.evaluate(scope)));
+        const c = Number(f0.evaluate(scope));
+        if (![...r, c].every(Number.isFinite)) continue;
+        if (rows.length < K.length) { rows.push(r); rhs.push(-c); } else extra.push(t);
+      } catch { /* pole */ }
+    }
+    if (rows.length < K.length || extra.length < 2) continue;
+    const sol = gauss(rows, rhs);
+    if (!sol) continue;
+    const scopeK = Object.fromEntries(K.map((k, i) => [k, sol[i]]));
+    const ok = extra.every((t) => {
+      const v = Number(f0.evaluate({ ...scopeK, [x]: t }));
+      const ref = Math.abs(Number(math.parse(L).compile().evaluate({ ...scopeK, [x]: t }))) + 1;
+      return Math.abs(v) < 1e-7 * ref;
+    });
+    if (!ok) continue;
+    const xt = greekTex(texOf(x));
+    const values = K.map((k, i) => ({ name: k, ...niceNumber(sol[i]) }));
+    const steps = [`\\text{Identification, pour tout } ${xt} :\\; ${greekTex(texOf(L))} = ${greekTex(texOf(R))}`];
+    K.forEach((k, i) => {
+      const kt = greekTex(texOf(k));
+      let line = `${kt} = ${values[i].latex}`;
+      try {
+        // Terme k/D(x), D du premier degre : on multiplie par D et on prend x au pole.
+        // Le terme de k dans R (somme) : k fois c(x) ; D = 1/c.
+        const term = sumTerms(math.parse(R)).find((t) => depends(t.node, k));
+        if (!term) throw new Error("terme");
+        const c1 = term.node.transform((n: any) => (n.type === "SymbolNode" && n.name === k ? new math.ConstantNode(term.sign) : n));
+        const D = math.simplify(`1 / (${c1.toString()})`);
+        const c = polynomialCoefficients(D.toString(), x, 1);
+        if (c.length === 2 && Math.abs(c[1]) > 1e-12) {
+          const a = niceNumber(-c[0] / c[1]);
+          const dt = greekTex(texOf(D));
+          const dp = /[+-]/.test(dt.replace(/^-/, "")) ? `\\left(${dt}\\right)` : dt;
+          line = `${kt} = \\left[ ${dp} \\cdot ${greekTex(texOf(L))} \\right]_{${xt} = ${a.latex}} = ${values[i].latex}`;
+        }
+      } catch { /* identification seule */ }
+      steps.push(line);
+    });
+    return { ok: true, variable: x, method: "exacte", roots: [], values: values.map((v) => ({ ...v, latex: v.latex })), steps };
+  }
+  return null;
+}
+
+/** Termes d'une somme avec leur signe (« a/p - b/(p-1) »). */
+function sumTerms(n: MathNode, sign = 1, out: { sign: number; node: MathNode }[] = []): { sign: number; node: MathNode }[] {
+  const x = n as any;
+  if (x.type === "ParenthesisNode") return sumTerms(x.content, sign, out);
+  if (x.type === "OperatorNode" && (x.op === "+" || x.op === "-") && x.args.length === 2) {
+    sumTerms(x.args[0], sign, out);
+    return sumTerms(x.args[1], x.op === "-" ? -sign : sign, out);
+  }
+  if (x.type === "OperatorNode" && x.op === "-" && x.args.length === 1) return sumTerms(x.args[0], -sign, out);
+  out.push({ sign, node: n });
+  return out;
 }

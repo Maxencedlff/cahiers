@@ -38,3 +38,12 @@ describe("lettres grecques tapees en toutes lettres", () => {
     expect(greekWordAtEnd("numero")).toBeNull();
   });
 });
+
+describe("suite d'un calcul sur la ligne du dessous", () => {
+  it("ligne qui commence par = : le dernier membre de la ligne du dessus", () => {
+    const prev = "y(t) = gamma (t) - 1 e^t.gamma(t)-1/3e^(-t).gamma(t)+1/3e^(2t)";
+    expect(nextStepSuggest("\t=", prev)?.insert).toBe(" γ(t)(1 - e^t - 1/3 e^(-t)) + 1/3 e^(2t)");
+    expect(nextStepSuggest("= ", "a = 3p + 4p")?.insert).toBe("7p");
+    expect(nextStepSuggest("=", "")).toBeNull();
+  });
+});
