@@ -3028,12 +3028,13 @@ export class App {
     // Alt+Maj+P : photos du tableau (Alt+P seul = modele Puissance).
     if (isPhotoImportKey(e)) { void this.importImage(); return true; }
     // Alt+= : nouvelle formule, comme l'equation de Word.
-    if (e.key === "=" && !e.shiftKey) {
+    if ((e.key === "=" || e.code === "Equal") && !e.shiftKey) {
       if (!inDoc) view?.focusText();
       insertMathTemplate("", view?.activeDoc);
       return true;
     }
-    const k = e.key.toLowerCase();
+    // e.code (touche physique) : sur Mac, Option+lettre donne un autre caractere.
+    const k = /^Key([A-Z])$/.exec(e.code)?.[1].toLowerCase() ?? e.key.toLowerCase();
     const tpl = MATH_TEMPLATES.find((t) => t.key === k);
     if (tpl) {
       if (!inDoc) view?.focusText();

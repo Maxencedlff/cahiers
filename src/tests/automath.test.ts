@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, mathWordsAtEnd, planLine, slashOpensFraction, subscriptVars,
-  symbolAtEnd, type LinePart,
+  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
+  slashOpensFraction, subscriptVars, symbolAtEnd, type LinePart,
 } from "../core/text/automath";
 
 const one = (line: string) => {
@@ -275,9 +275,9 @@ describe("code et symboles", () => {
     expect(symbolAtEnd("donc ->")).toBe("donc →");
     expect(symbolAtEnd("a <=>")).toBe("a ⇔");
   });
-  it("Pi et lambda restent des mots", () => {
+  it("Pi reste un mot, lambda devient λ comme les autres", () => {
     expect(greekWordAtEnd("Raspberry Pi")).toBeNull();
-    expect(greekWordAtEnd("lambda")).toBeNull();
+    expect(greekWordAtEnd("la longueur lambda")).toBe("la longueur λ");
     expect(greekWordAtEnd("omega")).toBe("ω");
   });
 });
@@ -543,5 +543,86 @@ describe("crochet d'evaluation [F]_a^b", () => {
   it("sans les deux bornes : texte ou intervalle comme avant", () => {
     expect(latex("voir [note] et x = 2")).toEqual(["x = 2"]);
     expect(latex("x dans [0, 1]")).toEqual(["\\left[ 0,\\,1 \\right]"]);
+  });
+});
+
+describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
+  it("denominateur : facteurs colles compris, jamais un exposant laisse ouvert", () => {
+    expect(one("Y(p) = 5/p(p^2+1)").tex).toBe("Y\\left(p\\right) = \\frac{5}{p\\left(p^{2} + 1\\right)}");
+    expect(one("Y(p) = 5/(p(p^2+1))").tex).toBe("Y\\left(p\\right) = \\frac{5}{p\\left(p^{2} + 1\\right)}");
+    expect(one("G = 1/sqrt(1 + (RCw)^2)").tex).toBe("G = \\frac{1}{\\sqrt{1 + \\left(R\\,C\\,\\omega\\right)^{2}}}");
+    expect(one("G = 2/(p+1)(p+2)").tex).toBe("G = \\frac{2}{\\left(p + 1\\right)\\left(p + 2\\right)}");
+    expect(one("H = 1/(1 + jRCw)").tex).toBe("H = \\frac{1}{1 + j\\,R\\,C\\,\\omega}");
+    expect(one("1/2 + 1/3").tex).toBe("\\frac{1}{2} + \\frac{1}{3}");
+    // Apres un espace, le facteur n'est plus au denominateur.
+    expect(one("ΔS = ΔiL/(8C) T").tex).toBe("\\Delta S = \\frac{\\Delta i_L}{8\\,C}\\,T");
+  });
+
+  it("indices et exposants entre accolades", () => {
+    expect(one("on a i_{L(t)} = 2").tex).toBe("i_{L\\left(t\\right)} = 2");
+    expect(one("y = e^{-pt}").tex).toBe("y = e^{-p\\,t}");
+  });
+
+  it("majuscules d'electronique en indice", () => {
+    expect(findFormulas("VBE = 0,6 V et VCE > 0").map((f) => f.latex)).toEqual(["V_{BE} = 0{,}6\\,\\mathrm{V}", "V_{CE} > 0"]);
+    expect(one("VBE ≈ VD ≈ 0,6V").tex).toBe("V_{BE} \\approx V_D \\approx 0{,}6\\,\\mathrm{V}");
+    expect(one("VCE = Vbatt - Vs").tex).toBe("V_{CE} = V_{batt} - V_s");
+    expect(one("la tension VCE vaut 3").tex).toBe("V_{CE}");
+    expect(findFormulas("le PDF du cours")).toHaveLength(0);
+  });
+
+  it("jamais dans une adresse, un sigle MAJ-MAJ ou du code", () => {
+    expect(findFormulas("voir https://x.fr/a-b et www.site.fr/p=2")).toHaveLength(0);
+    expect(findFormulas("un convertisseur DC-DC ou AC-DC")).toHaveLength(0);
+    expect(findFormulas("le code `x = a/b` ici")).toHaveLength(0);
+    expect(findFormulas("le code `x = a/b")).toHaveLength(0);
+  });
+
+  it("le contexte plutot que des listes", () => {
+    expect(one("a + b = 5").tex).toBe("a + b = 5");
+    expect(one("F = m a").tex).toBe("F = m\\,a");
+    expect(one("Delta S = 3".replace("Delta", "Δ")).tex).toBe("\\Delta S = 3");
+    expect(one("Δt = 3 ms").tex).toBe("\\Delta t = 3\\,\\mathrm{ms}");
+    expect(one("LC = 1 x 0,5").tex).toBe("L\\,C = 1 \\times 0{,}5");
+    expect(one("y = 3 s(t)").tex).toBe("y = 3\\,s\\left(t\\right)");
+    expect(findFormulas("il y a 3 cas")).toHaveLength(0);
+    expect(one("x = 2 a la fin").tex).toBe("x = 2");
+  });
+
+  it("une formule absorbe ce qui la prolonge", () => {
+    expect(one("y = e^t gamma(t)").tex).toBe("y = e^{t}\\,\\gamma\\left(t\\right)");
+    expect(one("lim_(p->0) p S(p)").tex).toBe("\\lim_{p \\to 0} p\\,S\\left(p\\right)");
+    expect(one("int_0^T A e^(-pt) dt").tex).toBe("\\int_{0}^{T} A\\,e^{-p\\,t}\\,\\mathrm{d}t");
+    expect(one("i = C dv/dt").tex).toBe("i = C\\,\\frac{\\mathrm{d}v}{\\mathrm{d}t}");
+    expect(one("E = m c^2").tex).toBe("E = m\\,c^{2}");
+    expect(one("vs = vbatt . Ru/(R + Ru)").tex).toBe("v_s = \\frac{v_{batt} \\cdot R_u}{R + R_u}");
+    // Point colle au mot d'avant : fin de phrase.
+    expect(findFormulas("on a x = 2. Ensuite y = 3").map((f) => f.latex)).toEqual(["x = 2", "y = 3"]);
+    expect(one("dvs/dt = ic/C").tex).toBe("\\frac{\\mathrm{d}v_s}{\\mathrm{d}t} = \\frac{i_c}{C}");
+    expect(one("iL(t) - iL(0) = E(1-alpha)/L t").tex)
+      .toBe("i_L\\left(t\\right) - i_L\\left(0\\right) = \\frac{E\\left(1 - \\alpha\\right)}{L}\\,t");
+  });
+
+  it("formule en cours de frappe derriere /", () => {
+    expect(liveFormula("5/")).toBe("\\frac{5}{\\placeholder{}}");
+    expect(liveFormula("5/p(p^")).toBe("\\frac{5}{p\\left(p^{\\placeholder{}}\\right)}");
+    expect(liveFormula("Y(p) = 5/p(p^2+1")).toBe("Y\\left(p\\right) = \\frac{5}{p\\left(p^{2} + 1\\right)}");
+    expect(liveFormula("1/sqrt")).toBe("\\frac{1}{\\sqrt{\\placeholder{}}}");
+    expect(liveComplete("Vs/Ru")).toBe(true);
+    expect(liveComplete("1/sqrt(1 + (RCw)^2")).toBe(false);
+    expect(liveComplete("5/p(p^")).toBe(false);
+    expect(liveComplete("Vz / ")).toBe(false);
+  });
+
+  it("frappe derriere la formule en cours : ce qui la prolonge, ce qui repart en texte", () => {
+    expect(liveSplit("Is = Vs/", "Ru donc")).toEqual({ src: "Is = Vs/Ru", rest: " donc" });
+    expect(liveSplit("1 + R2/", "R1) donc")).toEqual({ src: "1 + R2/R1", rest: ") donc" });
+    expect(liveSplit("G = 1/", "sqrt(1 + (RCw)^2) et")).toEqual({ src: "G = 1/sqrt(1 + (RCw)^2)", rest: " et" });
+    expect(liveSplit("Y(p) = 3/", "p = 1")).toEqual({ src: "Y(p) = 3/p", rest: " = 1" });
+    expect(liveSplit("Y(p) = 3/", "p=1")).toEqual({ src: "Y(p) = 3/p", rest: "=1" });
+    // Exposant d'une touche morte (« ^2 » arrive d'un coup) : dans la formule.
+    expect(liveSplit("y = 1/p", "^2")).toEqual({ src: "y = 1/p^2", rest: "" });
+    // Espace avant le denominateur : il reste dedans.
+    expect(liveSplit("Is = Vz /", " R")).toEqual({ src: "Is = Vz / R", rest: "" });
   });
 });
