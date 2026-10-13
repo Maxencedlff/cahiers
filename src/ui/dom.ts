@@ -1,7 +1,7 @@
 /** Micro-utilitaires DOM. Pas de framework : l'empreinte memoire compte. */
 
 import { toastPlacement, toastsToDrop } from "../core/chrome";
-import { icon } from "./icons";
+import { icon, type IconName } from "./icons";
 
 type Attrs = Record<string, unknown>;
 
@@ -34,8 +34,9 @@ export function clear(node: Element): void {
  * Appui long (stylet, doigt ou souris) ou clic droit : le menu d'un
  * element sans passer par le clic droit, introuvable au stylet. Le clic du
  * relachement est avale, sinon l'appui long ouvrait aussi l'element.
+ * `run` recoit le point de l'appui : le menu s'ouvre sous le doigt.
  */
-export function onLongPress(node: HTMLElement, run: () => void, ms = 500): void {
+export function onLongPress(node: HTMLElement, run: (at: { x: number; y: number }) => void, ms = 500): void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let start: { x: number; y: number } | null = null;
   let fired = false;
@@ -43,8 +44,9 @@ export function onLongPress(node: HTMLElement, run: () => void, ms = 500): void 
   node.addEventListener("pointerdown", (e) => {
     fired = false;
     if (e.button !== 0) return;
-    start = { x: e.clientX, y: e.clientY };
-    timer = setTimeout(() => { timer = null; fired = true; run(); }, ms);
+    const at = { x: e.clientX, y: e.clientY };
+    start = at;
+    timer = setTimeout(() => { timer = null; fired = true; run(at); }, ms);
   });
   node.addEventListener("pointermove", (e) => {
     if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 10) cancel();
@@ -62,8 +64,189 @@ export function onLongPress(node: HTMLElement, run: () => void, ms = 500): void 
     if (fired) return;
     cancel();
     fired = true;
-    run();
+    run({ x: e.clientX, y: e.clientY });
   });
+}
+
+/* ---------------- menus contextuels ---------------- */
+
+/** Une ligne de menu : libelle, icone, touches, action ou sous-menu. */
+export interface MenuItem {
+  label: string;
+  icon?: IconName;
+  /** Raccourci montre a droite (« Ctrl+N »). */
+  keys?: string;
+  run?: () => void;
+  /** Action destructive : en rouge, a part. */
+  danger?: boolean;
+  /** Choix actif d'un groupe (coche). */
+  checked?: boolean;
+  disabled?: boolean;
+  sub?: MenuEntry[];
+  /** Carre de couleur (matiere) a la place de l'icone. */
+  swatch?: string;
+}
+/** Ligne, separateur ou titre de section. */
+export type MenuEntry = MenuItem | "sep" | { title: string };
+
+let openMenus: { node: HTMLElement; close: () => void }[] = [];
+
+/** Ferme tous les menus contextuels ouverts. */
+export function closeMenus(): void {
+  for (const m of [...openMenus].reverse()) m.close();
+}
+
+/**
+ * Vrai menu contextuel, compact (32 px par ligne a la souris, 44 au doigt
+ * via `pointer: coarse`) : icone, libelle, raccourci, coche, sous-menu.
+ * Un appui a cote, Echap, ou un choix le ferme ; pas de bouton « Annuler ».
+ * Clavier : fleches, Entree, → ouvre un sous-menu, ← le referme. Le focus
+ * reste ou il etait (le curseur du texte n'est pas perdu).
+ * `at` : point (clic droit, appui long) ou bouton d'ancrage (menu ⋯).
+ */
+export function contextMenu(
+  at: { x: number; y: number } | HTMLElement, entries: MenuEntry[],
+  o: { align?: "start" | "end"; label?: string; onClose?: () => void; parent?: HTMLElement } = {},
+): () => void {
+  if (!o.parent) closeMenus();
+  const node = el("div", { class: "ctx-menu", role: "menu", "aria-label": o.label ?? "Menu" });
+  const items: { btn: HTMLButtonElement; item: MenuItem }[] = [];
+  let sel = -1;
+  let child: (() => void) | null = null;
+  let childOf: HTMLButtonElement | null = null;
+
+  const highlight = (i: number) => {
+    sel = i;
+    items.forEach((x, k) => x.btn.classList.toggle("kb", k === i));
+  };
+  const openSub = (btn: HTMLButtonElement, item: MenuItem) => {
+    if (childOf === btn) return;
+    child?.();
+    childOf = btn;
+    const r = btn.getBoundingClientRect();
+    child = contextMenu({ x: r.right - 2, y: r.top - 5 }, item.sub!, {
+      parent: btn, label: item.label, onClose: () => { if (childOf === btn) { childOf = null; child = null; } },
+    });
+  };
+
+  for (const e of entries) {
+    if (e === "sep") { node.append(el("div", { class: "ctx-sep", role: "separator" })); continue; }
+    if ("title" in e) { node.append(el("div", { class: "ctx-title" }, e.title)); continue; }
+    const btn = el("button", {
+      class: `ctx-item${e.danger ? " danger" : ""}${e.sub ? " has-sub" : ""}`,
+      role: e.checked != null ? "menuitemradio" : "menuitem",
+      ...(e.checked != null ? { "aria-checked": String(e.checked) } : {}),
+      ...(e.sub ? { "aria-haspopup": "menu" } : {}),
+      disabled: e.disabled ? true : null,
+      tabindex: "-1",
+    },
+    el("span", { class: "ctx-icon" }, e.checked ? icon("check", 16) : e.icon ? icon(e.icon, 17)
+      : e.swatch ? el("i", { class: "nb-sq", style: { background: e.swatch } }) : null),
+    el("span", { class: "ctx-label" }, e.label),
+    e.keys ? el("kbd", { class: "ctx-keys" }, e.keys) : null,
+    e.sub ? el("span", { class: "ctx-chev" }, icon("chevronRight", 15)) : null);
+    // Le focus reste dans la page : on continue de taper apres un choix.
+    btn.addEventListener("pointerdown", (ev) => { if (ev.pointerType === "mouse") ev.preventDefault(); });
+    btn.addEventListener("mousedown", (ev) => ev.preventDefault());
+    const idx = items.length;
+    btn.addEventListener("pointerenter", () => {
+      highlight(idx);
+      if (e.sub) openSub(btn, e);
+      else if (child) { child(); }
+    });
+    btn.addEventListener("click", () => {
+      if (e.disabled) return;
+      if (e.sub) { openSub(btn, e); return; }
+      closeMenus();
+      e.run?.();
+    });
+    items.push({ btn, item: e });
+    node.append(btn);
+  }
+
+  const onDown = (ev: PointerEvent) => {
+    const t = ev.target as Node;
+    if (openMenus.some((m) => m.node.contains(t))) return;
+    closeMenus();
+    // L'appui sur le bouton d'ancrage referme seulement (pas de reouverture).
+    if (at instanceof HTMLElement && at.contains(t)) {
+      ev.stopPropagation(); ev.preventDefault();
+      const eat = (c: Event) => { c.stopImmediatePropagation(); c.preventDefault(); };
+      at.addEventListener("click", eat, { capture: true, once: true });
+      setTimeout(() => at.removeEventListener("click", eat, { capture: true }), 600);
+    }
+  };
+  const onKey = (ev: KeyboardEvent) => {
+    // Seul le menu le plus profond repond au clavier.
+    if (openMenus[openMenus.length - 1]?.node !== node) return;
+    const enabled = items.map((x, k) => (x.item.disabled ? -1 : k)).filter((k) => k >= 0);
+    if (ev.key === "Escape" || (ev.key === "ArrowLeft" && o.parent)) {
+      ev.preventDefault(); ev.stopPropagation();
+      close();
+      return;
+    }
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault(); ev.stopPropagation();
+      if (!enabled.length) return;
+      const at2 = enabled.indexOf(sel);
+      const next = ev.key === "ArrowDown"
+        ? enabled[(at2 + 1) % enabled.length]
+        : enabled[(at2 - 1 + enabled.length) % enabled.length];
+      highlight(next);
+      return;
+    }
+    if ((ev.key === "ArrowRight" || ev.key === "Enter" || ev.key === " ") && sel >= 0) {
+      ev.preventDefault(); ev.stopPropagation();
+      const x = items[sel];
+      if (x.item.sub) { openSub(x.btn, x.item); return; }
+      if (ev.key !== "ArrowRight") x.btn.click();
+      return;
+    }
+    if (ev.key === "Tab") { ev.preventDefault(); closeMenus(); }
+  };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    child?.();
+    node.remove();
+    openMenus = openMenus.filter((m) => m.node !== node);
+    if (!openMenus.length) {
+      document.removeEventListener("pointerdown", onDown, true);
+    }
+    document.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("resize", closeAll);
+    if (at instanceof HTMLElement && !o.parent) at.classList.remove("open");
+    o.onClose?.();
+  };
+  const closeAll = () => closeMenus();
+  document.body.append(node);
+  openMenus.push({ node, close });
+  if (openMenus.length === 1) document.addEventListener("pointerdown", onDown, true);
+  document.addEventListener("keydown", onKey, true);
+  window.addEventListener("resize", closeAll);
+
+  // Place : sous le bouton (aligne a droite pour un ⋯ en bout de barre),
+  // ou au point de l'appui, toujours entier a l'ecran.
+  const w = node.offsetWidth, h = node.offsetHeight;
+  const W = window.innerWidth, H = window.innerHeight;
+  let x: number, y: number;
+  if (at instanceof HTMLElement) {
+    const r = at.getBoundingClientRect();
+    at.classList.add("open");
+    x = o.align === "end" ? r.right - w : r.left;
+    y = r.bottom + 4;
+    if (y + h > H - 8 && r.top - h - 4 >= 8) y = r.top - h - 4;
+  } else {
+    x = at.x; y = at.y;
+    // Sous-menu sans place a droite : a gauche de son parent.
+    if (o.parent && x + w > W - 8) x = o.parent.getBoundingClientRect().left - w + 2;
+  }
+  x = Math.max(8, Math.min(x, W - w - 8));
+  y = Math.max(8, Math.min(y, H - h - 8));
+  node.style.left = `${Math.round(x)}px`;
+  node.style.top = `${Math.round(y)}px`;
+  return close;
 }
 
 /* ---------------- messages ephemeres ---------------- */
@@ -182,6 +365,44 @@ export function dismissPageToasts(): void {
 }
 
 /* ---------------- dialogues ---------------- */
+
+/**
+ * Fenetre de reglages ou de choix (Reglages, Partager) : titre, croix de
+ * fermeture, contenu ; Echap ou un appui a cote la ferme. Pas de bouton
+ * « Annuler » : chaque choix s'applique tout de suite, ou le bouton
+ * principal du pied l'execute.
+ */
+export function sheetDialog(
+  title: string, body: HTMLElement, o: { cls?: string; footer?: HTMLElement[]; onClose?: () => void } = {},
+): { close: () => void; root: HTMLElement } {
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape" && !document.querySelector(".ctx-menu")) {
+      // Un dialogue ouvert par-dessus (cles MyScript) prend son Echap.
+      const top = [...document.querySelectorAll(".backdrop")].pop();
+      if (top !== backdrop) return;
+      e.preventDefault(); e.stopPropagation(); close();
+    }
+  };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey, true);
+    o.onClose?.();
+  };
+  const modal = el("div", { class: `modal sheet-dialog ${o.cls ?? ""}`.trim(), role: "dialog", "aria-label": title },
+    el("header", { class: "sheet-head" }, el("span", {}, title),
+      el("button", { class: "icon-btn sheet-x", "aria-label": "Fermer", onclick: () => close() }, icon("close", 18))),
+    el("div", { class: "content" }, body),
+    o.footer?.length ? el("footer", {}, ...o.footer) : null,
+  );
+  const backdrop = el("div", { class: "backdrop" }, modal);
+  backdrop.addEventListener("pointerdown", (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(backdrop);
+  return { close, root: modal };
+}
 
 export interface DialogField {
   name: string;

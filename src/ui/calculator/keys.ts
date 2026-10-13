@@ -1,10 +1,10 @@
 /**
  * Pave type Texas Instruments (section 7).
  *
- * Chaque touche declare sa famille, qui determine sa couleur. Les couleurs
- * sont semantiques et non decoratives : elles servent a trouver une touche
- * sans lire son label. Les chiffres restent neutres, ce sont les plus
- * utilises et les colorer ecraserait tout le reste.
+ * Chaque touche declare sa famille, qui determine sa teinte. Peu de
+ * couleurs, et seulement utiles : chiffres neutres (les plus utilises),
+ * fonctions, operateurs et constantes en gris soutenu, « = » en accent, le
+ * rouge reserve a l'effacement (del, clear).
  */
 
 export type KeyFamily = "num" | "op" | "fn" | "const" | "del" | "2nd" | "eq";
@@ -27,8 +27,8 @@ export interface Key {
 export const KEYPAD: Key[] = [
   { label: "2nd", action: "second", family: "2nd" },
   { label: "RAD", action: "mode", family: "fn" },
-  { label: "<", action: "left", family: "del" },
-  { label: ">", action: "right", family: "del" },
+  { label: "<", action: "left", family: "op" },
+  { label: ">", action: "right", family: "op" },
   { label: "del", action: "del", family: "del", second: { label: "clear" } },
 
   { label: "x²", insert: "^2", family: "fn", second: { label: "√", insert: "sqrt(" } },

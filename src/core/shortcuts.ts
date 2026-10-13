@@ -11,12 +11,12 @@ import { PHOTO_IMPORT_KEYS } from "./image/photo";
  */
 
 export type Command =
-  | "menu" | "search" | "calc" | "undo" | "redo" | "flag" | "convert" | "finger"
+  | "menu" | "search" | "calc" | "undo" | "redo" | "flag" | "convert"
   | "newPage" | "insertPage" | "goto" | "nextPage" | "prevPage" | "nextDivider" | "prevDivider"
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
   | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf" | "viewMode"
-  | "maths" | "theme" | "solveCalc";
+  | "maths" | "theme" | "solveCalc" | "settings" | "sidebar";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -31,6 +31,8 @@ export interface Shortcut {
   group: Group;
   /** Raccourci Ctrl reconnu par ctrlCommand : e.key en minuscules, et Maj. */
   ctrl?: { key: string; shift: boolean; command: Command };
+  /** Un des raccourcis essentiels : la fiche F1 les montre d'abord. */
+  essential?: boolean;
 }
 
 /** Champ minimal d'un KeyboardEvent : testable sans navigateur. */
@@ -44,69 +46,95 @@ export interface KeyLike {
 }
 
 const KEY_LABELS: Record<string, string> = {
-  pagedown: "Pg↓", pageup: "Pg↑", tab: "Tab", "\\": "\\", "/": "/",
+  pagedown: "Pg↓", pageup: "Pg↑", tab: "Tab", "\\": "\\", "/": "/", ",": ",",
 };
 
-function keyLabel(key: string): string {
+function keyName(key: string): string {
   return KEY_LABELS[key] ?? key.toUpperCase();
 }
 
-function ctrl(key: string, shift: boolean, command: Command, label: string, group: Group): Shortcut {
+function ctrl(key: string, shift: boolean, command: Command, label: string, group: Group, essential = false): Shortcut {
   return {
-    keys: `Ctrl+${shift ? "Maj+" : ""}${keyLabel(key)}`,
-    label, group, ctrl: { key, shift, command },
+    keys: `Ctrl+${shift ? "Maj+" : ""}${keyName(key)}`,
+    label, group, ctrl: { key, shift, command }, ...(essential ? { essential } : {}),
   };
 }
 
+/* ---------------- libelles selon la plateforme ---------------- */
+
+/**
+ * Le Mac ecrit ses raccourcis avec des symboles (⌘ ⇧ ⌥ ⌃), sans « + » ;
+ * Windows et Linux en toutes lettres (« Ctrl+Maj+F »). La table garde la
+ * forme Windows ; l'affichage passe par `keyLabel`.
+ */
+export function keyLabel(keys: string, mac: boolean = macKeys): string {
+  if (!mac) return keys;
+  return keys.replace(/(?<![\w])(Ctrl|Maj|Alt)\+/g, (_m, k: string) => (k === "Ctrl" ? "⌘" : k === "Maj" ? "⇧" : "⌥"));
+}
+
+/** Plateforme Apple (macOS, iPadOS) : Cmd a la place de Ctrl. */
+export function isApplePlatform(ua: string, platform = ""): boolean {
+  return /Mac|iPhone|iPad|iPod/i.test(platform) || /Macintosh|iPhone|iPad|iPod/i.test(ua);
+}
+
+let macKeys = typeof navigator !== "undefined"
+  && isApplePlatform(navigator.userAgent ?? "", (navigator as { platform?: string }).platform ?? "");
+
+/** Force l'affichage Mac ou PC (tests, reglage). */
+export function setMacKeys(mac: boolean): void { macKeys = mac; }
+export function usesMacKeys(): boolean { return macKeys; }
+
 export const SHORTCUTS: readonly Shortcut[] = [
-  ctrl("f", false, "flag", "Pas compris : repère sur la page (« Annuler » dans le message)", "Pendant le cours"),
-  ctrl("z", false, "undo", "Annuler", "Pendant le cours"),
+  ctrl("f", true, "flag", "Pas compris : repère sur la page (« Annuler » dans le message)", "Pendant le cours", true),
+  ctrl("z", false, "undo", "Annuler", "Pendant le cours", true),
   ctrl("y", false, "redo", "Rétablir", "Pendant le cours"),
   ctrl("z", true, "redo", "Rétablir", "Pendant le cours"),
-  ctrl("l", false, "calc", "Calculatrice", "Pendant le cours"),
+  ctrl("l", false, "calc", "Calculatrice", "Pendant le cours", true),
   ctrl("l", true, "sendCalc", "Envoyer le dernier résultat de la calculatrice dans la page (au curseur du texte, sinon en bas)", "Pendant le cours"),
-  ctrl("k", false, "search", "Recherche dans tous les cahiers", "Pendant le cours"),
+  ctrl("f", false, "search", "Rechercher dans tous les cahiers (aussi Ctrl+K)", "Pendant le cours", true),
+  ctrl("k", false, "search", "Rechercher (comme Ctrl+F)", "Pendant le cours"),
   ctrl("k", true, "review", "Réviser : tous les théorèmes, définitions… d'une matière, par couleur ; export PDF", "Pendant le cours"),
   { keys: PHOTO_IMPORT_KEYS, label: "Photos du tableau : redressées, lues, posées dans le texte", group: "Pendant le cours" },
   { keys: "C", label: "Photo sélectionnée : la mettre à côté (la photo ou le texte qui suit passe à droite)", group: "Pendant le cours" },
   { keys: "← →", label: "Photo sélectionnée : la décaler (Maj : pas fin) ; bouton ⇤ : gauche, centre, droite", group: "Pendant le cours" },
   { keys: "→", label: "Formule déjà écrite proposée en grisé : Flèche droite la pose (Échap ou toute autre touche l'ignore, Ctrl+Z la retire)", group: "Pendant le cours" },
-  { keys: "Suppr / Retour arrière", label: "À la fin d'une page / au début de sa suite : la suite remonte dans le blanc (menu : Tasser les pages)", group: "Pendant le cours" },
+  { keys: "Suppr / Retour arrière", label: "À la fin d'une page / au début de sa suite : la suite remonte dans le blanc", group: "Pendant le cours" },
   { keys: "Ctrl+X, Ctrl+V", label: "Photo sélectionnée : la couper puis la coller sur une autre page (Ctrl+C : la copier)", group: "Pendant le cours" },
   ctrl("j", false, "solveCalc", "Résoudre la formule (ou la ligne du curseur) dans la calculatrice, avec le détail", "Pendant le cours"),
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),
   {
     keys: "Échap",
-    label: "Ferme ce qui est ouvert (ruban, sélection du lasso), rend le clavier de la calculatrice à la page, "
-      + "quitte le texte ; un second Échap de suite : retour au menu",
-    group: "Pendant le cours",
+    label: "Ferme ce qui est ouvert (volet, sélection du lasso), rend le clavier de la calculatrice à la page, "
+      + "quitte le texte ; un second Échap de suite : retour à l'accueil",
+    group: "Pendant le cours", essential: true,
   },
   {
     keys: "# puis Espace",
     label: "En début de ligne : titre (## sous-titre, ### niveau 3) ; - puce ; 1. liste numérotée ; Tab / Maj+Tab : retrait ; Ctrl+Z rend le texte tapé",
-    group: "Pendant le cours",
+    group: "Pendant le cours", essential: true,
   },
 
-  ctrl("pagedown", false, "nextPage", "Page suivante (Pg↓ seul hors du texte)", "Pages et intercalaires"),
+  ctrl("pagedown", false, "nextPage", "Page suivante (Pg↓ seul hors du texte)", "Pages et intercalaires", true),
   ctrl("pageup", false, "prevPage", "Page précédente (Pg↑ seul hors du texte)", "Pages et intercalaires"),
   ctrl("pagedown", true, "nextDivider", "Intercalaire suivant", "Pages et intercalaires"),
   ctrl("pageup", true, "prevDivider", "Intercalaire précédent", "Pages et intercalaires"),
-  ctrl("n", false, "newPage", "Nouvelle page à la fin", "Pages et intercalaires"),
+  ctrl("n", false, "newPage", "Nouvelle page à la fin", "Pages et intercalaires", true),
   ctrl("n", true, "insertPage", "Insérer une page après la page courante", "Pages et intercalaires"),
   ctrl("t", false, "newDivider", "Nouvel intercalaire dans le cahier en vue", "Pages et intercalaires"),
-  ctrl("g", false, "goto", "Liste des pages ; taper un numéro y va", "Pages et intercalaires"),
+  ctrl("g", false, "goto", "Liste des pages dans la barre latérale ; taper un numéro y va", "Pages et intercalaires", true),
   { keys: "Alt+←", label: "Revenir d'où l'on vient après un saut (recherche, repère, lien, liste) ; aussi le bouton retour de la souris", group: "Pages et intercalaires" },
-  { keys: "Appui long", label: "Sur un intercalaire : ouvrir à droite, renommer, déplacer, supprimer ; appui long puis glisser (ou glisser à la souris) : le déplacer", group: "Pages et intercalaires" },
+  { keys: "Appui long", label: "Sur un intercalaire ou une page de la barre latérale (ou clic droit) : son menu ; glisser un intercalaire le déplace", group: "Pages et intercalaires" },
   ctrl("=", false, "zoomIn", "Zoom avant, jusqu'à 300 % (aussi Ctrl+molette, pinch à deux doigts)", "Pages et intercalaires"),
   ctrl("-", false, "zoomOut", "Zoom arrière, jusqu'à 50 %", "Pages et intercalaires"),
   ctrl("0", false, "zoomReset", "Zoom à 100 % (aussi un appui sur « 150 % » en bas du panneau)", "Pages et intercalaires"),
-  ctrl("p", false, "exportPage", "Exporter la page en PDF", "Pages et intercalaires"),
+  ctrl("p", false, "exportPage", "Exporter la page en PDF (aussi : Partager)", "Pages et intercalaires"),
   ctrl("p", true, "exportAll", "Exporter tout l'intercalaire en PDF", "Pages et intercalaires"),
   ctrl("e", false, "exportWord", "Exporter la page en Word (.docx) : titres, listes, équations Word éditables, encre en images", "Pages et intercalaires"),
   ctrl("e", true, "exportWordAll", "Exporter tout l'intercalaire en Word (un saut de page entre deux pages)", "Pages et intercalaires"),
   ctrl("o", false, "importPdf", "Importer un PDF (sujet de TD, poly, datasheet) après la page courante, pour l'annoter ; aussi : déposer un .pdf sur la page", "Pages et intercalaires"),
+  ctrl("d", true, "viewMode", "Affichage : une page à la fois ou toutes à la suite (défilement)", "Pages et intercalaires"),
 
-  { keys: "Alt+E", label: "Stylo", group: "Outils et couleurs" },
+  { keys: "Alt+E", label: "Stylo ; appui long sur le stylo de la palette : épaisseur", group: "Outils et couleurs", essential: true },
   { keys: "Alt+H", label: "Surligneur", group: "Outils et couleurs" },
   { keys: "Alt+G", label: "Gomme (le bout gomme du stylet gomme aussi) ; deux fois : trait entier ou précise", group: "Outils et couleurs" },
   { keys: "Alt+A", label: "Lasso : entourer, glisser pour déplacer, poignée d'angle pour retailler ; deux fois : insérer de l'espace", group: "Outils et couleurs" },
@@ -117,26 +145,29 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: "Alt+Z", label: "Zone math : une zone, puis retour au stylo ; deux fois = verrou", group: "Outils et couleurs" },
   { keys: "Alt+T", label: "Zone texte : une zone, puis retour au stylo ; deux fois = verrou", group: "Outils et couleurs" },
   { keys: `Alt+${NEUTRAL_INK.shortcut}`, label: `${NEUTRAL_INK.label}, en noir`, group: "Outils et couleurs" },
-  ...PALETTE.map((p): Shortcut => ({ keys: `Alt+${p.shortcut}`, label: `${p.label} (recolore la sélection du lasso)`, group: "Outils et couleurs" })),
-  ctrl("d", true, "viewMode", "Affichage : une page à la fois ou toutes à la suite (défilement)", "Pages et intercalaires"),
-  ctrl("d", false, "finger", "Doigt : écrire ou naviguer (avec un stylet : l'oublier)", "Outils et couleurs"),
+  ...PALETTE.map((p): Shortcut => ({
+    keys: `Alt+${p.shortcut}`, label: `${p.label} (recolore la sélection du lasso)`, group: "Outils et couleurs",
+    ...(p.shortcut === "1" ? { essential: true } : {}),
+  })),
 
-  { keys: "Alt+=", label: "Nouvelle formule", group: "Formules" },
-  ctrl("m", true, "maths", "Ruban Maths : ouvrir ou fermer le volet (épinglé : il reste ouvert)", "Formules"),
+  { keys: "Alt+=", label: "Nouvelle formule", group: "Formules", essential: true },
+  ctrl("m", true, "maths", "Formules : ouvrir ou fermer le volet des symboles (Σ)", "Formules"),
   ...MATH_TEMPLATES.filter((t) => t.key).map((t): Shortcut => ({
     keys: `Alt+${t.key!.toUpperCase()}`, label: t.title, group: "Formules",
   })),
 
-  ctrl("m", false, "menu", "Menu, puis retour au même endroit", "Fenêtres"),
-  { keys: "Entrée", label: "Au menu : reprendre ; taper filtre les matières, flèches pour choisir", group: "Fenêtres" },
+  ctrl("m", false, "menu", "Accueil, puis retour au même endroit", "Fenêtres"),
+  ctrl("s", true, "sidebar", "Barre latérale : afficher ou masquer", "Fenêtres"),
+  ctrl(",", false, "settings", "Réglages", "Fenêtres"),
+  { keys: "Entrée", label: "À l'accueil : reprendre ; taper filtre les matières, flèches pour choisir", group: "Fenêtres" },
   ctrl("tab", false, "nextTab", "Onglet suivant", "Fenêtres"),
   ctrl("tab", true, "prevTab", "Onglet précédent", "Fenêtres"),
   ctrl("w", false, "closeTab", "Fermer l'onglet", "Fenêtres"),
   ctrl("\\", false, "split", "Split gauche/droite (AZERTY : Ctrl+*)", "Fenêtres"),
   ctrl("x", true, "swap", "Permuter les panneaux", "Fenêtres"),
   ctrl("w", true, "closeSplit", "Fermer le panneau droit", "Fenêtres"),
-  ctrl("t", true, "theme", "Thème : clair, sombre, celui de Windows (la feuille a son propre réglage dans le menu ⋯)", "Fenêtres"),
-  { keys: "F1", label: "Cette fiche (aussi Ctrl+/)", group: "Fenêtres" },
+  ctrl("t", true, "theme", "Thème : clair, sombre, celui du système (la feuille suit, sauf réglage)", "Fenêtres"),
+  { keys: "F1", label: "Cette fiche (aussi Ctrl+/)", group: "Fenêtres", essential: true },
 ];
 
 /**
@@ -176,12 +207,12 @@ export function isReloadKey(e: KeyLike): boolean {
   return (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "r";
 }
 
-/** Touches d'une commande, pour une infobulle : « Ctrl+F ». */
+/** Touches d'une commande, pour une infobulle : « Ctrl+F » (« ⌘F » sur Mac). */
 export function keysOf(command: Command): string {
-  return SHORTCUTS.find((s) => s.ctrl?.command === command)?.keys ?? "";
+  return keyLabel(SHORTCUTS.find((s) => s.ctrl?.command === command)?.keys ?? "");
 }
 
-/** Infobulle complete : « Pas compris (Ctrl+F) ». */
+/** Infobulle complete : « Pas compris (Ctrl+Maj+F) ». */
 export function titleOf(label: string, command: Command): string {
   const keys = keysOf(command);
   return keys ? `${label} (${keys})` : label;

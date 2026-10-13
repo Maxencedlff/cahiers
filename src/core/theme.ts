@@ -2,9 +2,9 @@ import { colorOf } from "./palette";
 import type { InkColor } from "./types";
 
 /**
- * Apparence (logique pure). Le chrome (barres, rail, menus) suit le theme
- * choisi ; la feuille a son propre reglage, claire par defaut meme en
- * sombre. Rien de tout cela ne touche aux donnees : l'encre « Normal »
+ * Apparence (logique pure). Le chrome (barres, palette, menus) suit le
+ * theme choisi ; la feuille a son propre reglage, « Auto » par defaut :
+ * sombre en theme sombre, claire sinon. Rien de tout cela ne touche aux donnees : l'encre « Normal »
  * rendue claire sur une feuille sombre l'est a l'affichage seulement,
  * jamais dans les fichiers ni a l'export PDF/Word.
  */
@@ -12,6 +12,8 @@ import type { InkColor } from "./types";
 export type ThemePref = "light" | "dark" | "system";
 export type Theme = "light" | "dark";
 export type SheetTone = "light" | "sepia" | "dark";
+/** Reglage de la feuille : une teinte, ou « auto » = sombre en theme sombre. */
+export type SheetPref = SheetTone | "auto";
 
 export const THEME_PREFS: readonly { pref: ThemePref; label: string }[] = [
   { pref: "light", label: "Clair" },
@@ -19,7 +21,8 @@ export const THEME_PREFS: readonly { pref: ThemePref; label: string }[] = [
   { pref: "system", label: "Système" },
 ];
 
-export const SHEET_TONES: readonly { tone: SheetTone; label: string; title: string }[] = [
+export const SHEET_TONES: readonly { tone: SheetPref; label: string; title: string }[] = [
+  { tone: "auto", label: "Auto", title: "Claire en thème clair, sombre en thème sombre (l'export reste blanc)" },
   { tone: "light", label: "Claire", title: "Feuille blanche, comme imprimée" },
   { tone: "sepia", label: "Sépia", title: "Feuille crème, plus douce le soir ; l'encre ne change pas" },
   { tone: "dark", label: "Sombre", title: "Feuille sombre : l'encre noire est montrée claire (affichage seulement, jamais à l'export)" },
@@ -42,6 +45,20 @@ export function isThemePref(v: unknown): v is ThemePref {
 
 export function isSheetTone(v: unknown): v is SheetTone {
   return v === "light" || v === "sepia" || v === "dark";
+}
+
+export function isSheetPref(v: unknown): v is SheetPref {
+  return v === "auto" || isSheetTone(v);
+}
+
+/**
+ * Teinte reellement appliquee : « auto » suit le theme (feuille sombre en
+ * theme sombre, comme Notes ou Goodnotes). A l'ecran seulement : l'export
+ * PDF et Word reste blanc, encre noire.
+ */
+export function effectiveSheet(pref: SheetPref, theme: Theme): SheetTone {
+  if (pref === "auto") return theme === "dark" ? "dark" : "light";
+  return pref;
 }
 
 /**

@@ -49,8 +49,28 @@ export function shortcutOf(key: InkColor): string {
   return (BY_KEY.get(key) ?? NEUTRAL_INK).shortcut;
 }
 
-/** Couleurs de cahier proposees au moment de creer une matiere. */
+/**
+ * Couleurs de matiere proposees a la creation : huit teintes sourdes, toutes
+ * distinctes des cinq couleurs semantiques (bleu, rouge, vert, ambre,
+ * violet de la palette) pour qu'une matiere ne se lise jamais comme un
+ * « théorème ». Affichees en carre arrondi ; les pastilles semantiques sont
+ * rondes. Les cahiers existants gardent leur couleur tant qu'on n'y touche pas.
+ */
 export const NOTEBOOK_COLORS = [
-  "#2563eb", "#dc2626", "#059669", "#d97706",
-  "#7c3aed", "#0891b2", "#db2777", "#65a30d",
+  "#4338ca", "#0f766e", "#b45309", "#86198f",
+  "#4d7c0f", "#475569", "#0e7490", "#9f1239",
 ] as const;
+
+export const NOTEBOOK_COLOR_NAMES: Readonly<Record<string, string>> = {
+  "#4338ca": "Indigo", "#0f766e": "Sarcelle", "#b45309": "Rouille", "#86198f": "Prune",
+  "#4d7c0f": "Olive", "#475569": "Ardoise", "#0e7490": "Océan", "#9f1239": "Grenat",
+  // Anciennes couleurs, encore portees par des cahiers existants.
+  "#2563eb": "Bleu", "#dc2626": "Rouge", "#059669": "Vert", "#d97706": "Orange",
+  "#7c3aed": "Violet", "#0891b2": "Cyan", "#db2777": "Rose", "#65a30d": "Vert clair",
+};
+
+/** La couleur d'une matiere est aussi une couleur semantique (ancien cahier). */
+export function isSemanticColor(color: string): boolean {
+  const c = color.trim().toLowerCase();
+  return PALETTE.some((p) => p.ink === c);
+}

@@ -1,5 +1,5 @@
 import type { ColorKey, InkColor, ToolKind } from "./types";
-import { isSheetTone, isThemePref, type SheetTone, type ThemePref } from "./theme";
+import { isSheetPref, isThemePref, type SheetPref, type ThemePref } from "./theme";
 
 /**
  * Reglages locaux a la machine. Ils ne vont JAMAIS dans le dossier
@@ -32,12 +32,17 @@ export interface Settings {
   mathPinned: boolean;
   /** Theme du chrome : clair, sombre ou celui de Windows. */
   theme: ThemePref;
-  /** Teinte de la feuille, independante du theme (claire par defaut). */
-  sheet: SheetTone;
+  /** Teinte de la feuille ; « auto » (defaut) = sombre en theme sombre. */
+  sheet: SheetPref;
+  /** Barre laterale ouverte (grand ecran ; en surimpression elle se referme seule). */
+  sidebar: boolean;
+  /** Calculatrice detachee : fenetre flottante au lieu du panneau de droite. */
+  calcDetached: boolean;
   /**
    * Version de la disposition. Passee a 2 quand la calculatrice est devenue
    * fermee par defaut (D6) : l'ancien defaut « ouverte » est remis a fermee
-   * une fois, puis le choix de l'utilisateur est respecte.
+   * une fois, puis le choix de l'utilisateur est respecte. 3 : feuille
+   * « claire » (ancien defaut) passee en « auto ».
    */
   layout: number;
   /** Formules tapees au clavier mises en forme a chaque retour a la ligne. */
@@ -48,7 +53,7 @@ export interface Settings {
 }
 
 const KEY = "cahiers.settings.v1";
-const LAYOUT = 2;
+const LAYOUT = 3;
 
 const DEFAULTS: Settings = {
   tool: "pen",
@@ -59,7 +64,9 @@ const DEFAULTS: Settings = {
   calcOpen: false,
   mathPinned: false,
   theme: "system",
-  sheet: "light",
+  sheet: "auto",
+  sidebar: true,
+  calcDetached: false,
   layout: LAYOUT,
   autoMath: true,
   spellcheck: false,
@@ -83,16 +90,19 @@ export function loadSettings(): Settings {
     // pastilles allumees. L'encre suit desormais le texte (noir = "normal").
     out.color = out.textColor ?? "normal";
     if (!isThemePref(out.theme)) out.theme = DEFAULTS.theme;
-    if (!isSheetTone(out.sheet)) out.sheet = DEFAULTS.sheet;
+    if (!isSheetPref(out.sheet)) out.sheet = DEFAULTS.sheet;
+    out.sidebar = out.sidebar !== false;
+    out.calcDetached = out.calcDetached === true;
     out.mathPinned = out.mathPinned === true;
     // Ancien ruban « deplie dans la colonne » : remplace par le volet epinglable.
     delete (out as Partial<Settings> & { mathOpen?: unknown }).mathOpen;
     // Calculatrice ouverte par l'ancien defaut : la feuille perdait 340 px
     // sur le portable. Fermee une fois ; Ctrl+L la rouvre et c'est retenu.
-    if ((parsed.layout ?? 1) < LAYOUT) {
-      out.calcOpen = false;
-      out.layout = LAYOUT;
-    }
+    if ((parsed.layout ?? 1) < 2) out.calcOpen = false;
+    // Disposition 3 (refonte de l'interface) : la feuille « claire » etait
+    // l'ancien defaut, pas un choix ; elle passe en Auto (sombre en theme sombre).
+    if ((parsed.layout ?? 1) < 3 && out.sheet === "light") out.sheet = "auto";
+    out.layout = LAYOUT;
     return out;
   } catch {
     return { ...DEFAULTS };

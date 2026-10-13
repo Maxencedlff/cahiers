@@ -1,26 +1,29 @@
 import {
-  el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, pick, onLongPress,
-  appendToToast, dismissPageToasts, APP_TOAST, type DialogField,
+  el, clear, toast, dismissToast, askText, askFields, confirmDialog, chooseDialog, onLongPress,
+  dismissPageToasts, APP_TOAST, contextMenu, closeMenus, sheetDialog, type DialogField, type MenuEntry,
 } from "./dom";
-import { buildMenu, buildFlagsView, buildSearchView } from "./menu";
-import { pageListDialog } from "./pagelist";
+import { buildMenu, buildFlagsView, notebookMenu, newNotebook, cleanupSection } from "./menu";
+import {
+  buildNotebookSidebar, buildHomeSidebar, focusPageList, notebookSquare, type SidebarPage, type HomeEntry,
+} from "./sidebar";
+import { openSpotlight, spotlightOpen } from "./spotlight";
 import { buildProbe } from "./probe";
 import { buildReviewView, markRect, type ReviewState, type ReviewWhere } from "./review";
 import { REVIEW_COLORS, focusQuery, type ReviewItem } from "../core/review";
 import type { Bounds } from "../core/ink/stroke";
 import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
-import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
+import { buildFormulaPanel, MATH_TEMPLATES } from "./mathbar";
 import { insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
-import { PALETTE, NEUTRAL_INK, labelOf, shortcutOf } from "../core/palette";
+import { PALETTE, NEUTRAL_INK, labelOf } from "../core/palette";
 import type { ColorKey, InkColor, ToolKind } from "../core/types";
 import { uuid } from "../core/id";
 import { calcSpecOf, graphSpecOf, type CalcSpec, type GraphSpec } from "../core/liveblock";
-import { Repo, safeName, type TrashEntry } from "../core/storage/repo";
+import { Repo, safeName, type TrashEntry, type NotebookSummary } from "../core/storage/repo";
 import { Positions } from "../core/position";
-import { NavHistory, dayLabel, dropIndex, pickSplitDivider, type NavSpot } from "../core/nav";
+import { NavHistory, dayLabel, pickSplitDivider, type NavSpot } from "../core/nav";
 import {
-  MAX_DEPTH, defaultExpanded, depthOf, dividerLabel, expandedChain, findNode, flattenTree,
+  MAX_DEPTH, depthOf, dividerLabel, findNode, flattenTree,
   isUnder, leafName, moveAmongSiblings, moveRefusal, openableDividers, parentPath, parsePagePath,
   renamePrefix, subtreeHeight, type DividerNode,
 } from "../core/dividers";
@@ -50,30 +53,26 @@ import { isPdfFile } from "../core/pdf/pdf";
 import { PAPERS } from "../core/paper";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import {
-  ctrlCommand, escapeAction, isReloadKey, keysOf, pageLabel, parsePageInput, titleOf, type Command,
+  ctrlCommand, escapeAction, isReloadKey, keyLabel, keysOf, pageLabel, titleOf, type Command,
 } from "../core/shortcuts";
 import { showShortcuts } from "./help";
 import { icon, widthIcon, type IconName } from "./icons";
 import { applyAppearance, installTooltips, onSystemThemeChange } from "./tooltip";
 import { retoneSurfaces } from "./canvas";
-import { mathPanelMode, type MathPanelMode } from "../core/chrome";
+import {
+  mathPanelMode, sidebarMode, calcPlacement, PHONE_MAX, type MathPanelMode, type SidebarMode,
+} from "../core/chrome";
 import { statusSummary } from "../core/status";
-import { inkDisplayColor, nextThemePref, SHEET_TONES, THEME_PREFS, type SheetTone, type ThemePref } from "../core/theme";
+import { inkDisplayColor, nextThemePref, SHEET_TONES, THEME_PREFS, type SheetPref, type ThemePref } from "../core/theme";
 import type { Presence } from "../platform";
 import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
 
-type Screen = "menu" | "notebook" | "search" | "flags" | "probe" | "review";
+type Screen = "menu" | "notebook" | "flags" | "probe" | "review";
 type Tool = ToolKind | "region" | "textregion" | "lasso" | "space";
 /** Lasso et insertion d'espace : la selection n'existe qu'avec eux. */
 const isSelect = (t: Tool): t is "lasso" | "space" => t === "lasso" || t === "space";
 
 const isZone = (t: Tool): t is "region" | "textregion" => t === "region" || t === "textregion";
-
-/**
- * Largeur minimale pour ancrer la calculatrice a droite. En dessous (le
- * portable fait 1280 px), elle flotte : la feuille garde sa largeur.
- */
-const CALC_DOCK_MIN = 1400;
 
 /**
  * Un onglet = un cahier ET un intercalaire : Cours et Exos du meme cahier
@@ -87,11 +86,6 @@ interface Tab {
   color: string;
   /** Chemin de l'intercalaire dans la matiere (« E3A/S1/Chapitre 1 », D4). */
   divider: string;
-  /**
-   * Groupe dont la sous-bande est ouverte : choisi d'un appui sur un
-   * groupe ; absent, celui de l'intercalaire affiche (defaultExpanded).
-   */
-  expanded?: string | null;
   view: PageView | null;
   host: HTMLElement;
   /** Dernier usage (ms) : rouvrir une matiere reprend son onglet le plus recent. */
@@ -198,9 +192,22 @@ export class App {
   private autoConvert = false;
 
   private root = el("div", { class: "app" });
-  /** Barre du haut : maison, fil d'Ariane, onglets, recherche, etat. */
+  /** Barre du haut (52 px) : barre laterale, pages, titre, actions. */
   private tabbar = el("header", { class: "topbar" });
+  /** Onglets, seulement a partir de deux cahiers ouverts. */
+  private tabrow = el("div", { class: "tabrow", role: "tablist", hidden: true });
   private main = el("div", { class: "notebook", style: { flex: "1", minHeight: "0", display: "flex", flexDirection: "column" } });
+  /** Barre laterale (cahier ou accueil), et le voile de la surimpression. */
+  private sideHost = el("div", { class: "side-host" });
+  private scrim = el("div", { class: "scrim", "aria-hidden": "true" });
+  /** Surimpression ouverte (tablette, telephone) ; sur grand ecran, settings.sidebar. */
+  private overlayOpen = false;
+  /** Groupes deplies a la main, par matiere (barre laterale). */
+  private expandedGroups = new Map<string, Set<string>>();
+  /** Pages lues par intercalaire (« matiere\0intercalaire ») : barre laterale et titre. */
+  private pageRows = new Map<string, SidebarPage[]>();
+  /** Matieres de l'accueil, pour la barre laterale hors du cahier. */
+  private homeData: { notebooks: NotebookSummary[]; flagCount: number } | null = null;
   /**
    * Indicateur d'etat compact (barre du haut, a droite) : point vert, ou
    * orange/rouge et un texte court s'il y a un probleme ; detail au survol
@@ -208,6 +215,8 @@ export class App {
    */
   private statusBtn = el("button", { class: "status-btn", "data-tip-side": "bottom" });
   private queueState: QueueState;
+  /** Mode de la barre laterale au dernier redimensionnement. */
+  private lastSideMode: SidebarMode = sidebarMode(typeof window !== "undefined" ? window.innerWidth : 1366);
   /** Indicateur « p. 4 / 12 » de chaque panneau, mis a jour sur place. */
   private pageLabels = new WeakMap<PageView, HTMLElement>();
   /** Ou poser la calculatrice sur l'ecran cahier : colonne ou zone de travail. */
@@ -264,7 +273,9 @@ export class App {
     this.queueState = this.queue.state();
     this.queue.subscribe((s) => { this.queueState = s; this.paintStatus(); });
 
-    this.root.append(this.tabbar, this.main);
+    const content = el("div", { class: "content" }, this.tabbar, this.tabrow, this.main);
+    this.root.append(el("div", { class: "shell" }, this.sideHost, this.scrim, content));
+    this.scrim.addEventListener("pointerdown", () => this.closeOverlay());
     this.statusBtn.addEventListener("click", () => this.openStatusPanel());
     // Apparence : theme du chrome et teinte de la feuille, retenus ici.
     applyAppearance(this.root, this.settings.theme, this.settings.sheet);
@@ -307,10 +318,15 @@ export class App {
     window.addEventListener("resize", () => {
       clearTimeout(resizing);
       resizing = setTimeout(() => {
+        // Barre laterale : a cote, en surimpression ou en pile selon la largeur.
+        const mode = this.sideMode();
+        if (mode !== this.lastSideMode) { this.lastSideMode = mode; this.overlayOpen = false; }
+        closeMenus();
+        this.paintShell();
+        this.paintTopbar();
         if (this.calculator) this.placeCalculator(this.calculator);
-        // Colonne d'outils : une ou deux sous-colonnes selon la place.
-        if (this.screen === "notebook") this.paintToolbar();
-      }, 200);
+        if (this.screen === "notebook") { this.paintToolbar(); this.paintMath(); }
+      }, 160);
     });
     // Le premier stylet vu bascule l'application en separation stylet/doigt.
     window.addEventListener("pointerdown", (e) => {
@@ -361,9 +377,17 @@ export class App {
           onVisibility: (visible) => {
             this.settings.calcOpen = visible;
             saveSettings(this.settings);
-            // Flottante, elle ne reserve pas de colonne.
-            this.main.querySelector(".side-calc")
-              ?.classList.toggle("closed", !visible || !this.calculator?.isDocked);
+            // Flottante, elle ne reserve pas de panneau.
+            this.calcSlot?.side.classList.toggle("closed", !visible || !this.calculator?.isDocked);
+            const b = this.tabbar.querySelector(".calc-btn");
+            b?.classList.toggle("on", visible);
+            b?.setAttribute("aria-pressed", String(visible));
+          },
+          // « Détacher » / « Ancrer » de son en-tete : retenu sur la machine.
+          onDetach: (detached) => {
+            this.settings.calcDetached = detached;
+            saveSettings(this.settings);
+            if (this.calculator) this.placeCalculator(this.calculator);
           },
           // Blocs vivants poses dans le texte de la page en vue du panneau
           // vise : au curseur du texte, sinon sous le dernier contenu.
@@ -392,22 +416,32 @@ export class App {
     const calc = await this.loadCalculator();
     this.placeCalculator(calc);
     calc.toggle();
+    // Le panneau pousse la page : la palette et le volet suivent.
+    this.placeCalculator(calc);
+    this.paintMath();
   }
 
   /**
-   * Pose la calculatrice sur l'ecran cahier : ancree a droite sur un grand
-   * ecran, flottante sur le portable. Hors cahier, elle reste ou elle est.
+   * Pose la calculatrice sur l'ecran cahier (core/chrome.ts, calcPlacement) :
+   * panneau a droite qui pousse la page (inspecteur), fenetre flottante si
+   * on l'a detachee ou si la page n'aurait plus sa largeur, bandeau du bas
+   * au telephone. Hors cahier, elle reste ou elle est.
    */
   private placeCalculator(calc: Calculator): void {
     const slot = this.calcSlot;
     if (this.screen !== "notebook" || !slot || !slot.side.isConnected) return;
-    if (window.innerWidth >= CALC_DOCK_MIN) {
+    const where = calcPlacement({
+      width: window.innerWidth, stage: slot.work.clientWidth || window.innerWidth, detached: this.settings.calcDetached,
+    });
+    if (where === "panel") {
       if (!calc.isIn(slot.side)) calc.dock(slot.side);
-    } else if (!calc.isIn(slot.work)) {
+    } else if (!calc.isIn(slot.work) || calc.isDocked) {
       calc.float(slot.work);
       // Ouverte, elle est ramenee dans l'ecran (show la recale).
       if (calc.isVisible) calc.show();
     }
+    calc.root.classList.toggle("sheet", where === "sheet");
+    calc.setDetachable(where !== "sheet", where === "float" && this.settings.calcDetached);
     slot.side.classList.toggle("closed", !calc.isVisible || !calc.isDocked);
   }
 
@@ -425,14 +459,16 @@ export class App {
     this.screen = "menu";
     dismissPageToasts();
     this.mathFly = false;
+    this.paintMath();
     await this.flushAll();
     const menu = await buildMenu(this.menuHost());
     // Un autre ecran a pu s'ouvrir pendant la lecture du disque.
     if (this.screen !== "menu") return;
     clear(this.main);
     this.menuKeys = menu.onKey;
+    this.homeData = { notebooks: menu.notebooks, flagCount: menu.flagCount };
     this.main.append(menu.root);
-    this.paintTabs();
+    this.paintChrome();
     this.paintStatus();
   }
 
@@ -469,37 +505,40 @@ export class App {
     else void this.showMenu();
   }
 
+  /**
+   * Recherche facon Spotlight (Ctrl+F, Ctrl+K) : panneau par-dessus l'ecran,
+   * rien n'est remplace. Lancee depuis un cahier, elle part dans cette
+   * matiere (jeton retirable).
+   */
   private async showSearch(): Promise<void> {
-    this.noteAuxFrom();
-    // Lancee depuis un cahier : la recherche part dans cette matiere (on
-    // peut l'elargir d'un appui).
-    const tab = this.auxFrom === "notebook" ? this.focusedTab() : undefined;
-    this.screen = "search";
-    dismissPageToasts();
+    if (spotlightOpen()) return;
+    const tab = this.screen === "notebook" ? this.focusedTab() : undefined;
+    this.closeOverlay();
+    // Ce qu'on vient d'ecrire doit etre trouve.
     await this.flushAll();
-    clear(this.main);
-    this.paintTabs();
-    this.main.append(buildSearchView(
-      this.menuHost(),
-      () => this.leaveAux(),
-      (q, opts) => searchAll(this.repo, q, opts),
-      {
-        initial: this.lastQuery,
-        onQuery: (q) => { this.lastQuery = q; },
-        notebook: tab ? { dir: tab.notebook, title: tab.title } : undefined,
-      },
-    ));
+    openSpotlight({
+      repo: this.repo,
+      initial: this.lastQuery,
+      onQuery: (q) => { this.lastQuery = q; },
+      scope: tab ? { dir: tab.notebook, title: tab.title, color: tab.color } : undefined,
+      search: (q, opts) => searchAll(this.repo, q, opts),
+      openAt: (dir, divider, page, blockId, query) => void this.openAt(dir, divider, page, blockId, query),
+    });
   }
 
   private async showFlags(notebook?: string): Promise<void> {
     this.noteAuxFrom();
     this.screen = "flags";
+    this.mathFly = false;
+    this.paintMath();
     dismissPageToasts();
     // Les reperes poses a l'instant doivent etre sur le disque pour etre listes.
     await this.flushAll();
+    const view = await buildFlagsView(this.menuHost(), notebook);
+    if (this.screen !== "flags") return;
     clear(this.main);
-    this.paintTabs();
-    this.main.append(await buildFlagsView(this.menuHost(), () => this.leaveAux(), notebook));
+    this.paintChrome();
+    this.main.append(view);
   }
 
   /**
@@ -515,10 +554,12 @@ export class App {
     st.notebook = nb;
     if (o?.colors?.length) st.colors = [...o.colors];
     this.screen = "review";
+    this.mathFly = false;
+    this.paintMath();
     dismissPageToasts();
     await this.flushAll();
     clear(this.main);
-    this.paintTabs();
+    this.paintChrome();
     this.main.append(buildReviewView({
       repo: this.repo,
       openItem: (w, item) => void this.openReviewItem(w, item),
@@ -613,9 +654,11 @@ export class App {
   private showProbe(): void {
     this.noteAuxFrom();
     this.screen = "probe";
+    this.mathFly = false;
+    this.paintMath();
     dismissPageToasts();
     clear(this.main);
-    this.paintTabs();
+    this.paintChrome();
     this.main.append(buildProbe(() => this.leaveAux()));
   }
 
@@ -671,12 +714,8 @@ export class App {
     this.rememberTab(tab);
     if (this.screen !== "notebook") return;
     for (const t of this.tabs) t.host.classList.toggle("focused", this.shown(t) && t.id === id);
-    const bar = this.main.querySelector(".divider-strip");
-    void this.repo.listDividerTree(tab.notebook).then((tree) => {
-      if (this.focusedId === id && bar?.isConnected) bar.replaceWith(this.buildDividerBar(tab, tree));
-    });
     this.paintToolbar();
-    this.paintTabs();
+    this.paintChrome();
   }
 
   private makeTab(dir: string, meta: NotebookMeta, divider: string): Tab {
@@ -761,12 +800,10 @@ export class App {
       requestRecognition: (key, kind, strokes, auto, partial) => this.enqueue(key, kind, strokes, auto, partial),
       resumeRecognition: (key, kind, strokes, partial) => this.resume(key, kind, strokes, partial),
       cancelRecognition: (key) => this.cancelRecognition(key),
-      onDirty: () => this.paintStatus(),
-      // Chaque panneau a son indicateur de page.
-      onPageChange: (n, total) => {
-        const label = this.pageLabels.get(view);
-        if (label) label.textContent = pageLabel(n, total);
-      },
+      onDirty: () => { this.paintStatus(); this.refreshSidebarSoon(); },
+      // Chaque panneau a son indicateur de page ; la barre laterale et le
+      // titre suivent le panneau vise.
+      onPageChange: (n, total) => this.onViewPage(view, n, total),
       openLink: (target, pageId) => void this.followLink(target, pageId),
       links: this.pageLinks,
       // Feuille d'un groupe sans pages : un appui ouvre l'un de ses intercalaires.
@@ -804,8 +841,6 @@ export class App {
     // La page quittee est retenue : on y revient en recliquant l'intercalaire.
     this.rememberTab(tab);
     tab.divider = divider;
-    // La sous-bande suit l'intercalaire ouvert.
-    tab.expanded = undefined;
     const legacy = page == null ? (await this.repo.readMeta(tab.notebook)).lastPosition : undefined;
     await this.mountView(tab, page ?? this.positions.pageFor(tab.notebook, divider, legacy));
     this.rememberTab(tab);
@@ -849,110 +884,352 @@ export class App {
     if (this.focusedId === id || !this.splitId) this.focusedId = this.activeId;
   }
 
-  /**
-   * Barre du haut : maison (menu), fil d'Ariane du panneau vise (matiere ›
-   * intercalaire), onglets, puis recherche, split, aide et l'indicateur
-   * d'etat. Une seule rangee de 48 px : la hauteur reste a la feuille.
-   */
-  private paintTabs(): void {
-    this.tabbar.replaceChildren();
-    const notebook = this.screen === "notebook";
-    const focused = notebook ? this.focusedTab() : undefined;
-    this.tabbar.append(this.iconButton("home", "Menu", keysOf("menu"), () => void this.showMenu(), {
-      cls: `home-btn${this.screen === "menu" ? " on" : ""}`, side: "bottom",
+  /* ---------------- coque : barre laterale, barre du haut, onglets ---------------- */
+
+  /** Barre laterale a cote de la page, en surimpression ou en pile (telephone). */
+  private sideMode(): SidebarMode {
+    return sidebarMode(window.innerWidth);
+  }
+
+  /** La barre laterale est a l'ecran. */
+  private sidebarShown(): boolean {
+    return this.sideMode() === "docked" ? this.settings.sidebar : this.overlayOpen;
+  }
+
+  /** Bouton de la barre du haut, Ctrl+Maj+S ; en surimpression, elle se referme seule. */
+  private toggleSidebar(open = !this.sidebarShown()): void {
+    if (this.sideMode() === "docked") {
+      this.settings.sidebar = open;
+      saveSettings(this.settings);
+    } else this.overlayOpen = open;
+    this.paintShell();
+    this.paintTopbar();
+    if (open) void this.paintSidebar();
+    // La feuille change de largeur : la calculatrice peut changer de place.
+    if (this.calculator) this.placeCalculator(this.calculator);
+  }
+
+  /** Classes de la coque : mode et ouverture de la barre laterale. */
+  private paintShell(): void {
+    const mode = this.sideMode();
+    const r = this.root;
+    r.classList.toggle("sb-docked", mode === "docked");
+    r.classList.toggle("sb-overlay", mode === "overlay");
+    r.classList.toggle("sb-stack", mode === "stack");
+    r.classList.toggle("sb-open", this.sidebarShown());
+    r.dataset.screen = this.screen;
+  }
+
+  /** Tout le chrome : coque, barre du haut, onglets, barre laterale. */
+  private paintChrome(): void {
+    this.paintShell();
+    this.paintTopbar();
+    this.paintTabRow();
+    void this.paintSidebar();
+  }
+
+  /** Nombre de pages par intercalaire (listing des dossiers, sans lire les pages). */
+  private async dividerCounts(notebook: string, tree: DividerNode[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    await Promise.all(openableDividers(tree).map(async (d) => {
+      try { out.set(d, (await this.repo.listPageNumbers(notebook, d)).length); } catch { /* dossier parti */ }
     }));
+    return out;
+  }
 
-    // Fil d'Ariane : la matiere (un appui : changer de matiere), les groupes
-    // (ouvrent leur sous-bande), l'intercalaire (liste des pages, Ctrl+G).
-    if (focused) {
-      const crumbs = el("nav", { class: "crumbs", "aria-label": "Emplacement" });
-      crumbs.append(el("button", {
-        class: "crumb crumb-nb",
-        "data-tip": "Changer de matière", "data-tip-side": "bottom",
-        "aria-haspopup": "menu",
-        onclick: (e: Event) => void this.openNotebookSwitcher(e.currentTarget as HTMLElement),
-      }, el("span", { class: "dot", style: { background: focused.color } }), el("span", { class: "crumb-text" }, focused.title),
-      icon("chevronDown", 14)));
-      const parts = focused.divider.split("/");
-      parts.forEach((name, i) => {
-        const path = parts.slice(0, i + 1).join("/");
-        const last = i === parts.length - 1;
-        crumbs.append(el("span", { class: "crumb-sep", "aria-hidden": "true" }, "›"));
-        crumbs.append(el("button", {
-          class: `crumb${last ? " current" : ""}`,
-          ...(last
-            ? { "data-tip": "Liste des pages", "data-keys": keysOf("goto"), "data-tip-side": "bottom", "aria-current": "location" }
-            : { "data-tip": `Intercalaires de ${name}`, "data-tip-side": "bottom" }),
-          onclick: () => {
-            if (last) void this.showPageList();
-            else this.toggleGroup(focused, path, false);
-          },
-        }, el("span", { class: "crumb-text" }, name)));
-      });
-      this.tabbar.append(crumbs);
+  /** Pages d'un intercalaire pour la barre laterale (cache de session de scanDivider). */
+  private async loadPageRows(notebook: string, divider: string): Promise<SidebarPage[] | null> {
+    const pages = await this.repo.scanDivider(notebook, divider).catch(() => null);
+    if (!pages) return null;
+    const rows = pages.map((p): SidebarPage => ({
+      n: p.n, title: p.index?.title || p.index?.firstLine || "", day: dayLabel(p.index?.created || p.index?.modified),
+      heading: !!p.index?.title, flags: p.index?.flags.length ?? 0, ...(p.index ? {} : { unreadable: true }),
+    }));
+    this.pageRows.set(`${notebook}\u0000${divider}`, rows);
+    return rows;
+  }
+
+  /** Titre de la page en vue, pour la barre du haut (jamais de LaTeX brut). */
+  private pageTitleOf(tab: Tab | undefined): string {
+    const v = tab?.view;
+    if (!tab || !v || v.pageNumber < 1) return "";
+    const row = this.pageRows.get(`${tab.notebook}\u0000${tab.divider}`)?.find((r) => r.n === v.pageNumber);
+    return row?.title || `Page ${v.pageNumber}`;
+  }
+
+  private sideSeq = 0;
+
+  /**
+   * Barre laterale du cahier vise (intercalaires, pages de l'intercalaire
+   * ouvert) ou de l'accueil. Posee aussitot avec ce qu'on sait, puis
+   * refaite si la lecture des pages apporte du nouveau.
+   */
+  private async paintSidebar(): Promise<void> {
+    const seq = ++this.sideSeq;
+    if (this.screen === "notebook") {
+      const tab = this.focusedTab();
+      if (!tab) return;
+      const tree = await this.repo.listDividerTree(tab.notebook).catch(() => [] as DividerNode[]);
+      const counts = await this.dividerCounts(tab.notebook, tree);
+      if (seq !== this.sideSeq) return;
+      const key = `${tab.notebook}\u0000${tab.divider}`;
+      const cached = this.pageRows.get(key) ?? null;
+      this.mountSidebar(this.notebookSidebar(tab, tree, counts, cached));
+      const fresh = await this.loadPageRows(tab.notebook, tab.divider);
+      if (seq !== this.sideSeq) return;
+      if (JSON.stringify(fresh) !== JSON.stringify(cached)) this.mountSidebar(this.notebookSidebar(tab, tree, counts, fresh));
+      this.paintTopbar();
+      return;
     }
+    const data = this.homeData ?? await this.loadHomeData();
+    if (seq !== this.sideSeq) return;
+    const active: HomeEntry = this.screen === "menu" ? "recent" : this.screen === "flags" ? "flags" : this.screen === "review" ? "review" : null;
+    this.mountSidebar(buildHomeSidebar({
+      active, flagCount: data.flagCount,
+      notebooks: data.notebooks.map((n) => ({ dir: n.dir, title: n.meta.title, color: n.meta.color, pages: n.pageCount })),
+    }, {
+      search: () => void this.showSearch(),
+      recent: () => { this.closeOverlay(); void this.showMenu(); },
+      flags: () => { this.closeOverlay(); void this.showFlags(); },
+      review: () => { this.closeOverlay(); void this.showReview({ notebook: null }); },
+      openNotebook: (dir) => { this.closeOverlay(); void this.openNotebook(dir); },
+      notebookMenu: (dir, at) => {
+        const nb = data.notebooks.find((n) => n.dir === dir);
+        if (nb) notebookMenu(this.menuHost(), dir, nb.meta.title, nb.meta.color, data.notebooks.map((n) => n.meta.color), at);
+      },
+      newNotebook: () => void newNotebook(this.menuHost(), data.notebooks.map((n) => n.meta.color)),
+      settings: () => { this.closeOverlay(); void this.openSettings(); },
+    }));
+  }
 
-    // Onglets : au menu, ils ramenent au travail ; sur un cahier, seulement
-    // s'il y en a plusieurs (un seul onglet redirait le fil d'Ariane).
-    const showTabs = this.tabs.length > 0 && (!notebook || this.tabs.length > 1);
-    if (showTabs) {
-      const strip = el("div", { class: "tabs", role: "tablist" });
-      for (const tab of this.tabs) {
-        const active = tab === focused;
-        const node = el("div", {
-          class: `tab${active ? " active" : notebook && this.shown(tab) ? " shown" : ""}`,
-          draggable: "true", role: "tab", "aria-selected": String(active),
-        },
-          el("span", { class: "dot", style: { background: tab.color } }),
-          // Le dernier niveau seulement : le chemin complet est dans l'infobulle.
-          el("span", { class: "label", title: `${tab.title} · ${dividerLabel(tab.divider)}` },
-            `${tab.title} · ${leafName(tab.divider)}`),
-          el("button", {
-            class: "close",
-            "aria-label": "Fermer l'onglet",
-            title: titleOf("Fermer l'onglet", "closeTab"),
-            onclick: (e: Event) => { e.stopPropagation(); void this.closeTab(tab.id); },
-          }, icon("close", 15)),
+  /** Liste des matieres pour la barre laterale hors de l'accueil. */
+  private async loadHomeData(): Promise<{ notebooks: NotebookSummary[]; flagCount: number }> {
+    const { notebooks } = await this.repo.listRoot();
+    this.homeData = { notebooks, flagCount: notebooks.reduce((a, n) => a + n.flagCount, 0) };
+    return this.homeData;
+  }
+
+  /** Remplace la barre laterale, sans perdre son defilement ni le clavier. */
+  private mountSidebar(next: HTMLElement): void {
+    const old = this.sideHost.firstElementChild as HTMLElement | null;
+    const scroll = old?.querySelector(".sb-list")?.scrollTop ?? 0;
+    const active = document.activeElement as HTMLElement | null;
+    const had = !!old && !!active && old.contains(active);
+    const n = had ? active!.dataset.n : undefined;
+    const d = had ? active!.dataset.divider : undefined;
+    this.sideHost.replaceChildren(next);
+    const list = next.querySelector(".sb-list");
+    if (list) list.scrollTop = scroll;
+    if (had) {
+      const target = n ? next.querySelector<HTMLElement>(`.sb-page[data-n="${n}"]`)
+        : d ? next.querySelector<HTMLElement>(`.sb-div[data-divider="${CSS.escape(d)}"]`) : null;
+      target?.focus({ preventScroll: true });
+    }
+    if (this.screen === "notebook") this.paintConflictBadges();
+  }
+
+  private notebookSidebar(tab: Tab, tree: DividerNode[], counts: Map<string, number>, pages: SidebarPage[] | null): HTMLElement {
+    const expanded = this.expandedGroups.get(tab.notebook) ?? new Set<string>();
+    return buildNotebookSidebar({
+      notebook: tab.notebook, title: tab.title, color: tab.color, tree, divider: tab.divider,
+      expanded, counts, pages, current: tab.view?.pageNumber ?? 0,
+    }, {
+      home: () => { this.closeOverlay(); void this.showMenu(); },
+      search: () => void this.showSearch(),
+      switchNotebook: (anchor) => void this.openNotebookSwitcher(anchor),
+      openDivider: (d) => void this.switchDividerAndRender(tab, d),
+      toggleGroup: (path) => this.toggleGroup(tab, path),
+      dividerMenu: (d, at) => void this.dividerMenu(tab, d, at),
+      reorder: (d, index) => void this.reorderDivider(tab, d, index),
+      openPage: (n) => void this.openPageFromList(tab, n),
+      pageMenu: (n, at) => this.pageMenu(tab, n, at),
+      newPage: () => void tab.view?.newPage().then(() => this.refreshSidebarSoon(0)),
+      newDivider: () => void this.newDivider(tab, parentPath(tab.divider)),
+      leave: () => { this.closeOverlay(); tab.view?.focusText(); },
+    });
+  }
+
+  /** Surimpression (tablette, telephone) : refermee apres un choix. */
+  private closeOverlay(): void {
+    if (this.sideMode() === "docked" || !this.overlayOpen) return;
+    this.overlayOpen = false;
+    this.paintShell();
+    this.paintTopbar();
+  }
+
+  /** Page choisie dans la barre laterale : Alt+← revient d'ou l'on etait. */
+  private async openPageFromList(tab: Tab, n: number): Promise<void> {
+    this.closeOverlay();
+    if (!tab.view) return;
+    if (n !== tab.view.pageNumber) {
+      this.noteJump();
+      await tab.view.goTo(n);
+    }
+    if (this.sideMode() !== "docked") tab.view.focusText();
+  }
+
+  /** Menu d'une page de la barre laterale : ouvrir, inserer apres, supprimer. */
+  private pageMenu(tab: Tab, n: number, at: { x: number; y: number }): void {
+    const view = tab.view;
+    if (!view) return;
+    contextMenu(at, [
+      { label: "Ouvrir", icon: "fileText", run: () => void this.openPageFromList(tab, n) },
+      {
+        label: "Insérer une page après", icon: "filePlus", keys: keysOf("insertPage"),
+        run: () => void view.goTo(n).then(() => view.newPage(true)).then(() => this.refreshSidebarSoon(0)),
+      },
+      "sep",
+      {
+        label: "Supprimer la page…", icon: "trash", danger: true,
+        run: () => void view.goTo(n).then(() => view.deleteCurrentPage()).then(() => this.refreshSidebarSoon(0)),
+      },
+    ], { label: `Page ${n}` });
+  }
+
+  private sideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Titres et pages changent en ecrivant : la barre laterale suit, sans s'agiter. */
+  private refreshSidebarSoon(ms = 2500): void {
+    if (this.sideTimer) clearTimeout(this.sideTimer);
+    this.sideTimer = setTimeout(() => {
+      this.sideTimer = null;
+      if (this.screen === "notebook" && this.sidebarShown()) void this.paintSidebar();
+      else if (this.screen === "notebook") void this.refreshTitle();
+    }, ms);
+  }
+
+  /** Barre laterale fermee : seul le titre de la barre du haut est relu. */
+  private async refreshTitle(): Promise<void> {
+    const tab = this.focusedTab();
+    if (!tab) return;
+    await this.loadPageRows(tab.notebook, tab.divider);
+    this.paintTopbar();
+  }
+
+  /** La vue change de page : indicateur, ligne courante de la barre laterale, titre. */
+  private onViewPage(view: PageView, n: number, total: number): void {
+    const label = this.pageLabels.get(view);
+    if (label) label.textContent = pageLabel(n, total);
+    const tab = this.tabs.find((t) => t.view === view);
+    if (!tab || tab !== this.focusedTab() || this.screen !== "notebook") return;
+    const side = this.sideHost.querySelector(".nb-side");
+    for (const r of side?.querySelectorAll<HTMLElement>(".sb-page[data-n]") ?? []) {
+      const on = Number(r.dataset.n) === n;
+      r.classList.toggle("current", on);
+      if (on) r.setAttribute("aria-current", "page"); else r.removeAttribute("aria-current");
+    }
+    const rows = this.pageRows.get(`${tab.notebook}\u0000${tab.divider}`);
+    if (rows && total > 0 && rows.length !== total) this.refreshSidebarSoon(300);
+    this.paintTopbar();
+  }
+
+  /**
+   * Barre du haut, une seule (52 px). Cahier : barre laterale, page
+   * precedente et suivante, intercalaire en gras et titre de la page en
+   * gris ; a droite Pas compris, Formules, Calculatrice, Partager, ⋯.
+   * Accueil : le titre de l'ecran. L'indicateur d'etat n'apparait qu'en
+   * cas de probleme.
+   */
+  private paintTopbar(): void {
+    const bar = this.tabbar;
+    bar.replaceChildren();
+    const notebook = this.screen === "notebook";
+    const compact = window.innerWidth < PHONE_MAX;
+    const shown = this.sidebarShown();
+    if (notebook || !shown || this.sideMode() !== "docked") {
+      bar.append(this.iconButton("sidebar", shown ? "Masquer la barre latérale" : "Afficher la barre latérale", keysOf("sidebar"),
+        () => this.toggleSidebar(), { side: "bottom", cls: `sidebar-btn${shown && this.sideMode() === "docked" ? " on" : ""}` }));
+    }
+    if (notebook) {
+      const tab = this.focusedTab();
+      const view = tab?.view;
+      bar.append(
+        this.iconButton("chevronLeft", "Page précédente", keysOf("prevPage"), () => void view?.prev(), { side: "bottom", keep: true }),
+        this.iconButton("chevronRight", "Page suivante", keysOf("nextPage"), () => void view?.next(), { side: "bottom", keep: true }),
+      );
+      const title = this.pageTitleOf(tab);
+      bar.append(el("button", {
+        class: "tb-title", "data-tip": "Liste des pages", "data-keys": keysOf("goto"), "data-tip-side": "bottom",
+        onclick: () => void this.focusPageList(),
+      }, el("strong", {}, tab ? leafName(tab.divider) : ""), title ? el("span", { class: "tb-sub" }, title) : null));
+      bar.append(el("div", { class: "spacer" }), this.statusBtn);
+      if (!compact) {
+        const mathOpen = this.mathFly || this.settings.mathPinned;
+        const calcOpen = !!this.calculator?.isVisible;
+        bar.append(
+          this.iconButton("flag", "Pas compris", keysOf("flag"), () => view?.addFlag(), {
+            cls: "flag-btn", keep: true, side: "bottom", tip: "Pas compris : repère sur la page",
+          }),
+          this.iconButton("sigma", "Formules", keysOf("maths"), () => this.toggleMaths(), {
+            cls: `maths-btn${mathOpen ? " on" : ""}`, keep: true, side: "bottom", pressed: mathOpen,
+          }),
+          this.iconButton("calculator", "Calculatrice", keysOf("calc"), () => void this.toggleCalculator(), {
+            cls: `calc-btn${calcOpen ? " on" : ""}`, keep: true, side: "bottom", pressed: calcOpen,
+          }),
+          this.iconButton("share", "Partager", keysOf("exportPage"), () => this.openShare(), {
+            cls: "share-btn", side: "bottom", tip: "Partager : PDF ou Word, la page ou l'intercalaire",
+          }),
         );
-        // Un onglet deja a l'ecran prend la main ; un autre remplace celui du
-        // panneau vise (le split ne se referme plus en cliquant l'onglet de droite).
-        node.addEventListener("click", () => {
-          if (this.screen === "notebook" && this.shown(tab)) { this.setFocused(tab.id); return; }
-          this.place(tab);
-          void this.renderNotebookScreen();
-        });
-        // Glisser un onglet sur la moitie droite ouvre le split (section 5).
-        node.addEventListener("dragstart", (e) => {
-          e.dataTransfer?.setData("text/plain", tab.id);
-          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-        });
-        strip.append(node);
       }
-      this.tabbar.append(strip);
-    }
-
-    this.tabbar.append(el("div", { class: "spacer" }));
-    // Le menu a deja son propre champ de recherche : deux au meme instant
-    // font doublon a l'ecran. Champ-bouton si la place le permet, sinon icone.
-    if (this.screen !== "menu") {
-      this.tabbar.append(el("button", {
-        class: "search-field",
-        "aria-label": "Rechercher",
-        title: titleOf("Recherche dans tous les cahiers", "search"),
-        onclick: () => void this.showSearch(),
-      }, icon("search", 18), el("span", { class: "search-ph" }, "Rechercher…"), el("kbd", {}, keysOf("search"))));
-    }
-    // Le split n'a de sens que sur l'ecran cahier.
-    if (this.tabs.length && notebook) {
-      this.tabbar.append(this.iconButton("split", "Split", keysOf("split"), () => void this.toggleSplit(), {
-        cls: this.splitId ? "on" : "", side: "bottom", tip: "Split gauche/droite",
+      bar.append(this.iconButton("more", "Plus", "", (e) => this.openMoreMenu(e.currentTarget as HTMLElement), {
+        cls: "more-btn", side: "bottom", tip: "Page : insérer, photo, PDF, fond, affichage, réglages",
       }));
+      return;
     }
-    // Au doigt et au stylet, aucune infobulle : la fiche est a un appui.
-    this.tabbar.append(
-      this.iconButton("keyboard", "Raccourcis clavier", "F1", () => showShortcuts(), { side: "bottom" }),
-      this.statusBtn,
-    );
+    const titles: Record<Screen, string> = {
+      menu: "Récents", flags: "Pas compris", review: "Réviser", probe: "Sonde stylet", notebook: "",
+    };
+    bar.append(el("h1", { class: "tb-screen" }, titles[this.screen]), el("div", { class: "spacer" }), this.statusBtn);
+    if (compact) {
+      bar.append(this.iconButton("search", "Rechercher", keysOf("search"), () => void this.showSearch(), { side: "bottom" }));
+    }
+    if (this.screen === "menu") {
+      bar.append(this.iconButton("plus", "Nouvelle matière", "", () => {
+        void newNotebook(this.menuHost(), this.homeData?.notebooks.map((n) => n.meta.color) ?? []);
+      }, { side: "bottom" }));
+    }
+    if (this.tabs.length && !compact) {
+      bar.append(el("button", { class: "tb-back", onclick: () => void this.backToWork() },
+        "Retour au cahier", el("kbd", {}, keysOf("menu"))));
+    }
+  }
+
+  /**
+   * Onglets, seulement a partir de deux cahiers ouverts : un par cahier et
+   * intercalaire. Glisser un onglet sur la moitie droite ouvre le split.
+   */
+  private paintTabRow(): void {
+    const row = this.tabrow;
+    row.replaceChildren();
+    const notebook = this.screen === "notebook";
+    row.hidden = !(notebook && this.tabs.length > 1);
+    if (row.hidden) return;
+    const focused = this.focusedTab();
+    for (const tab of this.tabs) {
+      const active = tab === focused;
+      const node = el("div", {
+        class: `tab${active ? " active" : this.shown(tab) ? " shown" : ""}`,
+        draggable: "true", role: "tab", "aria-selected": String(active),
+      },
+        notebookSquare(tab.color, 9),
+        el("span", { class: "label", title: `${tab.title} · ${dividerLabel(tab.divider)}` },
+          `${tab.title} · ${leafName(tab.divider)}`),
+        el("button", {
+          class: "close", "aria-label": "Fermer l'onglet", title: titleOf("Fermer l'onglet", "closeTab"),
+          onclick: (e: Event) => { e.stopPropagation(); void this.closeTab(tab.id); },
+        }, icon("close", 14)),
+      );
+      node.addEventListener("click", () => {
+        if (this.shown(tab)) { this.setFocused(tab.id); return; }
+        this.place(tab);
+        void this.renderNotebookScreen();
+      });
+      node.addEventListener("dragstart", (e) => {
+        e.dataTransfer?.setData("text/plain", tab.id);
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      });
+      row.append(node);
+    }
   }
 
   /**
@@ -961,44 +1238,37 @@ export class App {
    */
   private iconButton(
     name: IconName, label: string, keys: string, run: (e: MouseEvent) => void,
-    o: { cls?: string; side?: "right" | "bottom"; tip?: string; keep?: boolean; pressed?: boolean } = {},
+    o: { cls?: string; side?: "right" | "bottom" | "top"; tip?: string; keep?: boolean; pressed?: boolean } = {},
   ): HTMLButtonElement {
     const b = el("button", {
       class: `icon-btn ${o.cls ?? ""}`.trim(),
       "aria-label": label,
       "data-tip": o.tip ?? label,
-      "data-tip-side": o.side ?? "right",
+      "data-tip-side": o.side ?? "bottom",
       ...(keys ? { "data-keys": keys } : {}),
       ...(o.pressed != null ? { "aria-pressed": String(o.pressed) } : {}),
       onclick: (e: MouseEvent) => run(e),
-    }, icon(name));
+    }, icon(name, 20));
     if (o.keep) keepFocus(b);
     return b;
   }
 
-  /**
-   * Fil d'Ariane, matiere : changer de matiere d'un appui, sans repasser
-   * par le menu. L'onglet de la matiere est repris s'il est ouvert.
-   */
+  /** Bascule de matiere (en-tete de la barre laterale), sans repasser par l'accueil. */
   private async openNotebookSwitcher(anchor: HTMLElement): Promise<void> {
     const dirs = await this.repo.listNotebookDirs();
     const metas = await Promise.all(dirs.map(async (dir) => {
       try { const m = await this.repo.readMeta(dir); return { dir, title: m.title || dir, color: m.color }; }
-      catch { return { dir, title: dir, color: "#9ca3af" }; }
+      catch { return { dir, title: dir, color: "#94a3b8" }; }
     }));
     const current = this.focusedTab()?.notebook;
-    const list = el("div", { class: "fly-list", role: "menu" });
-    for (const m of metas) {
-      list.append(el("button", {
-        class: `fly-item${m.dir === current ? " on" : ""}`, role: "menuitem",
-        onclick: () => { this.closeFlyout(); if (m.dir !== current) void this.openNotebook(m.dir); },
-      }, el("span", { class: "dot", style: { background: m.color } }), m.title));
-    }
-    list.append(el("div", { class: "fly-sep" }), el("button", {
-      class: "fly-item", role: "menuitem",
-      onclick: () => { this.closeFlyout(); void this.showMenu(); },
-    }, icon("home", 18), "Toutes les matières (menu)"));
-    this.openFlyout(anchor, list, { side: "bottom", label: "Matières" });
+    contextMenu(anchor, [
+      { label: "Accueil", icon: "home", keys: keysOf("menu"), run: () => { this.closeOverlay(); void this.showMenu(); } },
+      "sep",
+      ...metas.map((m) => ({
+        label: m.title, swatch: m.color, checked: m.dir === current ? true : undefined,
+        run: () => { if (m.dir !== current) { this.closeOverlay(); void this.openNotebook(m.dir); } },
+      })),
+    ], { label: "Matières" });
   }
 
   /* ---------------- ecran cahier ---------------- */
@@ -1009,7 +1279,7 @@ export class App {
     if (this.splitId === tab.id) this.splitId = null;
     if (!this.splitId || (this.focusedId !== tab.id && this.focusedId !== this.splitId)) this.focusedId = tab.id;
     this.screen = "notebook";
-    this.paintTabs();
+    this.menuKeys = null;
 
     clear(this.main);
     // Vue retiree (matiere renommee) : remontee a la page retenue.
@@ -1017,19 +1287,18 @@ export class App {
     const other = this.splitId ? this.tabs.find((t) => t.id === this.splitId) : undefined;
     if (this.splitId && !other) this.splitId = null;
     if (other && !other.view) await this.mountView(other, this.positions.pageFor(other.notebook, other.divider));
-    const focused = this.focusedTab() ?? tab;
-    const tree = await this.repo.listDividerTree(focused.notebook);
-    // Outils a gauche, calculatrice a droite : la hauteur de l'ecran reste
-    // a la feuille.
-    const tools = this.buildToolbar();
-    const calcSide = el("aside", { class: "side-calc closed" });
-    const work = el("div", { class: "work" });
-    this.main.append(this.buildDividerBar(focused, tree), work);
-    this.calcSlot = { side: calcSide, work };
+    this.paintChrome();
+    // La page au centre, la calculatrice en panneau a droite (inspecteur) :
+    // elle pousse la page sans la couvrir.
+    const inspector = el("aside", { class: "inspector closed", "aria-label": "Calculatrice" });
+    const stage = el("div", { class: "stage" });
+    const work = el("div", { class: "work" }, stage, inspector);
+    this.main.append(work);
+    this.calcSlot = { side: inspector, work };
     // Fermee par defaut (D6) : mathjs n'est charge qu'au premier Ctrl+L.
     if (this.settings.calcOpen || this.calculator) {
       void this.loadCalculator().then((calc) => {
-        if (this.calcSlot?.side !== calcSide) return;
+        if (this.calcSlot?.side !== inspector) return;
         this.placeCalculator(calc);
         if (this.settings.calcOpen && !calc.isVisible) calc.show();
       });
@@ -1038,16 +1307,14 @@ export class App {
     const panes = el("div", { class: "panes" });
     panes.append(this.buildPane(tab, false));
     if (other) panes.append(this.buildPane(other, true));
-    work.append(tools, panes, calcSide);
+    stage.append(panes, this.buildPalette());
     this.paintMath();
     this.paintStatus();
 
-    // La vue reprend son defilement : un passage par le menu ou un autre
+    // La vue reprend son defilement : un passage par l'accueil ou un autre
     // onglet ne ramene plus en haut de l'intercalaire.
     for (const t of other ? [tab, other] : [tab]) {
       if (!t.view) continue;
-      // Pages et zoom du panneau, a cote de la vue (pas dedans : ils
-      // defileraient avec les pages).
       t.host.append(t.view.root, this.buildPagePill(t.view));
       t.view.attached();
     }
@@ -1055,30 +1322,18 @@ export class App {
 
   /**
    * Indicateur de page du panneau, en bas a droite (hors de la zone
-   * d'ecriture centrale) : precedente, « p. 4 / 12 » (liste des pages,
-   * Ctrl+G), suivante, nouvelle page, et le zoom quand il n'est pas a 100 %.
-   * Un par panneau : en split, chacun dit ou il en est.
+   * d'ecriture centrale) : « p. 4 / 12 » (liste des pages dans la barre
+   * laterale, Ctrl+G) et le zoom quand il n'est pas a 100 %.
    */
   private buildPagePill(view: PageView): HTMLElement {
     const label = el("button", {
       class: "page-label",
       "aria-label": "Liste des pages",
-      "data-tip": "Liste des pages : numéro, date, première ligne", "data-keys": keysOf("goto"), "data-tip-side": "top",
-      onclick: () => { this.focusView(view); void this.showPageList(view); },
+      "data-tip": "Liste des pages", "data-keys": keysOf("goto"), "data-tip-side": "top",
+      onclick: () => { this.focusView(view); void this.focusPageList(); },
     }, pageLabel(view.pageNumber, view.pageCount));
     this.pageLabels.set(view, label);
-    const nav = (name: IconName, aria: string, keys: string, run: () => void) => {
-      const b = this.iconButton(name, aria, keys, () => { this.focusView(view); run(); }, { keep: true, side: "bottom" });
-      b.dataset.tipSide = "top";
-      return b;
-    };
-    return el("div", { class: "page-pill", role: "toolbar", "aria-label": "Pages" },
-      nav("chevronLeft", "Page précédente", keysOf("prevPage"), () => void view.prev()),
-      keepFocus(label),
-      nav("chevronRight", "Page suivante", keysOf("nextPage"), () => void view.next()),
-      nav("plus", "Nouvelle page", keysOf("newPage"), () => void view.newPage()),
-      view.zoomChip,
-    );
+    return el("div", { class: "page-pill", role: "group", "aria-label": "Page" }, keepFocus(label), view.zoomChip);
   }
 
   /** Un bouton d'un panneau du split le vise d'abord (outils, clavier). */
@@ -1091,20 +1346,15 @@ export class App {
     const pane = tab.host;
     pane.replaceChildren();
     pane.className = `pane${this.splitId && tab.id === this.focusedId ? " focused" : ""}`;
-    // Hors split, l'onglet et la bande d'intercalaires disent deja ou l'on
-    // est : l'en-tete de panneau ne ferait que prendre de la hauteur.
+    // En split, un petit en-tete par panneau dit ce qu'il montre.
     if (this.splitId) pane.append(el("div", { class: "pane-head" },
-      el("span", { class: "dot", style: { background: tab.color, width: "9px", height: "9px", borderRadius: "50%" } }),
+      notebookSquare(tab.color, 9),
       el("strong", {}, tab.title),
-      el("span", { class: "muted" }, dividerLabel(tab.divider)),
+      el("span", { class: "muted" }, `› ${dividerLabel(tab.divider)}`),
       el("div", { class: "spacer" }),
       // Les deux commandes du split, une seule fois, sur le panneau droit.
-      isRight
-        ? this.iconButton("swap", "Permuter les panneaux", keysOf("swap"), () => void this.swapPanes(), { side: "bottom" })
-        : null,
-      isRight
-        ? this.iconButton("close", "Fermer le panneau droit", keysOf("closeSplit"), () => void this.closeSplit(), { side: "bottom" })
-        : null,
+      isRight ? this.iconButton("swap", "Permuter les panneaux", keysOf("swap"), () => void this.swapPanes(), { side: "bottom", cls: "small-icon" }) : null,
+      isRight ? this.iconButton("close", "Fermer le panneau droit", keysOf("closeSplit"), () => void this.closeSplit(), { side: "bottom", cls: "small-icon" }) : null,
     ));
     return pane;
   }
@@ -1150,139 +1400,25 @@ export class App {
     });
   }
 
-  /**
-   * Bande d'intercalaires (D4, palier 2) : le premier niveau, puis, quand
-   * un groupe est ouvert (E3A, S1), une sous-bande : fil d'Ariane, pages
-   * du groupe lui-meme s'il en a, ses intercalaires et « + ». Deux rangees
-   * au plus, quel que soit le niveau : la feuille garde sa hauteur.
-   * Clavier : Tab, Entree, fleches (← → dans une rangee, ↓ vers la
-   * sous-bande, ↑ vers la bande).
-   */
-  private buildDividerBar(tab: Tab, tree: DividerNode[]): HTMLElement {
-    const strip = el("div", { class: "divider-strip", dataset: { notebook: tab.notebook } });
-    let open = tab.expanded === undefined ? defaultExpanded(tree, tab.divider) : tab.expanded;
-    // Groupe disparu ou vide (renomme dans l'explorateur) : celui par defaut.
-    if (open && !findNode(tree, open)?.children.length) open = defaultExpanded(tree, tab.divider);
-    if (open && !findNode(tree, open)?.children.length) open = null;
-
-    const addNode = (row: HTMLElement, n: DividerNode, sibs: string[]) => {
-      const group = n.children.length > 0;
-      const opened = group && !!open && isUnder(open, n.path);
-      const active = tab.divider === n.path || (group && isUnder(tab.divider, n.path));
-      const node = el("button", {
-        class: `divider-tab${active ? " active" : ""}${group ? " group" : ""}${opened ? " open" : ""}`,
-        dataset: { divider: n.path, sib: "1", ...(group ? { group: "1" } : {}) },
-        "aria-expanded": group ? String(opened) : null,
-        title: (group
-          ? `Groupe ${n.name} : un appui montre ses intercalaires. `
-          : "")
-          + "Glisser pour déplacer (au doigt ou au stylet : appui long puis glisser). "
-          + "Appui long ou clic droit : ouvrir à droite, renommer, ranger dans un groupe, supprimer",
-        onclick: (e: MouseEvent) => {
-          if (group) this.toggleGroup(tab, n.path, opened, e.detail === 0);
-          else void this.switchDividerAndRender(tab, n.path);
-        },
-      }, n.name, group ? el("span", { class: "chev", "aria-hidden": "true" }, opened ? "▾" : "▸") : null);
-      this.wireDividerDrag(row, node, tab, n.path, sibs);
-      row.append(node);
-    };
-
-    const top = el("div", { class: "dividers" });
-    const topSibs = tree.map((n) => n.path);
-    for (const n of tree) addNode(top, n, topSibs);
-    top.append(el("button", {
-      class: "divider-tab",
-      title: titleOf("Nouvel intercalaire", "newDivider"),
-      "aria-label": "Nouvel intercalaire",
-      onclick: () => void this.newDivider(tab, ""),
-    }, "+"));
-    strip.append(top);
-
+  /** Groupe d'intercalaires deplie ou replie dans la barre laterale, sans changer de page. */
+  private toggleGroup(tab: Tab, path: string): void {
+    const set = this.expandedGroups.get(tab.notebook) ?? new Set<string>();
+    this.expandedGroups.set(tab.notebook, set);
+    const open = !set.has(`!${path}`) && (set.has(path) || isUnder(tab.divider, path));
     if (open) {
-      const group = findNode(tree, open)!;
-      const sub = el("div", { class: "dividers sub", "aria-label": `Intercalaires de ${dividerLabel(open)}` });
-      // Fil d'Ariane : le dernier niveau referme la sous-bande, un autre y remonte.
-      for (const g of expandedChain(open)) {
-        const last = g === open;
-        sub.append(el("button", {
-          class: `divider-crumb${last ? " current" : ""}`,
-          title: last ? `Refermer ${leafName(g)}` : `Revenir à ${leafName(g)}`,
-          onclick: (e: MouseEvent) => this.toggleGroup(tab, g, last, e.detail === 0),
-        }, leafName(g), el("span", { class: "chev", "aria-hidden": "true" }, "›")));
-      }
-      // Le groupe a aussi ses propres pages : elles restent un intercalaire.
-      if (group.pages) {
-        sub.append(el("button", {
-          class: `divider-tab own${tab.divider === open ? " active" : ""}`,
-          dataset: { divider: open },
-          title: `Pages rangées directement dans ${group.name}`,
-          onclick: () => void this.switchDividerAndRender(tab, open!),
-        }, `Pages de ${group.name}`));
-      }
-      const sibs = group.children.map((c) => c.path);
-      for (const c of group.children) addNode(sub, c, sibs);
-      if (depthOf(open) < MAX_DEPTH) {
-        sub.append(el("button", {
-          class: "divider-tab",
-          title: `Nouvel intercalaire dans ${dividerLabel(open)}`,
-          "aria-label": `Nouvel intercalaire dans ${dividerLabel(open)}`,
-          onclick: () => void this.newDivider(tab, open!),
-        }, "+"));
-      }
-      strip.append(sub);
+      set.delete(path);
+      // Replier le groupe de l'intercalaire ouvert : on le marque replie
+      // explicitement (sinon il resterait ouvert parce qu'il le contient).
+      if (isUnder(tab.divider, path)) set.add(`!${path}`);
+    } else {
+      set.add(path);
+      set.delete(`!${path}`);
     }
-    strip.addEventListener("keydown", (e) => this.dividerKeys(e, strip));
-    // Pastilles des copies de conflit, une fois la bande a l'ecran.
-    queueMicrotask(() => { if (strip.isConnected) this.paintConflictBadges(); });
-    return strip;
-  }
-
-  /** Fleches dans la bande d'intercalaires : sans souris ni doigt. */
-  private dividerKeys(e: KeyboardEvent, strip: HTMLElement): void {
-    if (e.ctrlKey || e.altKey || e.metaKey) return;
-    const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>("button");
-    const row = btn?.parentElement;
-    if (!btn || !row || !row.classList.contains("dividers")) return;
-    const rows = [...strip.querySelectorAll<HTMLElement>(":scope > .dividers")];
-    const items = [...row.querySelectorAll<HTMLElement>(":scope > button")];
-    const i = items.indexOf(btn);
-    let next: HTMLElement | undefined;
-    if (e.key === "ArrowRight") next = items[i + 1];
-    else if (e.key === "ArrowLeft") next = items[i - 1];
-    else if (e.key === "ArrowDown") {
-      const below = rows[rows.indexOf(row) + 1];
-      // Groupe ferme : ↓ l'ouvre et donne le focus a son premier intercalaire.
-      if (btn.dataset.group && btn.getAttribute("aria-expanded") !== "true") { btn.click(); e.preventDefault(); return; }
-      next = below?.querySelector<HTMLElement>(".divider-tab.active, .divider-tab[data-divider]") ?? undefined;
-    } else if (e.key === "ArrowUp") {
-      const above = rows[rows.indexOf(row) - 1];
-      next = above?.querySelector<HTMLElement>(".divider-tab.open, .divider-tab.active") ?? undefined;
-    } else return;
-    e.preventDefault();
-    next?.focus();
+    void this.paintSidebar();
   }
 
   /**
-   * Ouvre ou referme la sous-bande d'un groupe, sans changer de page.
-   * Au clavier, le premier intercalaire du groupe prend le focus.
-   */
-  private toggleGroup(tab: Tab, path: string, opened: boolean, keyboard = false): void {
-    tab.expanded = opened ? (parentPath(path) || null) : path;
-    void this.repo.listDividerTree(tab.notebook).then((tree) => {
-      const strip = this.main.querySelector(".divider-strip");
-      if (!strip?.isConnected || (this.focusedTab() ?? this.activeTab()) !== tab) return;
-      const next = this.buildDividerBar(tab, tree);
-      strip.replaceWith(next);
-      if (!keyboard) return;
-      const target = opened
-        ? next.querySelector<HTMLElement>(`[data-divider="${CSS.escape(path)}"]`)
-        : next.querySelector<HTMLElement>(".dividers.sub .divider-tab[data-divider]");
-      target?.focus();
-    });
-  }
-
-  /**
-   * « + » de la bande ou Ctrl+T : un intercalaire de plus, ouvert aussitot,
+   * « + Intercalaire » ou Ctrl+T : un intercalaire de plus, ouvert aussitot,
    * dans le groupe `parent` ("" = premier niveau). Un nom de groupe
    * facultatif le range dans un nouveau groupe (S1 → Chapitre 1).
    */
@@ -1308,115 +1444,6 @@ export class App {
     await this.switchDividerAndRender(tab, d);
   }
 
-  /**
-   * Intercalaire glisse dans la bande pour le changer de place : a la souris
-   * des qu'on bouge, au doigt et au stylet apres un appui long (sinon le
-   * doigt fait defiler la bande). Appui long sans bouger, ou clic droit : le
-   * menu de l'intercalaire, comme avant.
-   */
-  private wireDividerDrag(bar: HTMLElement, node: HTMLElement, tab: Tab, d: string, dividers: string[]): void {
-    const HOLD_MS = 450, SLOP = 8;
-    let st: {
-      id: number; type: string; x: number; y: number; scroll: number;
-      armed: boolean; dragging: boolean; timer: ReturnType<typeof setTimeout> | null;
-    } | null = null;
-    /** Le clic qui suit un glisser ou un menu ne change pas d'intercalaire. */
-    let swallow = false;
-    // Seulement les voisins de la meme rangee (meme groupe).
-    const tabs = () => [...bar.querySelectorAll<HTMLElement>(":scope > .divider-tab[data-sib]")];
-    const from = () => dividers.indexOf(d);
-    const target = (x: number) => {
-      const centers = tabs().map((t) => { const r = t.getBoundingClientRect(); return r.left + r.width / 2; });
-      return dropIndex(centers, from(), x);
-    };
-    const paintDrop = (x: number) => {
-      const to = target(x);
-      tabs().forEach((t, i) => {
-        t.classList.toggle("drop-before", i === to && to < from());
-        t.classList.toggle("drop-after", i === to && to > from());
-      });
-    };
-    const end = () => {
-      if (st?.timer) clearTimeout(st.timer);
-      st = null;
-      node.classList.remove("lifted", "dragging");
-      node.style.transform = "";
-      for (const t of tabs()) t.classList.remove("drop-before", "drop-after");
-    };
-    const startDrag = () => {
-      if (!st) return;
-      st.dragging = true;
-      node.classList.add("dragging");
-    };
-
-    node.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0) return;
-      swallow = false;
-      st = {
-        id: e.pointerId, type: e.pointerType, x: e.clientX, y: e.clientY, scroll: bar.scrollLeft,
-        armed: false, dragging: false, timer: null,
-      };
-      // Le geste reste a l'onglet meme s'il en sort (glisser, defiler la bande).
-      try { node.setPointerCapture(e.pointerId); } catch { /* pointeur deja parti */ }
-      const mine = st;
-      st.timer = setTimeout(() => {
-        if (st !== mine) return;
-        mine.timer = null;
-        mine.armed = true;
-        node.classList.add("lifted");
-      }, HOLD_MS);
-    });
-    node.addEventListener("pointermove", (e) => {
-      if (!st || e.pointerId !== st.id) return;
-      const dx = e.clientX - st.x;
-      if (!st.dragging) {
-        if (Math.hypot(dx, e.clientY - st.y) <= SLOP) return;
-        if (st.type === "mouse" || st.armed) startDrag();
-        else {
-          // Doigt ou stylet qui bouge avant l'appui long : il fait defiler la bande.
-          if (st.timer) clearTimeout(st.timer);
-          st.timer = null;
-          bar.scrollLeft = st.scroll - dx;
-          swallow = true;
-          return;
-        }
-      }
-      if (!st.dragging) return;
-      node.style.transform = `translateX(${dx + (bar.scrollLeft - st.scroll)}px)`;
-      paintDrop(e.clientX);
-    });
-    node.addEventListener("pointerup", (e) => {
-      if (!st || e.pointerId !== st.id) return;
-      const { dragging, armed } = st;
-      const x = e.clientX;
-      const to = dragging ? target(x) : from();
-      end();
-      if (dragging) {
-        swallow = true;
-        if (to !== from()) void this.reorderDivider(tab, d, to);
-      } else if (armed) {
-        // Appui long sans glisser : le menu de l'intercalaire.
-        swallow = true;
-        void this.dividerMenu(tab, d, dividers);
-      }
-    });
-    node.addEventListener("pointercancel", () => end());
-    node.addEventListener("click", (e) => {
-      if (!swallow) return;
-      swallow = false;
-      e.stopImmediatePropagation();
-      e.preventDefault();
-    }, true);
-    // Clic droit (souris) : le menu. Le doigt maintenu declenche aussi
-    // contextmenu sous Windows : le relachement s'en occupe deja.
-    node.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      if (st && st.type !== "mouse") return;
-      end();
-      void this.dividerMenu(tab, d, dividers);
-    });
-  }
-
   /** Intercalaire glisse a une autre place ; l'ordre est ecrit dans cahier.json. */
   private async reorderDivider(tab: Tab, d: string, index: number): Promise<void> {
     if (this.refuseLocked(tab.notebook)) return;
@@ -1431,92 +1458,70 @@ export class App {
   }
 
   /**
-   * Menu d'un intercalaire : a droite, renommer, deplacer parmi ses voisins,
-   * ranger dans un groupe ou l'en sortir (D4), supprimer.
+   * Menu d'un intercalaire (clic droit, appui long) : ouvrir a droite,
+   * renommer, ranger dans un groupe ou l'en sortir (D4), supprimer.
+   * L'ordre se change en glissant la ligne.
    */
-  private async dividerMenu(tab: Tab, d: string, dividers: string[]): Promise<void> {
-    const i = dividers.indexOf(d);
+  private async dividerMenu(tab: Tab, d: string, at: { x: number; y: number }): Promise<void> {
     const holder = this.tabs.find((t) => t.notebook === tab.notebook && t.divider === d);
     const left = this.activeTab();
-    const node = findNode(await this.repo.listDividerTree(tab.notebook), d);
-    const isGroup = !!node?.children.length;
-    const options: { value: string; label: string }[] = [];
-    // Cours a gauche, Exos a droite (section 5) : pas pour l'intercalaire
-    // deja a gauche, ni pour celui deja a droite, ni pour un simple groupe.
-    if ((!isGroup || node?.pages) && holder?.id !== left?.id && (!holder || holder.id !== this.splitId)) {
-      options.push({ value: "right", label: "Ouvrir à droite" });
-    }
-    options.push({ value: "rename", label: "Renommer" });
-    if (i > 0) options.push({ value: "left", label: "Déplacer à gauche" });
-    if (i >= 0 && i < dividers.length - 1) options.push({ value: "next", label: "Déplacer à droite" });
-    if (isGroup && depthOf(d) < MAX_DEPTH) options.push({ value: "add", label: `Nouvel intercalaire dans ${node!.name}` });
-    options.push({ value: "group", label: "Ranger dans un groupe…" });
-    if (parentPath(d)) options.push({ value: "out", label: `Sortir de ${leafName(parentPath(d))}` });
-    options.push({ value: "delete", label: isGroup ? "Supprimer le groupe" : "Supprimer l'intercalaire" });
-    const choice = await pick(dividerLabel(d), options);
-    if (choice && choice !== "right" && this.refuseLocked(tab.notebook)) return;
-    if (choice === "right") {
-      await this.openRight(tab.notebook, d);
-    } else if (choice === "rename") {
-      const next = await askText(isGroup ? "Renommer le groupe" : "Renommer l'intercalaire", "Nouveau nom", leafName(d));
-      if (next) await this.renameDivider(tab, d, next);
-    } else if (choice === "left" || choice === "next") {
-      await this.moveDivider(tab, d, choice === "left" ? -1 : 1, dividers);
-    } else if (choice === "add") {
-      await this.newDivider(tab, d);
-    } else if (choice === "group") {
-      await this.chooseGroupFor(tab, d);
-    } else if (choice === "out") {
-      await this.moveDividerTo(tab, d, parentPath(parentPath(d)));
-    } else if (choice === "delete") {
-      const inside = node ? flattenTree(node.children).length : 0;
-      const ok = await confirmDialog(
-        isGroup ? "Supprimer le groupe" : "Supprimer l'intercalaire",
-        `${dividerLabel(d)} et toutes ses pages${inside ? `, avec ${inside} intercalaire${inside > 1 ? "s" : ""} rangé${inside > 1 ? "s" : ""} dedans,` : ""} `
-          + "partent à la corbeille (dossier ESEO/.corbeille). "
-          + "Le bouton « Annuler » du message qui suit le remet en place.",
-        "Supprimer",
-      );
-      if (ok) await this.deleteDivider(tab, d);
-    }
-  }
-
-  /** Change l'intercalaire de place parmi ses voisins ; l'ordre est ecrit dans cahier.json. */
-  private async moveDivider(tab: Tab, d: string, delta: number, siblings: string[]): Promise<void> {
-    const i = siblings.indexOf(d);
-    if (i < 0) return;
-    const order = moveAmongSiblings(await this.repo.listDividers(tab.notebook), d, i + delta);
-    try {
-      await this.repo.reorderDividers(tab.notebook, order);
-    } catch (e) {
-      toast(`Déplacement impossible : ${(e as Error).message}`, "err", 6000);
-      return;
-    }
-    await this.renderNotebookScreen();
-  }
-
-  /**
-   * « Ranger dans un groupe » : les groupes ou il peut aller (3 niveaux au
-   * plus), un nouveau groupe a son niveau, ou le premier niveau.
-   */
-  private async chooseGroupFor(tab: Tab, d: string): Promise<void> {
     const tree = await this.repo.listDividerTree(tab.notebook);
     const node = findNode(tree, d);
     if (!node) return;
-    const height = subtreeHeight(node);
-    const options: { value: string; label: string }[] = flattenTree(tree)
-      .filter((p) => findNode(tree, p)!.children.length && !moveRefusal(d, p, height))
-      .map((p) => ({ value: `g:${p}`, label: dividerLabel(p) }));
-    if (depthOf(d) + height <= MAX_DEPTH) options.push({ value: "new", label: "Nouveau groupe…" });
-    if (parentPath(d)) options.push({ value: "top", label: "Premier niveau de la matière" });
-    if (!options.length) {
-      toast(`Aucun groupe possible : au plus ${MAX_DEPTH} niveaux sous la matière`, "warn", 4000);
-      return;
+    const isGroup = node.children.length > 0;
+    const locked = () => this.refuseLocked(tab.notebook);
+    const entries: MenuEntry[] = [];
+    // Cours a gauche, Exos a droite (section 5) : pas pour l'intercalaire
+    // deja a gauche, ni pour celui deja a droite, ni pour un simple groupe.
+    if ((!isGroup || node.pages) && holder?.id !== left?.id && (!holder || holder.id !== this.splitId)) {
+      entries.push({ label: "Ouvrir à droite", icon: "split", run: () => void this.openRight(tab.notebook, d) });
     }
-    const choice = await pick(`Ranger ${leafName(d)} dans…`, options);
-    if (!choice) return;
-    if (choice === "top") { await this.moveDividerTo(tab, d, ""); return; }
-    if (choice.startsWith("g:")) { await this.moveDividerTo(tab, d, choice.slice(2)); return; }
+    entries.push({
+      label: "Renommer…", icon: "rename", run: () => void (async () => {
+        if (locked()) return;
+        const next = await askText(isGroup ? "Renommer le groupe" : "Renommer l'intercalaire", "Nouveau nom", leafName(d));
+        if (next) await this.renameDivider(tab, d, next);
+      })(),
+    });
+    if (isGroup && depthOf(d) < MAX_DEPTH) {
+      entries.push({ label: `Nouvel intercalaire dans ${node.name}…`, icon: "plus", run: () => { if (!locked()) void this.newDivider(tab, d); } });
+    }
+    // Ranger : les groupes ou il peut aller (3 niveaux au plus), un nouveau groupe, le premier niveau.
+    const height = subtreeHeight(node);
+    const groups: MenuEntry[] = flattenTree(tree)
+      .filter((p) => findNode(tree, p)!.children.length && !moveRefusal(d, p, height))
+      .map((p) => ({ label: dividerLabel(p), icon: "folder" as const, run: () => { if (!locked()) void this.moveDividerTo(tab, d, p); } }));
+    if (depthOf(d) + height <= MAX_DEPTH) {
+      groups.push({ label: "Nouveau groupe…", icon: "plus", run: () => void this.newGroupFor(tab, d) });
+    }
+    if (parentPath(d)) groups.push({ label: "Premier niveau de la matière", icon: "folderIn", run: () => { if (!locked()) void this.moveDividerTo(tab, d, ""); } });
+    entries.push(groups.length
+      ? { label: "Ranger dans un groupe", icon: "folderIn", sub: groups }
+      : { label: `Aucun groupe possible (${MAX_DEPTH} niveaux au plus)`, icon: "folderIn", disabled: true });
+    if (parentPath(d)) {
+      entries.push({ label: `Sortir de ${leafName(parentPath(d))}`, icon: "folder", run: () => { if (!locked()) void this.moveDividerTo(tab, d, parentPath(parentPath(d))); } });
+    }
+    entries.push("sep", {
+      label: isGroup ? "Supprimer le groupe…" : "Supprimer l'intercalaire…", icon: "trash", danger: true,
+      run: () => void (async () => {
+        if (locked()) return;
+        const inside = flattenTree(node.children).length;
+        const ok = await confirmDialog(
+          isGroup ? "Supprimer le groupe" : "Supprimer l'intercalaire",
+          `${dividerLabel(d)} et toutes ses pages${inside ? `, avec ${inside} intercalaire${inside > 1 ? "s" : ""} rangé${inside > 1 ? "s" : ""} dedans,` : ""} `
+            + "partent à la corbeille (dossier ESEO/.corbeille). "
+            + "Le bouton « Annuler » du message qui suit le remet en place.",
+          "Supprimer",
+        );
+        if (ok) await this.deleteDivider(tab, d);
+      })(),
+    });
+    contextMenu(at, entries, { label: dividerLabel(d) });
+  }
+
+  /** « Ranger dans un groupe › Nouveau groupe… » : le groupe est cree a son niveau. */
+  private async newGroupFor(tab: Tab, d: string): Promise<void> {
+    if (this.refuseLocked(tab.notebook)) return;
     const name = await askText("Nouveau groupe", `Nom du groupe qui contiendra ${leafName(d)}`, "");
     if (!name?.trim()) return;
     let group: string;
@@ -1545,9 +1550,8 @@ export class App {
       return;
     }
     await this.retarget(tab.notebook, d, applied);
-    for (const t of this.tabs) if (t.notebook === tab.notebook) t.expanded = undefined;
-    // On voit ou il est arrive.
-    tab.expanded = toParent || undefined;
+    // On voit ou il est arrive : son groupe est deplie.
+    if (toParent) this.expandGroup(tab.notebook, toParent);
     toast(`${leafName(d)} rangé dans ${toParent ? dividerLabel(toParent) : "le premier niveau"}`, "info", 2500);
     await this.renderNotebookScreen();
   }
@@ -1557,8 +1561,11 @@ export class App {
    * vues, positions et historique suivent.
    */
   private async retarget(notebook: string, from: string, to: string): Promise<void> {
+    const set = this.expandedGroups.get(notebook);
+    if (set) this.expandedGroups.set(notebook, new Set([...set].map((g) => (g.startsWith("!")
+      ? `!${renamePrefix(g.slice(1), from, to)}` : renamePrefix(g, from, to)))));
+    for (const k of [...this.pageRows.keys()]) if (k.startsWith(`${notebook}\u0000`)) this.pageRows.delete(k);
     for (const t of this.tabs.filter((x) => x.notebook === notebook)) {
-      if (t.expanded) t.expanded = renamePrefix(t.expanded, from, to);
       if (!isUnder(t.divider, from)) continue;
       const next = renamePrefix(t.divider, from, to);
       // Une ecriture tardive de l'ancienne vue va dans le nouveau dossier.
@@ -1647,9 +1654,8 @@ export class App {
     const restTree = await this.repo.listDividerTree(nb);
     // D'abord un intercalaire qui a des pages (pas un simple groupe).
     const rest = [...new Set([...openableDividers(restTree), ...flattenTree(restTree)])];
-    for (const t of this.tabs.filter((x) => x.notebook === nb)) {
-      if (t.expanded && isUnder(t.expanded, d)) t.expanded = undefined;
-    }
+    const groups = this.expandedGroups.get(nb);
+    if (groups) for (const g of [...groups]) if (isUnder(g.replace(/^!/, ""), d)) groups.delete(g);
     for (const t of this.tabs.filter((x) => x.notebook === nb && isUnder(x.divider, d))) {
       // Un intercalaire qu'aucun autre onglet ne montre ; sinon l'onglet part.
       const free = rest.find((x) => !this.tabs.some((o) => o.notebook === nb && o.divider === x));
@@ -1718,10 +1724,10 @@ export class App {
     }
     toast(`Intercalaire ${dividerLabel(name)} restauré`);
     if (!tab || this.screen !== "notebook") return;
-    // Un groupe sans pages propres : sa sous-bande s'ouvre, la page reste.
+    // Un groupe sans pages propres : il se deplie, la page reste.
     const node = findNode(await this.repo.listDividerTree(tab.notebook), name);
     if (node && !node.pages) {
-      tab.expanded = name;
+      this.expandGroup(tab.notebook, name);
       await this.renderNotebookScreen();
     } else {
       await this.switchDividerAndRender(tab, name);
@@ -1882,61 +1888,35 @@ export class App {
   }
 
   /**
-   * Colonne d'outils. En haut, tout ce qui sert en direct et doit rester a
-   * l'ecran du portable (1280x800) sans faire defiler la colonne : outils,
-   * couleurs, epaisseur, annuler, pages et « Pas compris ». Dessous, le
-   * ruban Maths, repliable. Les actions rares et les reglages vont dans le
-   * menu « ⋯ ».
+   * Palette d'outils flottante, en bas au centre de la zone des pages
+   * (capsule floutee, ombre) : Stylo, Surligneur, Gomme, Lasso | les six
+   * couleurs (palette semantique fermee, section 8) | Annuler, Retablir.
+   * Sous-choix au second appui sur l'outil actif ou a l'appui long :
+   * epaisseur du stylo, gomme precise, lasso ou espace. Etroite (telephone,
+   * split), les six pastilles se replient en un bouton.
    */
-  /**
-   * Rail d'outils (64 px) : icones de 44 px, nom et raccourci en infobulle
-   * (titleOf/keysOf, la table unique). Les sous-choix d'un outil (gomme
-   * precise, lasso ou espace, doigt sans stylet) s'ouvrent en mini-volet :
-   * second appui sur l'outil actif, ou appui long. Couleur et epaisseur :
-   * un bouton chacun, leur volet montre les choix et leur sens. Tient en
-   * 1366x768 et en 1280x720 sans defiler.
-   */
-  private buildToolbar(): HTMLElement {
-    const rail = el("aside", { class: "rail", "aria-label": "Outils" });
+  private buildPalette(): HTMLElement {
+    const pal = el("div", { class: "palette", role: "toolbar", "aria-label": "Outils" });
     const view = () => this.focusedTab()?.view;
 
-    const tool = (id: Tool, name: IconName, label: string, keys: string, sub?: (anchor: HTMLElement) => void) => {
-      const active = id === this.tool || (id === "lasso" && isSelect(this.tool));
-      const locked = active && this.toolLocked;
-      const b = this.iconButton(name, label, keys, () => {
-        // Outil deja actif et sous-choix : le second appui ouvre le volet.
-        if (active && sub) { sub(b); return; }
-        this.selectTool(id);
-      }, {
-        cls: `tool${active ? " on" : ""}${locked ? " locked" : ""}${sub ? " has-sub" : ""}`,
-        pressed: active, keep: true,
-        tip: label + (locked ? " · verrouillée" : ""),
-      });
-      b.dataset.tool = id;
-      if (sub) {
-        // Appui long : le volet, l'outil choisi au passage.
-        onLongPress(b, () => {
-          if (!active) this.selectTool(id);
-          const now = this.main.querySelector<HTMLElement>(`.rail [data-tool="${id}"]`) ?? b;
-          sub(now);
-        });
-      }
-      return b;
-    };
-
     const optionList = (anchor: HTMLElement, label: string, options: {
-      on: boolean; name: IconName | null; text: string; hint: string; run: () => void;
+      on: boolean; name: IconName | null; text: string; hint: string; run: () => void; node?: Node;
     }[]) => {
       const list = el("div", { class: "fly-list", role: "menu", "aria-label": label },
         el("div", { class: "fly-title" }, label),
         ...options.map((o) => keepFocus(el("button", {
           class: `fly-item${o.on ? " on" : ""}`, role: "menuitemradio", "aria-checked": String(o.on),
           onclick: () => { this.closeFlyout(); o.run(); },
-        }, o.name ? icon(o.name, 20) : null, el("span", { class: "fly-text" },
-          el("span", {}, o.text), el("span", { class: "fly-hint" }, o.hint))))));
-      this.openFlyout(anchor, list, { side: "right", label });
+        }, o.node ?? (o.name ? icon(o.name, 20) : null), el("span", { class: "fly-text" },
+          el("span", {}, o.text), o.hint ? el("span", { class: "fly-hint" }, o.hint) : null)))));
+      this.openFlyout(anchor, list, { side: "top", label });
     };
 
+    const widths: [string, number][] = [["Fin", 1.4], ["Moyen", 2.2], ["Épais", 3.6]];
+    const widthSub = (a: HTMLElement) => optionList(a, "Épaisseur du stylo", widths.map(([label, w]) => ({
+      on: this.width === w, name: null, node: widthIcon(w, 22), text: label, hint: "",
+      run: () => { this.width = w; this.persist(); this.paintToolbar(); },
+    })));
     const eraserSub = (a: HTMLElement) => optionList(a, "Gomme", [
       { on: this.eraserMode === "stroke", name: "eraser", text: "Trait entier", hint: "Efface tout le trait touché", run: () => this.setEraserMode("stroke") },
       { on: this.eraserMode === "precise", name: "eraser", text: "Précise", hint: "Coupe le trait : seule la partie frottée part", run: () => this.setEraserMode("precise") },
@@ -1945,145 +1925,123 @@ export class App {
       { on: this.tool === "lasso", name: "lasso", text: "Entourer", hint: "Déplacer, retailler, recolorer, copier", run: () => this.selectTool("lasso") },
       { on: this.tool === "space", name: "space", text: "Insérer de l'espace", hint: "Glisser une ligne : tout ce qui est dessous descend", run: () => this.selectTool("space") },
     ]);
-    // Sans stylet, ce que fait le doigt : un sous-choix du stylo.
-    const penSub = this.sawPen ? undefined : (a: HTMLElement) => optionList(a, "Doigt (pas de stylet)", [
-      { on: this.touchWrites, name: "pen", text: "Le doigt écrit", hint: keysOf("finger"), run: () => { if (!this.touchWrites) this.toggleFinger(); } },
-      { on: !this.touchWrites, name: "hand", text: "Le doigt navigue", hint: "Défilement, pinch-zoom", run: () => { if (this.touchWrites) this.toggleFinger(); } },
-    ]);
 
-    const eraserTip = this.eraserMode === "precise" ? "Gomme précise" : "Gomme";
-    rail.append(
-      tool("pen", "pen", "Stylo", "Alt+E", penSub),
+    const tool = (id: Tool, name: IconName, label: string, keys: string, sub?: (anchor: HTMLElement) => void) => {
+      const active = id === this.tool || (id === "lasso" && isSelect(this.tool));
+      const b = this.iconButton(name, label, keyLabel(keys), () => {
+        // Outil deja actif et sous-choix : le second appui ouvre le volet.
+        if (active && sub) { sub(b); return; }
+        this.selectTool(id);
+      }, { cls: `tool${active ? " on" : ""}${sub ? " has-sub" : ""}`, pressed: active, keep: true, side: "top" });
+      b.dataset.tool = id;
+      if (sub) {
+        // Appui long : le volet, l'outil choisi au passage.
+        onLongPress(b, () => {
+          if (!active) this.selectTool(id);
+          const now = this.main.querySelector<HTMLElement>(`.palette [data-tool="${id}"]`) ?? b;
+          sub(now);
+        });
+      }
+      return b;
+    };
+
+    pal.append(
+      tool("pen", "pen", `Stylo (${widths.find(([, w]) => w === this.width)?.[0] ?? "Moyen"})`, "Alt+E", widthSub),
       tool("highlighter", "highlighter", "Surligneur", "Alt+H"),
-      tool("eraser", "eraser", eraserTip, "Alt+G", eraserSub),
+      tool("eraser", "eraser", this.eraserMode === "precise" ? "Gomme précise" : "Gomme", "Alt+G", eraserSub),
       tool("lasso", this.tool === "space" ? "space" : "lasso", this.tool === "space" ? "Espace" : "Lasso", "Alt+A", lassoSub),
-      tool("region", "zoneMath", "Zone math", "Alt+Z"),
-      tool("textregion", "zoneText", "Zone texte", "Alt+T"),
     );
-    // aria-label stable pour les tests et les lecteurs d'ecran.
-    rail.querySelector('[data-tool="lasso"]')?.setAttribute("aria-label", "Lasso");
-    rail.querySelector('[data-tool="eraser"]')?.setAttribute("aria-label", "Gomme");
-    rail.append(el("div", { class: "rail-sep", role: "separator" }));
+    // aria-label stables pour les tests et les lecteurs d'ecran.
+    pal.querySelector('[data-tool="pen"]')?.setAttribute("aria-label", "Stylo");
+    pal.querySelector('[data-tool="lasso"]')?.setAttribute("aria-label", "Lasso");
+    pal.querySelector('[data-tool="eraser"]')?.setAttribute("aria-label", "Gomme");
+    // Zone math/texte (Alt+Z, Alt+T) en cours : dit, et un appui la quitte.
+    if (isZone(this.tool)) {
+      pal.append(keepFocus(el("button", {
+        class: "zone-chip", "aria-label": "Quitter la zone",
+        title: this.toolLocked ? "Zone verrouillée : plusieurs zones de suite" : "Zone ponctuelle : la suivante revient au stylo",
+        onclick: () => { this.toolLocked = false; this.tool = this.prevTool; this.persist(); this.paintToolbar(); },
+      }, this.tool === "region" ? "Zone math" : "Zone texte", icon("close", 14))));
+    }
+    pal.append(el("div", { class: "pal-sep", role: "separator" }));
 
     // Palette fermee a 5 couleurs a semantique fixe (section 8), plus l'encre
-    // neutre noire ; elle vaut pour l'encre ET le texte tape. Le bouton montre
-    // la couleur active ; son volet, les six avec leur sens et leur touche.
+    // neutre noire ; elle vaut pour l'encre ET le texte tape.
     const colors: { key: ColorKey | null; label: string; ink: string; keys: string }[] = [
-      { key: null, label: `${NEUTRAL_INK.label}, en noir`, ink: NEUTRAL_INK.ink, keys: `Alt+${NEUTRAL_INK.shortcut}` },
+      { key: null, label: `${NEUTRAL_INK.label}`, ink: NEUTRAL_INK.ink, keys: `Alt+${NEUTRAL_INK.shortcut}` },
       ...PALETTE.map((p) => ({ key: p.key as ColorKey | null, label: p.label, ink: p.ink, keys: `Alt+${p.shortcut}` })),
     ];
     // Pastilles telles que l'encre s'affiche (feuille sombre : noir montre clair).
+    const sheet = this.root.dataset.sheet;
     const shown = (c: { key: ColorKey | null; ink: string }) =>
-      this.settings.sheet === "dark" ? inkDisplayColor(c.key ?? "normal", "pen", "dark") : c.ink;
+      sheet === "dark" ? inkDisplayColor(c.key ?? "normal", "pen", "dark") : c.ink;
+    const all = el("div", { class: "sw-all", role: "radiogroup", "aria-label": "Couleur" });
+    for (const c of colors) {
+      const on = (c.key ?? "normal") === this.color;
+      all.append(keepFocus(el("button", {
+        class: `sw${on ? " on" : ""}`, role: "radio", "aria-checked": String(on),
+        "aria-label": c.key ? c.label : "Normal, en noir", "data-tip": c.label, "data-keys": keyLabel(c.keys), "data-tip-side": "top",
+        dataset: { color: c.key ?? "normal" },
+        onclick: () => this.pickColor(c.key),
+      }, el("i", { style: { background: shown(c) } }))));
+    }
     const activeInk = colors.find((c) => (c.key ?? "normal") === this.color) ?? colors[0];
-    const colorBtn = keepFocus(el("button", {
-      class: "icon-btn color-btn",
-      "aria-label": `Couleur : ${labelOf(this.color)}`,
-      "aria-haspopup": "menu",
-      "data-tip": `Couleur : ${labelOf(this.color)}`, "data-keys": `Alt+${shortcutOf(this.color)}`,
-      onclick: () => {
-        const list = el("div", { class: "fly-list colors", role: "menu", "aria-label": "Couleur" },
-          el("div", { class: "fly-title" }, "Couleur de l'encre et du texte"),
-          ...colors.map((c) => keepFocus(el("button", {
-            class: `fly-item swatch-item${(c.key ?? "normal") === this.color ? " on" : ""}`,
-            role: "menuitemradio", "aria-checked": String((c.key ?? "normal") === this.color),
-            "aria-label": c.key ? c.label : "Normal, en noir",
-            onclick: () => { this.closeFlyout(); this.pickColor(c.key); },
-          }, el("i", { class: "swatch-dot", style: { background: shown(c) } }),
-          el("span", { class: "fly-text" }, el("span", {}, c.key ? c.label : "Normal")), el("kbd", {}, c.keys)))));
-        this.openFlyout(colorBtn, list, { side: "right", label: "Couleur" });
-      },
-    }, el("i", { class: "swatch-dot", style: { background: shown(activeInk) } })));
-    colorBtn.dataset.color = this.color;
-
-    const widths: [string, number][] = [["Fin", 1.4], ["Moyen", 2.2], ["Épais", 3.6]];
-    const widthName = widths.find(([, w]) => w === this.width)?.[0] ?? "Moyen";
-    const widthBtn = keepFocus(el("button", {
-      class: "icon-btn width-btn", "aria-label": `Épaisseur : ${widthName}`, "aria-haspopup": "menu",
-      "data-tip": `Épaisseur : ${widthName}`,
-      onclick: () => {
-        const list = el("div", { class: "fly-list", role: "menu", "aria-label": "Épaisseur" },
-          el("div", { class: "fly-title" }, "Épaisseur du trait"),
-          ...widths.map(([label, w]) => keepFocus(el("button", {
-            class: `fly-item${this.width === w ? " on" : ""}`, role: "menuitemradio", "aria-checked": String(this.width === w),
-            onclick: () => { this.closeFlyout(); this.width = w; this.persist(); this.paintToolbar(); },
-          }, widthIcon(w, 22), el("span", { class: "fly-text" }, el("span", {}, label))))));
-        this.openFlyout(widthBtn, list, { side: "right", label: "Épaisseur" });
-      },
-    }, widthIcon(this.width)));
-    rail.append(colorBtn, widthBtn, el("div", { class: "rail-sep", role: "separator" }));
-
-    rail.append(
-      this.iconButton("undo", "Annuler", keysOf("undo"), () => view()?.undo(), { keep: true }),
-      this.iconButton("redo", "Rétablir", keysOf("redo"), () => view()?.redo(), { keep: true }),
-      el("div", { class: "rail-sep", role: "separator" }),
+    const one: HTMLButtonElement = keepFocus(el("button", {
+      class: "sw sw-one", "aria-haspopup": "menu", "aria-label": `Couleur : ${labelOf(this.color)}`,
+      "data-tip": `Couleur : ${labelOf(this.color)}`, "data-tip-side": "top",
+      onclick: () => optionList(one, "Couleur de l'encre et du texte", colors.map((c) => ({
+        on: (c.key ?? "normal") === this.color, name: null, node: el("i", { class: "swatch-dot", style: { background: shown(c) } }),
+        text: c.key ? c.label : "Normal", hint: keyLabel(c.keys), run: () => this.pickColor(c.key),
+      }))),
+    }, el("i", { style: { background: shown(activeInk) } })));
+    one.dataset.color = this.color;
+    pal.append(all, one, el("div", { class: "pal-sep", role: "separator" }),
+      this.iconButton("undo", "Annuler", keysOf("undo"), () => view()?.undo(), { keep: true, side: "top" }),
+      this.iconButton("redo", "Rétablir", keysOf("redo"), () => view()?.redo(), { keep: true, side: "top" }),
     );
-
-    const mathsOpen = this.mathMode() !== "closed";
-    const maths = this.iconButton("sigma", "Maths", keysOf("maths"), () => this.toggleMaths(), {
-      cls: `maths-btn${mathsOpen ? " on" : ""}`, keep: true, pressed: mathsOpen, tip: "Ruban Maths",
-    });
-    maths.setAttribute("aria-expanded", String(mathsOpen));
-    rail.append(
-      maths,
-      // « Pas compris » : un appui, en plein cours (section 6). Son ambre,
-      // celui des reperes, se reconnait sans lire.
-      this.iconButton("help", "Pas compris", keysOf("flag"), () => view()?.addFlag(), {
-        cls: "flag-btn", keep: true, tip: "Pas compris : repère sur la page",
-      }),
-      el("div", { class: "spacer" }),
-      this.iconButton("more", "Plus d'actions", "", (e) => this.openMoreMenu(e.currentTarget as HTMLElement), {
-        cls: "more-btn", tip: "Plus : photo, export, affichage, réglages",
-      }),
-    );
-    return rail;
+    return pal;
   }
 
-  /** Mode du ruban Maths, selon l'etat et la place (core/chrome.ts). */
+  /** Volet des formules, selon l'etat (core/chrome.ts). */
   private mathMode(): MathPanelMode {
-    return mathPanelMode({
-      open: this.mathFly, pinned: this.settings.mathPinned,
-      width: window.innerWidth, split: !!this.splitId,
-    });
+    return mathPanelMode({ open: this.mathFly, pinned: this.settings.mathPinned });
   }
 
-  /** Bouton du rail ou Ctrl+Maj+M : ouvre le volet, ou ferme le ruban. */
+  /** Bouton Σ ou Ctrl+Maj+M : ouvre le volet des formules, ou le ferme. */
   private toggleMaths(): void {
     if (this.mathMode() !== "closed") {
       if (this.settings.mathPinned) { this.settings.mathPinned = false; saveSettings(this.settings); }
       this.setMathFly(false);
-      this.paintToolbar();
+      this.paintMath();
       return;
     }
     this.setMathFly(true);
   }
 
-  /** Epingle ou detache le ruban (retenu sur cette machine). */
+  /** Epingle le volet (il reste ouvert), retenu sur cette machine. */
   private setMathPinned(pinned: boolean): void {
     this.settings.mathPinned = pinned;
     saveSettings(this.settings);
-    // Detache : il reste ouvert en volet, il ne disparait pas sous le doigt.
-    this.mathFly = !pinned;
+    this.mathFly = true;
     if (!pinned) this.watchMathOutside();
-    this.paintToolbar();
+    this.paintMath();
   }
 
   /**
-   * Ruban Maths en volet : ouvert ou ferme (pas retenu, c'est un volet).
-   * Echap, le bouton ∑ ou un appui hors du volet le ferme ; les touches du
-   * ruban le laissent ouvert (plusieurs symboles de suite).
+   * Volet ouvert ou ferme (pas retenu). Echap, le bouton Σ ou un appui hors
+   * du volet le ferme ; ses touches le laissent ouvert (plusieurs symboles).
    */
   private setMathFly(open: boolean): void {
     if (this.mathFly === open) return;
     this.mathFly = open;
-    this.paintToolbar();
+    this.paintMath();
     if (open) this.watchMathOutside();
   }
 
   private watchMathOutside(): void {
     const outside = (e: PointerEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t?.closest(".math-panel, .maths-btn")) return;
+      if (t?.closest(".math-pop, .maths-btn")) return;
       document.removeEventListener("pointerdown", outside, true);
       if (this.mathFly && !this.settings.mathPinned) this.setMathFly(false);
     };
@@ -2091,37 +2049,51 @@ export class App {
   }
 
   /**
-   * Pose le ruban Maths : colonne a cote du rail (epingle, ecran >= 1600 px,
-   * sans split) ou volet flottant par-dessus la marge, a cote du rail.
+   * Volet des formules : popover ancre sous Σ, sections titrees (Structures,
+   * Grec, Relations, Ensembles). Il evite la ligne en cours : si le curseur
+   * du texte est dessous, il passe en bas a droite de la zone des pages.
    */
   private paintMath(): void {
-    const work = this.calcSlot?.work;
-    if (!work?.isConnected) return;
-    work.querySelector(":scope > .math-panel")?.remove();
+    document.querySelector(".math-pop")?.remove();
     const mode = this.mathMode();
-    if (mode === "closed") return;
+    const btn = this.tabbar.querySelector<HTMLElement>(".maths-btn");
+    btn?.classList.toggle("on", mode !== "closed");
+    btn?.setAttribute("aria-pressed", String(mode !== "closed"));
+    if (mode === "closed" || this.screen !== "notebook") return;
     const pinned = this.settings.mathPinned;
-    const panel = el("section", { class: `math-panel ${mode}`, "aria-label": "Ruban Maths" },
+    const pop = el("section", { class: "math-pop", "aria-label": "Formules" },
       el("header", { class: "math-head" },
-        el("span", { class: "math-title" }, "Maths"),
+        el("span", { class: "math-title" }, "Formules"),
         el("div", { class: "spacer" }),
-        this.iconButton("pin", pinned ? "Détacher le ruban" : "Épingler le ruban", "", () => this.setMathPinned(!pinned), {
+        this.iconButton("pin", pinned ? "Ne plus épingler" : "Épingler", "", () => this.setMathPinned(!pinned), {
           cls: `small-icon${pinned ? " on" : ""}`, keep: true, pressed: pinned, side: "bottom",
-          tip: pinned ? "Détacher : le ruban se refermera seul" : "Épingler : le ruban reste ouvert (colonne sur grand écran)",
+          tip: pinned ? "Ne plus épingler : le volet se refermera seul" : "Épingler : le volet reste ouvert",
         }),
-        this.iconButton("close", "Fermer le ruban", keysOf("maths"), () => this.toggleMaths(), {
-          cls: "small-icon", keep: true, side: "bottom",
-        }),
+        this.iconButton("close", "Fermer", keysOf("maths"), () => this.toggleMaths(), { cls: "small-icon", keep: true, side: "bottom" }),
       ),
-      buildMathBar(() => this.focusedTab()?.view?.activeDoc),
+      buildFormulaPanel(() => this.focusedTab()?.view?.activeDoc),
     );
-    const rail = work.querySelector(":scope > .rail");
-    if (rail) rail.after(panel); else work.prepend(panel);
+    document.body.append(pop);
+    const W = window.innerWidth, H = window.innerHeight;
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    const a = (btn ?? this.tabbar).getBoundingClientRect();
+    let x = Math.max(8, Math.min(a.right - w, W - w - 8));
+    let y = this.tabbar.getBoundingClientRect().bottom + 6;
+    // La ligne en cours ne doit pas passer sous le volet.
+    const caret = caretRect();
+    if (caret && caret.bottom > y && caret.top < y + h && caret.right > x && caret.left < x + w) {
+      const stage = this.main.querySelector(".stage")?.getBoundingClientRect();
+      const below = (stage?.bottom ?? H) - h - 84;
+      if (below > caret.bottom + 8) y = below;
+      else x = Math.max(8, (stage?.left ?? 0) + 8);
+    }
+    pop.style.left = `${Math.round(x)}px`;
+    pop.style.top = `${Math.round(Math.max(8, Math.min(y, H - h - 8)))}px`;
   }
 
   /* ---------------- volets du chrome ---------------- */
 
-  /** Volet ouvert (couleur, gomme, matieres, etat...) et sa fermeture. */
+  /** Volet ouvert (epaisseur, gomme, couleur, etat...) et sa fermeture. */
   private flyout: { node: HTMLElement; close: () => void } | null = null;
 
   private closeFlyout(): void {
@@ -2129,11 +2101,11 @@ export class App {
   }
 
   /**
-   * Petit volet ancre a un bouton du chrome : a droite du rail, ou sous la
-   * barre du haut. Un appui a cote, Echap ou un choix le ferme ; le clavier
-   * reste ou il etait (les boutons ne prennent pas le focus a la souris).
+   * Petit volet ancre a un bouton du chrome : au-dessus de la palette, ou
+   * sous la barre du haut. Un appui a cote, Echap ou un choix le ferme ; le
+   * clavier reste ou il etait (les boutons ne prennent pas le focus).
    */
-  private openFlyout(anchor: HTMLElement, content: HTMLElement, o: { side: "right" | "bottom"; label: string; cls?: string }): void {
+  private openFlyout(anchor: HTMLElement, content: HTMLElement, o: { side: "right" | "bottom" | "top"; label: string; cls?: string }): void {
     const same = this.flyout?.node.dataset.label === o.label;
     this.closeFlyout();
     // Second appui sur le bouton qui l'a ouvert : il se referme seulement.
@@ -2163,7 +2135,8 @@ export class App {
     const r = anchor.getBoundingClientRect();
     const w = node.offsetWidth, h = node.offsetHeight;
     let x: number, y: number;
-    if (o.side === "bottom") { x = r.left; y = r.bottom + 6; }
+    if (o.side === "bottom") { x = r.right - w; y = r.bottom + 6; }
+    else if (o.side === "top") { x = r.left + r.width / 2 - w / 2; y = r.top - h - 10; }
     else { x = r.right + 8; y = r.top - 6; }
     x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
     y = Math.max(8, Math.min(y, window.innerHeight - h - 8));
@@ -2175,138 +2148,192 @@ export class App {
   }
 
   /**
-   * Menu « ⋯ » : actions rares et reglages, en controles a deux choix dont
-   * l'actif est surligne (on voit l'etat, pas une action a deviner).
+   * Menu ⋯ de la page : insérer, photo, PDF, fond de page, affichage,
+   * split, versions de la page (si le module existe), réglages ; « Supprimer
+   * la page » en rouge, a part. Au telephone, il reprend aussi les boutons
+   * de la barre du haut (Pas compris, Formules, Calculatrice, Partager).
    */
   private openMoreMenu(anchor: HTMLElement): void {
-    if (document.querySelector(".more-backdrop")) return;
-    const panel = el("div", { class: "more-menu", role: "menu" });
-    const backdrop = el("div", { class: "backdrop more-backdrop" }, panel);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); backToPage(); }
-    };
-    const close = () => {
-      backdrop.remove();
-      document.removeEventListener("keydown", onKey, true);
-    };
-    const view = () => this.focusedTab()?.view;
-    /** Le clavier revient a la page : ce qu'on tape ensuite n'est pas perdu. */
-    const backToPage = () => {
-      if (this.screen !== "notebook" || document.querySelector(".backdrop")) return;
-      if (!isEditingDoc(document.activeElement)) view()?.focusText();
-    };
-
-    // Une action ferme le menu avant de s'executer : un dialogue qui suit
-    // ne s'ouvre pas sous lui.
-    const action = (label: string, title: string, run: () => void, cls = "") =>
-      el("button", { class: `more-item ${cls}`.trim(), title, role: "menuitem", onclick: () => { close(); run(); } }, label);
-    // Un reglage aussi : choisi, il s'applique, le menu se ferme et la page
-    // reprend le clavier (on choisit un fond, on continue d'ecrire).
-    const segment = (name: string, title: string, options: [string, boolean, () => unknown][], titles?: string[]) =>
-      el("div", { class: "more-seg", title },
-        el("span", { class: "small muted" }, name),
-        el("div", { class: `seg${options.length > 3 ? " wrap" : ""}` }, ...options.map(([label, on, run], i) => el("button", {
-          class: on ? "on" : "",
-          title: titles?.[i],
-          "aria-pressed": String(on),
-          onclick: async () => {
-            close();
-            if (!on) await run();
-            backToPage();
-          },
-        }, label))),
+    const view = this.focusedTab()?.view;
+    if (!view) return;
+    const compact = window.innerWidth < PHONE_MAX;
+    const mode = view.mode;
+    const entries: MenuEntry[] = [];
+    if (compact) {
+      entries.push(
+        { label: "Pas compris", icon: "flag", keys: keysOf("flag"), run: () => view.addFlag() },
+        { label: "Formules", icon: "sigma", keys: keysOf("maths"), run: () => this.toggleMaths() },
+        { label: "Calculatrice", icon: "calculator", keys: keysOf("calc"), run: () => void this.toggleCalculator() },
+        { label: "Partager…", icon: "share", run: () => this.openShare() },
+        "sep",
       );
+    }
+    entries.push(
+      { label: "Insérer une page après", icon: "filePlus", keys: keysOf("insertPage"), run: () => void view.newPage(true).then(() => this.refreshSidebarSoon(0)) },
+      { label: "Nouvelle page à la fin", icon: "plus", keys: keysOf("newPage"), run: () => void view.newPage().then(() => this.refreshSidebarSoon(0)) },
+      { label: "Photo du tableau…", icon: "camera", keys: keyLabel(PHOTO_IMPORT_KEYS), run: () => void this.importImage() },
+      { label: "Importer un PDF…", icon: "fileUp", keys: keysOf("importPdf"), run: () => void this.importPdf() },
+      "sep",
+      {
+        label: "Fond de page", icon: "grid", sub: PAPERS.map((p) => ({
+          label: p.label, checked: (view.paper ?? "uni") === p.kind ? true : undefined,
+          run: () => void view.setPaper(p.kind).then(() => this.backToPage()),
+        })),
+      },
+      {
+        label: "Affichage", icon: "rows", sub: [
+          { label: "Pages : une à la fois", checked: mode === "pages" ? true : undefined, keys: keysOf("viewMode"), run: () => void this.setViewMode("pages") },
+          { label: "Défilement : toutes à la suite", checked: mode === "scroll" ? true : undefined, run: () => void this.setViewMode("scroll") },
+        ],
+      },
+      this.splitId
+        ? { label: "Fermer le panneau droit", icon: "split", keys: keysOf("closeSplit"), run: () => void this.closeSplit() }
+        : { label: "Diviser l'écran", icon: "split", keys: keysOf("split"), run: () => void this.toggleSplit() },
+    );
+    const versions = versionsModule();
+    if (versions) entries.push({ label: "Versions de la page…", icon: "history", run: () => void this.openVersions(view, versions) });
+    entries.push(
+      "sep",
+      { label: "Réglages…", icon: "settings", keys: keysOf("settings"), run: () => void this.openSettings() },
+      { label: "Raccourcis clavier", icon: "keyboard", keys: "F1", run: () => showShortcuts() },
+      "sep",
+      { label: "Supprimer la page…", icon: "trash", danger: true, run: () => void view.deleteCurrentPage().then(() => this.refreshSidebarSoon(0)) },
+    );
+    contextMenu(anchor, entries, { label: "Page", align: "end" });
+  }
 
+  /**
+   * Versions de la page (lot fiabilite, src/ui/versions.ts) : branche ici
+   * des que le module existe. Son API exacte se raccorde a la fusion ;
+   * on essaie les noms prevus.
+   */
+  private async openVersions(view: PageView, load: () => Promise<unknown>): Promise<void> {
+    try {
+      const mod = (await load()) as Record<string, unknown>;
+      const fn = ["openPageVersions", "openVersions", "showVersions", "default"].map((k) => mod[k]).find((f) => typeof f === "function");
+      if (!fn) { toast("Versions de la page : module présent mais sans point d'entrée connu", "warn"); return; }
+      await (fn as (o: unknown) => unknown)({
+        repo: this.repo, view, notebook: view.notebook, divider: view.divider, page: view.pageNumber,
+      });
+    } catch (e) {
+      toast(`Versions indisponibles : ${(e as Error).message}`, "warn", 5000);
+    }
+  }
+
+  /** Le clavier revient a la page apres un choix de menu. */
+  private backToPage(): void {
+    if (this.screen !== "notebook" || document.querySelector(".backdrop")) return;
+    if (!isEditingDoc(document.activeElement)) this.focusedTab()?.view?.focusText();
+  }
+
+  /**
+   * Partager : un seul dialogue, PDF ou Word, la page ou tout
+   * l'intercalaire (dernier choix retenu sur la machine). Ctrl+P / Ctrl+E
+   * restent les raccourcis directs.
+   */
+  private openShare(): void {
+    const view = this.focusedTab()?.view;
+    if (!view || document.querySelector(".backdrop")) return;
+    const saved = readJson<{ format: "pdf" | "word"; scope: "current" | "all" }>(SHARE_KEY) ?? { format: "pdf", scope: "current" };
+    let format = saved.format === "word" ? "word" : "pdf";
+    let scope: "current" | "all" = saved.scope === "all" ? "all" : "current";
+    const body = el("div", { class: "share-body" });
+    const go = el("button", { class: "primary" }, "Exporter");
     const paint = () => {
-      const mode = view()?.mode ?? "pages";
-      const calcShown = !!this.calculator?.isVisible;
-      // Deux colonnes : les actions, les reglages. Le menu tient dans un
-      // ecran de 768 px de haut sans defiler.
-      const actions = el("div", { class: "more-col" });
-      const settings = el("div", { class: "more-col" });
-      panel.replaceChildren(actions, settings);
-      actions.append(
-        action("Photo du tableau", `Photos redressées et lues, posées dans le texte (${PHOTO_IMPORT_KEYS})`, () => void this.importImage()),
-        action("Importer un PDF", titleOf("Sujet de TD, poly, datasheet : pages insérées après la page courante, à annoter", "importPdf"),
-          () => void this.importPdf()),
-        action(calcShown ? "Fermer la calculatrice" : "Calculatrice", titleOf("Calculatrice", "calc"),
-          () => void this.toggleCalculator()),
-        action("Insérer une page ici", titleOf("Insérer une page après la page courante", "insertPage"),
-          () => void view()?.newPage(true)),
-        action("Liste des pages…", titleOf("Toutes les pages : numéro, date, première ligne", "goto"),
-          () => void this.showPageList()),
-        action("Tasser les pages", "Remonte les suites de page dans le blanc laissé au-dessus (depuis la page courante). "
-          + "Une page : Suppr à la fin de la page, ou Retour arrière au début de la suivante",
-          () => void view()?.compactPages()),
-        action("Exporter la page (PDF)", titleOf("La page courante, puis « Enregistrer au format PDF »", "exportPage"),
-          () => void view()?.exportPdf("current")),
-        action("Exporter l'intercalaire (PDF)", titleOf("Toutes les pages de l'intercalaire", "exportAll"),
-          () => void view()?.exportPdf("all")),
-        action("Exporter la page (Word)", titleOf("Document Word éditable : titres, listes, équations, encre en images", "exportWord"),
-          () => void this.exportWord(view(), "current")),
-        action("Exporter l'intercalaire (Word)", titleOf("Toutes les pages dans un document Word, une page par page", "exportWordAll"),
-          () => void this.exportWord(view(), "all")),
-        el("div", { class: "sep" }),
-        action("Raccourcis clavier", "Fiche des raccourcis (F1)", () => showShortcuts()),
-        action("Clés MyScript…", "Clés de la reconnaissance manuscrite", () => void this.editKeys()),
-        action("Sonde stylet (diagnostic)", "Ce que renvoie l'écran : type de pointeur, pression, points",
-          () => this.showProbe()),
-        // En bas, loin des autres actions : un appui de travers au stylet
-        // ne doit pas tomber dessus.
-        el("div", { class: "sep" }),
-        action("Supprimer la page", "La page part à la corbeille (ESEO/.corbeille), « Annuler » la remet en place",
-          () => void view()?.deleteCurrentPage(), "danger"),
+      body.replaceChildren(
+        settingRow("Format", segmented([
+          ["PDF", format === "pdf", () => { format = "pdf"; paint(); }],
+          ["Word (.docx)", format === "word", () => { format = "word"; paint(); }],
+        ]), format === "pdf" ? "Feuilles A4, encre et texte tels quels" : "Titres, listes, équations Word éditables, encre en images"),
+        settingRow("Contenu", segmented([
+          [`Cette page (p. ${view.pageNumber})`, scope === "current", () => { scope = "current"; paint(); }],
+          [`Tout l'intercalaire (${view.pageCount} p.)`, scope === "all", () => { scope = "all"; paint(); }],
+        ]), dividerLabel(view.divider)),
       );
-      settings.append(
-        segment("Affichage", titleOf("Une page à la fois, ou toutes les pages à la suite", "viewMode"), [
-          ["Pages", mode === "pages", () => this.setViewMode("pages")],
-          ["Défilement", mode === "scroll", () => this.setViewMode("scroll")],
-        ]),
-        segment("Fond de page", "Fond de cet intercalaire, sous l'encre ; aussi à l'export PDF, très clair",
-          PAPERS.map((p): [string, boolean, () => unknown] =>
-            [p.label, (view()?.paper ?? "uni") === p.kind, () => view()?.setPaper(p.kind)]),
-          PAPERS.map((p) => p.title)),
-        segment("Encre", "Montrer l'encre telle qu'écrite, ou le rendu converti", [
-          ["Brute", this.renderMode === "ink", () => this.setRenderMode("ink")],
-          ["Propre", this.renderMode === "clean", () => this.setRenderMode("clean")],
-        ]),
-        segment("Conversion de l'écriture", titleOf("Au fil de la plume, ou seulement les zones entourées", "convert"), [
-          ["Auto", this.autoConvert, () => this.setAutoConvert(true)],
-          ["Sur zone", !this.autoConvert, () => this.setAutoConvert(false)],
-        ]),
-        segment("Formules tapées", "Vs = Vz - Vbe, a/b, beta… mises en forme pendant la frappe", [
-          ["Auto", this.settings.autoMath, () => this.setTypedMath(true)],
-          ["Off", !this.settings.autoMath, () => this.setTypedMath(false)],
-        ]),
-        segment("Orthographe", "Souligner les fautes dans le texte tapé", [
-          ["Oui", this.settings.spellcheck, () => this.setSpelling(true)],
-          ["Non", !this.settings.spellcheck, () => this.setSpelling(false)],
-        ]),
-        el("div", { class: "sep" }),
-        segment("Thème", titleOf("Couleurs de l'interface ; Système suit Windows", "theme"),
-          THEME_PREFS.map(({ pref, label }): [string, boolean, () => unknown] =>
-            [label, this.settings.theme === pref, () => this.setTheme(pref)])),
-        segment("Feuille", "Teinte de la feuille à l'écran ; l'export PDF et Word reste blanc, encre noire",
-          SHEET_TONES.map(({ tone, label }): [string, boolean, () => unknown] =>
-            [label, this.settings.sheet === tone, () => this.setSheet(tone)]),
-          SHEET_TONES.map((t) => t.title)),
-      );
-      place();
     };
-    // A droite de la colonne, sans sortir de l'ecran (ni a droite ni en bas).
-    const place = () => {
-      const r = anchor.getBoundingClientRect();
-      const col = anchor.closest(".rail")?.getBoundingClientRect();
-      const left = (col?.right ?? r.right) + 6;
-      panel.style.left = `${Math.round(Math.max(8, Math.min(left, window.innerWidth - panel.offsetWidth - 8)))}px`;
-      const h = panel.offsetHeight;
-      panel.style.top = `${Math.round(Math.max(8, Math.min(r.top, window.innerHeight - h - 8)))}px`;
-    };
-
-    backdrop.addEventListener("pointerdown", (e) => { if (e.target === backdrop) close(); });
-    document.addEventListener("keydown", onKey, true);
-    document.body.append(backdrop);
     paint();
+    const dlg = sheetDialog("Partager", body, { cls: "share-dialog", footer: [go] });
+    go.addEventListener("click", () => {
+      writeJson(SHARE_KEY, { format, scope });
+      dlg.close();
+      if (format === "pdf") void view.exportPdf(scope);
+      else void this.exportWord(view, scope);
+    });
+    go.focus();
+  }
+
+  /**
+   * Reglages (Ctrl+, / Cmd+,) : apparence, ecriture, reconnaissance,
+   * diagnostic, dossiers. Chaque choix s'applique tout de suite.
+   */
+  private async openSettings(): Promise<void> {
+    if (document.querySelector(".settings-dialog")) return;
+    const body = el("div", { class: "settings-body" });
+    const paint = () => {
+      const q = this.queueState;
+      body.replaceChildren(
+        el("h3", { class: "set-h" }, "Apparence"),
+        settingRow("Thème", segmented(THEME_PREFS.map(({ pref, label }) =>
+          [label, this.settings.theme === pref, () => { this.setTheme(pref); paint(); }] as SegChoice)),
+          "Système suit le réglage de l'ordinateur"),
+        settingRow("Feuille", segmented(SHEET_TONES.map(({ tone, label }) =>
+          [label, this.settings.sheet === tone, () => { this.setSheet(tone); paint(); }] as SegChoice)),
+          "À l'écran seulement : l'export PDF et Word reste blanc, encre noire"),
+        el("h3", { class: "set-h" }, "Écriture"),
+        settingRow("Conversion", segmented([
+          ["Au fil de la plume", this.autoConvert, () => { this.setAutoConvert(true); paint(); }],
+          ["Sur zone", !this.autoConvert, () => { this.setAutoConvert(false); paint(); }],
+        ]), `Ce que la reconnaissance transforme en texte et en formules (${keysOf("convert")})`),
+        settingRow("Écriture convertie", segmented([
+          ["Encre", this.renderMode === "ink", () => { this.setRenderMode("ink"); paint(); }],
+          ["Texte", this.renderMode === "clean", () => { this.setRenderMode("clean"); paint(); }],
+        ]), "Montrer l'encre telle qu'écrite, ou le rendu converti"),
+        settingRow("Formules tapées", segmented([
+          ["Auto", this.settings.autoMath, () => { this.setTypedMath(true); paint(); }],
+          ["Non", !this.settings.autoMath, () => { this.setTypedMath(false); paint(); }],
+        ]), "Vs = Vz - Vbe, a/b, beta… mises en forme pendant la frappe"),
+        settingRow("Orthographe", segmented([
+          ["Oui", this.settings.spellcheck, () => { this.setSpelling(true); paint(); }],
+          ["Non", !this.settings.spellcheck, () => { this.setSpelling(false); paint(); }],
+        ]), "Souligner les fautes dans le texte tapé"),
+        settingRow("Écrire au doigt (sans stylet)", segmented([
+          ["Oui", this.touchRole() === "write", () => { this.setFingerWrites(true); paint(); }],
+          ["Non", this.touchRole() !== "write", () => { this.setFingerWrites(false); paint(); }],
+        ]), this.sawPen ? "Un stylet a été vu : le doigt navigue. « Oui » l'oublie jusqu'au prochain contact du stylet."
+          : "Sans stylet, le doigt écrit ; « Non » : il fait défiler la page"),
+        el("h3", { class: "set-h" }, "Reconnaissance manuscrite"),
+        settingRow("Clés MyScript", el("button", {
+          class: q.backendReady ? "" : "primary", onclick: () => { void this.editKeys().then(() => paint()); },
+        }, icon("key", 18), q.backendReady ? "Modifier les clés…" : "Saisir les clés…"),
+        q.backendReady ? "Configurées : la conversion est active" : "Non configurées : l'encre est gardée, rien n'est converti"),
+        el("h3", { class: "set-h" }, "Diagnostic"),
+        settingRow("Sonde stylet", el("button", {
+          onclick: () => { dlg.close(); this.showProbe(); },
+        }, "Ouvrir la sonde"), "Ce que renvoie l'écran : type de pointeur, pression, points"),
+        settingRow("Raccourcis clavier", el("button", { onclick: () => showShortcuts() }, "Afficher", el("kbd", {}, "F1")), ""),
+        el("div", { class: "set-root", title: this.rootLabel }, el("span", { class: "muted" }, "Dossier des cahiers : "), this.rootLabel),
+      );
+    };
+    paint();
+    const dlg = sheetDialog("Réglages", body, { cls: "settings-dialog" });
+    // Dossiers sans page affiches comme matieres : proposes ici, jamais d'office.
+    const nbs = this.homeData?.notebooks ?? (await this.loadHomeData()).notebooks;
+    const clean = await cleanupSection(this.menuHost(), nbs);
+    if (clean && body.isConnected) body.append(el("h3", { class: "set-h" }, "Dossiers"), clean);
+  }
+
+  /** « Écrire au doigt » des Reglages : avec un stylet memorise, « Oui » l'oublie. */
+  private setFingerWrites(on: boolean): void {
+    if (on === (this.touchRole() === "write")) return;
+    if (on && this.sawPen) {
+      this.sawPen = false;
+      this.settings.penSeen = false;
+      saveSettings(this.settings);
+    }
+    this.touchWrites = on;
+    this.paintToolbar();
+    this.paintStatus();
+    toast(on ? "Le doigt écrit (jusqu'au prochain contact du stylet)" : "Le doigt fait défiler la page");
   }
 
   /**
@@ -2357,12 +2384,19 @@ export class App {
   }
 
   private paintToolbar(): void {
-    const old = this.main.querySelector(".rail");
+    const old = this.main.querySelector(".palette");
     if (!old) return;
-    // Le volet d'un bouton du rail ne survit pas au rail qu'il designait.
-    if (this.flyout && old.contains(document.querySelector(".rail .open"))) this.closeFlyout();
-    old.replaceWith(this.buildToolbar());
-    this.paintMath();
+    // Le volet d'un bouton de la palette ne survit pas a la palette.
+    if (this.flyout && old.contains(document.querySelector(".palette .open"))) this.closeFlyout();
+    old.replaceWith(this.buildPalette());
+  }
+
+  /** Groupe deplie dans la barre laterale (intercalaire range, restaure). */
+  private expandGroup(notebook: string, path: string): void {
+    const set = this.expandedGroups.get(notebook) ?? new Set<string>();
+    set.add(path);
+    set.delete(`!${path}`);
+    this.expandedGroups.set(notebook, set);
   }
 
   private async setViewMode(mode: ViewMode): Promise<void> {
@@ -2674,8 +2708,8 @@ export class App {
     const tag = (e.target as HTMLElement)?.tagName;
     const inField = tag === "INPUT" || tag === "TEXTAREA";
     const typing = inDoc || inField;
-    // Une fenetre de dialogue (ou le menu « ⋯ ») garde le clavier.
-    const dialog = !!document.querySelector(".backdrop");
+    // Une fenetre de dialogue, la recherche ou un menu garde le clavier.
+    const dialog = !!document.querySelector(".backdrop, .spot-backdrop, .ctx-menu");
     const view = this.focusedTab()?.view;
 
     // Alt+← : retour a l'endroit d'avant un saut, depuis n'importe quel ecran.
@@ -2725,7 +2759,7 @@ export class App {
     // Menu : Entree reprend, des lettres filtrent les matieres, fleches.
     if (this.screen === "menu" && this.menuKeys?.(e)) { e.preventDefault(); return; }
 
-    if (e.key === "Escape" && (this.screen === "search" || this.screen === "flags" || this.screen === "probe" || this.screen === "review")) {
+    if (e.key === "Escape" && (this.screen === "flags" || this.screen === "probe" || this.screen === "review")) {
       e.preventDefault();
       this.leaveAux();
       return;
@@ -2738,7 +2772,10 @@ export class App {
 
     // Entree ou Espace sur un intercalaire (navigation au clavier) : c'est
     // le bouton qui la prend, pas le texte de la page.
-    if ((e.key === "Enter" || e.key === " ") && (e.target as HTMLElement | null)?.closest?.(".divider-strip button")) return;
+    // Entree, Espace, fleches ou chiffres sur un bouton du chrome (barre
+    // laterale, onglets, palette) : c'est le bouton qui les prend.
+    if ((e.target as HTMLElement | null)?.closest?.(".sidebar, .tabrow, .topbar, .palette")
+      && (e.key === "Enter" || e.key === " " || e.key.startsWith("Arrow") || /^[0-9]$/.test(e.key))) return;
     // Taper n'importe ou : le clavier va au texte de la page, sans cliquer
     // ni inserer de zone. La touche continue sa route vers le texte.
     if (!e.altKey && (e.key.length === 1 || e.key === "Enter" || e.key === "Backspace")) {
@@ -2816,6 +2853,8 @@ export class App {
     switch (cmd) {
       case "menu": void (this.screen === "menu" ? this.backToWork() : this.showMenu()); return true;
       case "search": void this.showSearch(); return true;
+      case "settings": void this.openSettings(); return true;
+      case "sidebar": this.toggleSidebar(); return true;
       case "review": void this.showReview({}); return true;
       case "calc": void this.toggleCalculator(); return true;
       case "solveCalc": {
@@ -2843,12 +2882,7 @@ export class App {
       // Toujours pris, meme en pleine frappe : le repere ne touche pas au
       // texte, et le curseur reste ou il etait (D3).
       case "flag":
-        if (notebook) {
-          view?.addFlag();
-          // Ctrl+F reste « Pas compris » (D3) ; qui cherchait la recherche
-          // apprend ou elle est.
-          appendToToast("flag", "Recherche : Ctrl+K");
-        }
+        if (notebook) view?.addFlag();
         return true;
       case "newDivider": {
         const tab = this.focusedTab();
@@ -2857,7 +2891,6 @@ export class App {
         return true;
       }
       case "convert": this.setAutoConvert(!this.autoConvert); return true;
-      case "finger": this.toggleFinger(); return true;
       case "viewMode": {
         const v = this.focusedTab()?.view;
         if (v) void this.setViewMode(v.mode === "scroll" ? "pages" : "scroll")
@@ -2866,7 +2899,7 @@ export class App {
       }
       case "newPage": if (notebook) void view?.newPage(); return true;
       case "insertPage": if (notebook) void view?.newPage(true); return true;
-      case "goto": if (notebook) void this.showPageList(view, true); return true;
+      case "goto": if (notebook) void this.focusPageList(); return true;
       case "nextPage": if (notebook) void view?.next(); return true;
       case "prevPage": if (notebook) void view?.prev(); return true;
       case "nextDivider": if (notebook) void this.switchDividerBy(1); return true;
@@ -2915,29 +2948,22 @@ export class App {
   }
 
   /**
-   * Liste des pages (un appui sur « p. 4 / 12 », ou Ctrl+G) : numero, date
-   * et premiere ligne de chaque page, et un champ pour taper un numero.
-   * 30 pages ne coutent plus 30 clics.
+   * Liste des pages (Ctrl+G, un appui sur « p. 4 / 12 » ou sur le titre) :
+   * celle de la barre laterale, ouverte au besoin, le clavier sur la page
+   * courante. Fleches, Entree ; un numero tape y va ; Echap rend la page.
    */
-  private async showPageList(target?: PageView | null, typeNumber = false): Promise<void> {
-    const view = target ?? this.focusedTab()?.view;
-    if (!view || this.screen !== "notebook" || document.querySelector(".backdrop")) return;
-    // Ce qu'on vient d'ecrire doit apparaitre dans la liste.
-    await view.flush();
-    const pages = (await this.repo.scanDivider(view.notebook, view.divider)) ?? [];
-    const nums = pages.map((p) => p.n);
-    const n = await pageListDialog({
-      title: dividerLabel(view.divider),
-      current: view.pageNumber,
-      typeNumber,
-      pages: pages.map((p) => ({
-        n: p.n, day: dayLabel(p.index?.created), line: p.index?.firstLine ?? "", title: !!p.index?.title, unreadable: !p.index,
-      })),
-      parse: (input) => parsePageInput(input, nums),
-    });
-    if (n == null || n === view.pageNumber) return;
-    this.noteJump();
-    await view.goTo(n);
+  private async focusPageList(): Promise<void> {
+    if (this.screen !== "notebook" || document.querySelector(".backdrop")) return;
+    if (!this.sidebarShown()) {
+      if (this.sideMode() === "docked") { this.settings.sidebar = true; saveSettings(this.settings); }
+      else this.overlayOpen = true;
+      this.paintShell();
+      this.paintTopbar();
+      if (this.calculator) this.placeCalculator(this.calculator);
+    }
+    await this.focusedTab()?.view?.flush();
+    await this.paintSidebar();
+    focusPageList(this.sideHost.querySelector(".nb-side"));
   }
 
   /** Ctrl+Maj+Pg↓ / Pg↑ : intercalaire suivant ou precedent du cahier. */
@@ -3007,29 +3033,6 @@ export class App {
     setSpellcheck(on);
     saveSettings(this.settings);
     toast(on ? "Correcteur orthographique activé" : "Correcteur orthographique coupé");
-  }
-
-  /**
-   * Ctrl+D. Sans stylet : le doigt ecrit ou navigue. Avec un stylet
-   * memorise : l'oublier, sinon un stylet a plat ou oublie laisserait le
-   * doigt sans moyen d'ecrire. Le prochain contact du stylet remet la
-   * separation.
-   */
-  private toggleFinger(): void {
-    if (this.sawPen) {
-      this.sawPen = false;
-      this.touchWrites = true;
-      this.settings.penSeen = false;
-      saveSettings(this.settings);
-      this.paintToolbar();
-      this.paintStatus();
-      toast("Stylet oublié : le doigt écrit jusqu'au prochain contact du stylet");
-      return;
-    }
-    this.touchWrites = !this.touchWrites;
-    this.paintToolbar();
-    this.paintStatus();
-    toast(this.touchWrites ? "Le doigt écrit" : "Le doigt fait défiler la page");
   }
 
   /** Raccourcis Alt. Renvoie true si la touche a ete prise. */
@@ -3227,8 +3230,11 @@ export class App {
     const st = this.statusNow();
     const b = this.statusBtn;
     b.className = `status-btn ${st.level}`;
+    // Rien a l'ecran quand tout va bien : la pastille n'apparait qu'en cas de probleme.
+    b.hidden = st.level === "ok";
     b.setAttribute("aria-label", `État : ${st.title}`);
-    b.dataset.tip = st.level === "ok" ? "Tout va bien : détail" : `${st.title} : détail`;
+    b.dataset.tip = `${st.title} : détail`;
+    b.dataset.tipSide = "bottom";
     b.replaceChildren(el("span", { class: "led", "aria-hidden": "true" }));
     if (st.short) b.append(el("span", { class: "status-text" }, st.short));
     // Volet ouvert : il suit l'etat en direct.
@@ -3275,7 +3281,7 @@ export class App {
     this.applyLook();
   }
 
-  private setSheet(tone: SheetTone): void {
+  private setSheet(tone: SheetPref): void {
     this.settings.sheet = tone;
     saveSettings(this.settings);
     this.applyLook();
@@ -3473,12 +3479,12 @@ export class App {
    * Faite apres coup : la bande s'affiche sans attendre le disque.
    */
   private paintConflictBadges(): void {
-    const bar = this.main.querySelector<HTMLElement>(".divider-strip");
-    const dir = bar?.dataset.notebook;
-    if (!bar || !dir) return;
+    const bar = this.sideHost.querySelector<HTMLElement>(".nb-side");
+    const dir = this.focusedTab()?.notebook;
+    if (!bar || !dir || this.screen !== "notebook") return;
     void this.repo.countConflicts(dir).then((counts) => {
       if (!bar.isConnected) return;
-      for (const node of bar.querySelectorAll<HTMLElement>(".divider-tab[data-divider]")) {
+      for (const node of bar.querySelectorAll<HTMLElement>(".sb-div[data-divider]")) {
         node.querySelector(".conflict-dot")?.remove();
         // Un groupe compte aussi les copies des intercalaires qu'il contient.
         const path = node.dataset.divider!;
@@ -3544,4 +3550,46 @@ function localStore(): Storage | null {
 
 function writeJson(key: string, value: unknown): void {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* stockage indisponible */ }
+}
+
+/* ---------------- petits elements des dialogues ---------------- */
+
+type SegChoice = [string, boolean, () => void];
+
+/** Choix segmente (deux ou trois options), l'actif en surbrillance. */
+function segmented(choices: SegChoice[]): HTMLElement {
+  return el("div", { class: `seg${choices.length > 4 ? " wrap" : ""}`, role: "group" },
+    ...choices.map(([label, on, run]) => el("button", {
+      class: on ? "on" : "", "aria-pressed": String(on), onclick: () => { if (!on) run(); },
+    }, label)));
+}
+
+/** Ligne de reglage : libelle et aide a gauche, controle a droite. */
+function settingRow(label: string, control: HTMLElement, hint: string): HTMLElement {
+  return el("div", { class: "set-row" },
+    el("div", { class: "set-label" }, el("span", {}, label), hint ? el("span", { class: "set-hint" }, hint) : null),
+    el("div", { class: "set-control" }, control));
+}
+
+/** Rectangle du curseur du texte de la page, s'il y en a un a l'ecran. */
+function caretRect(): DOMRect | null {
+  const sel = document.getSelection();
+  if (!sel?.rangeCount) return null;
+  const node = sel.anchorNode;
+  const host = node instanceof Element ? node : node?.parentElement;
+  if (!host?.closest(".text-doc")) return null;
+  const r = sel.getRangeAt(0).getBoundingClientRect();
+  return r.width || r.height ? r : null;
+}
+
+/** Dernier choix du dialogue Partager, sur cette machine. */
+const SHARE_KEY = "cahiers.share.v1";
+
+/**
+ * Module « versions de la page » du lot fiabilite (src/ui/versions.ts) :
+ * present a la compilation ou non. import.meta.glob rend {} s'il manque.
+ */
+const VERSION_LOADERS = import.meta.glob("./versions.ts");
+function versionsModule(): (() => Promise<unknown>) | null {
+  return Object.values(VERSION_LOADERS)[0] ?? null;
 }

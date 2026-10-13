@@ -1,27 +1,70 @@
 /**
- * Disposition du chrome de l'ecran cahier (logique pure) : volet du ruban
- * Maths et placement des messages ephemeres (toasts).
+ * Disposition du chrome (logique pure) : barre laterale, calculatrice,
+ * palette d'outils, volet des formules et placement des messages
+ * ephemeres (toasts).
  */
 
-/* ---------------- ruban Maths ---------------- */
+/* ---------------- barre laterale ---------------- */
+
+/** Largeur a partir de laquelle la barre laterale pousse la page (paysage). */
+export const SIDEBAR_DOCK_MIN = 1000;
+/** En dessous : telephone, navigation en pile (liste plein ecran, puis la page). */
+export const PHONE_MAX = 600;
+export const SIDEBAR_W = 248;
+
+export type SidebarMode = "docked" | "overlay" | "stack";
 
 /**
- * Largeur a partir de laquelle le ruban epingle devient une colonne a cote
- * du rail : la feuille garde alors toute sa largeur de lecture.
+ * Barre laterale facon Notes : a cote de la page sur un ecran large,
+ * en surimpression sur une tablette en portrait (elle se referme apres un
+ * choix), plein ecran au telephone (liste, puis la page : une pile).
  */
-export const MATH_DOCK_MIN = 1600;
+export function sidebarMode(width: number): SidebarMode {
+  if (width >= SIDEBAR_DOCK_MIN) return "docked";
+  return width >= PHONE_MAX ? "overlay" : "stack";
+}
 
-export type MathPanelMode = "closed" | "float" | "column";
+/* ---------------- calculatrice ---------------- */
+
+/** Largeur du panneau inspecteur de la calculatrice. */
+export const CALC_PANEL_W = 360;
+/** Largeur de feuille gardee a cote du panneau (sinon elle flotte). */
+const CALC_MIN_STAGE = 560;
+
+export type CalcPlacement = "panel" | "float" | "sheet";
 
 /**
- * Ou montrer le ruban Maths. Ferme par defaut ; ouvert d'un appui en volet
- * flottant par-dessus la marge (ferme par Echap ou un appui a cote) ;
- * epingle, il reste ouvert, en colonne si l'ecran est assez large et qu'il
- * n'y a pas de split (la colonne prendrait la place d'un panneau).
+ * Ou poser la calculatrice : panneau a droite qui pousse la page sans la
+ * couvrir (inspecteur) ; fenetre flottante si l'utilisateur l'a detachee
+ * ou si la page n'aurait plus sa largeur lisible ; au telephone, en bas
+ * sur toute la largeur.
  */
-export function mathPanelMode(o: { open: boolean; pinned: boolean; width: number; split: boolean }): MathPanelMode {
-  if (o.pinned) return o.width >= MATH_DOCK_MIN && !o.split ? "column" : "float";
-  return o.open ? "float" : "closed";
+export function calcPlacement(o: { width: number; stage: number; detached: boolean }): CalcPlacement {
+  if (o.width < PHONE_MAX) return "sheet";
+  if (o.detached) return "float";
+  return o.stage - CALC_PANEL_W >= CALC_MIN_STAGE ? "panel" : "float";
+}
+
+/* ---------------- palette d'outils ---------------- */
+
+/** Sous cette largeur de zone, les six pastilles se replient en un bouton. */
+export const PALETTE_COMPACT_MAX = 600;
+
+export function paletteCompact(stageWidth: number): boolean {
+  return stageWidth < PALETTE_COMPACT_MAX;
+}
+
+/* ---------------- volet des formules (Σ) ---------------- */
+
+export type MathPanelMode = "closed" | "popover";
+
+/**
+ * Volet des formules : popover ancre sous Σ dans la barre du haut. Ferme
+ * par defaut ; ouvert d'un appui (Echap ou un appui a cote le ferme) ;
+ * epingle, il reste ouvert.
+ */
+export function mathPanelMode(o: { open: boolean; pinned: boolean }): MathPanelMode {
+  return o.open || o.pinned ? "popover" : "closed";
 }
 
 /* ---------------- messages ephemeres ---------------- */
