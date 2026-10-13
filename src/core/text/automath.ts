@@ -403,7 +403,9 @@ class Parser {
       // une lettre grecque ("2 R", "beta Ru"). Dans une formule deja
       // commencee, aussi entre deux grandeurs ("R I", "L C"), devant une
       // fonction ("Vm sin(wt)") ou une parenthese qui calcule ("Vz (1 + x)").
-      const startsAtom = t && ((t.t === "op" && t.s === "(") || t.t === "id" || t.t === "num");
+      // "5[-cos(u)]_0^t" : crochet d'evaluation colle.
+      const startsAtom = t && ((t.t === "op" && t.s === "(") || t.t === "id" || t.t === "num"
+        || (!sp && t.t === "other" && t.s === "["));
       if (!startsAtom) break;
       // "dx" d'une integrale : la fin du corps, pas un facteur.
       if (this.inIntegral > 0 && t.t === "id" && DIFF.test(t.s)) break;
@@ -415,7 +417,7 @@ class Parser {
       const rhs = this.unary();
       if (!rhs || (parenTry && !(rhs.group !== undefined && rhs.ops >= 1))) { this.i = save; this.seenOp = seen; break; }
       // f(x), v(t) : pas d'espace devant une parenthese collee.
-      const glue = !sp && t.t === "op" ? "" : "\\,";
+      const glue = !sp && (t.t === "op" || t.t === "other") ? "" : "\\,";
       cur = { tex: `${cur.tex}${glue}${rhs.tex}`, ops: cur.ops + rhs.ops, vars: cur.vars + rhs.vars };
       continue;
     }
@@ -695,7 +697,7 @@ class Parser {
       this.i++;
       return { tex: identTex(t.s), ops: 0, vars: 1 };
     }
-    if (t.t === "other" && (t.s === "[" || t.s === "]")) return this.interval();
+    if (t.t === "other" && (t.s === "[" || t.s === "]")) return this.interval() ?? (t.s === "[" ? this.evalBracket() : null);
     if (t.t === "op" && t.s === "<") return this.mean();
     if (t.t === "op" && t.s === "(") {
       const m = this.matrix();
@@ -746,6 +748,32 @@ class Parser {
     }
     this.seenOp = true;
     return { tex, ops: inner.ops + 1, vars: inner.vars };
+  }
+
+  /**
+   * Crochet d'evaluation (primitive entre deux bornes) : "[-cos(u)]_0^t",
+   * "[x^2/2]_0^(a+1)" -> \left[ ... \right]_{0}^{t}. Les deux bornes sont
+   * obligatoires : "[note]" reste du texte.
+   */
+  private evalBracket(): Node | null {
+    const save = this.i, seen = this.seenOp;
+    const fail = () => { this.i = save; this.seenOp = seen; return null; };
+    this.i++;
+    const inner = this.relation();
+    if (!inner) return fail();
+    this.skipSp();
+    const close = this.toks[this.i];
+    if (close?.t !== "other" || close.s !== "]") return fail();
+    this.i++;
+    if (this.toks[this.i]?.s !== "_") return fail();
+    this.i++;
+    const lo = this.script();
+    if (lo === null || this.toks[this.i]?.s !== "^") return fail();
+    this.i++;
+    const hi = this.script();
+    if (hi === null) return fail();
+    this.seenOp = true;
+    return { tex: `\\left[${inner.tex}\\right]_{${lo}}^{${hi}}`, ops: inner.ops + 1, vars: Math.max(1, inner.vars) };
   }
 
   /**

@@ -530,3 +530,18 @@ describe("sortie MathLive relue pour KaTeX", () => {
     expect(cleanMathLive("\\sqrt{(a)+(b)}")).toBe("\\sqrt{(a)+(b)}");
   });
 });
+
+describe("crochet d'evaluation [F]_a^b", () => {
+  const latex = (s: string) => findFormulas(s, "final").map((f) => f.latex);
+  it("bornes en bas et en haut du crochet, facteur colle compris", () => {
+    expect(latex("5[-cos(u)]_0^t = 5(-cos(t) + 1)")).toEqual([
+      "5\\left[-\\cos\\left(u\\right)\\right]_{0}^{t} = 5\\left(-\\cos\\left(t\\right) + 1\\right)",
+    ]);
+    expect(latex("[x^2]_0^1 = 1")).toEqual(["\\left[x^{2}\\right]_{0}^{1} = 1"]);
+    expect(latex("[F(x)]_a^(b+1)")).toEqual(["\\left[F\\left(x\\right)\\right]_{a}^{b + 1}"]);
+  });
+  it("sans les deux bornes : texte ou intervalle comme avant", () => {
+    expect(latex("voir [note] et x = 2")).toEqual(["x = 2"]);
+    expect(latex("x dans [0, 1]")).toEqual(["\\left[ 0,\\,1 \\right]"]);
+  });
+});
