@@ -552,10 +552,17 @@ function detectSymbols(equations: string[]): string[] {
 /* Detail de la resolution et resolution litterale                     */
 /* ------------------------------------------------------------------ */
 
+/** Formule dans une ligne du detail (format du texte de la page : $...$). */
+const $ = (tex: string): string => `$${tex.replace(/\$/g, "\\$")}$`;
+
 function texOf(n: MathNode | string): string {
   const node = typeof n === "string" ? math.parse(n) : n;
   // mathjs ecrit m, C, V... en unites (\mathrm) : ce sont des grandeurs.
-  return node.toTex({ parenthesis: "auto", implicit: "hide" }).replace(/\\mathrm\{([A-Za-z])\}/g, "$1").replace(/~/g, "\\,");
+  return node.toTex({ parenthesis: "auto", implicit: "hide" }).replace(/\\mathrm\{([A-Za-z])\}/g, "$1").replace(/~/g, "\\,")
+    // « p(p+2) » : pas de point de produit contre une parenthese.
+    .replace(/\\cdot\s*(?=\\left\()/g, "").replace(/(\\right\))\s*\\cdot/g, "$1")
+    // « μ p » : un petit espace entre deux lettres, pas de point.
+    .replace(/\\cdot(?=\s*(?:[A-Za-z]|\\[a-z]+\b(?!\{)))/g, "\\,");
 }
 
 /** Membres de l'equation en LaTeX : « 2x + 3 = 13 ». */
@@ -582,37 +589,60 @@ function polyLatex(coeffs: number[], v: string): string {
 
 const par = (x: number) => (x < 0 ? `\\left(${fmt(x)}\\right)` : fmt(x));
 
+/**
+ * Detail redige comme au tableau, une ligne par etape, au format du texte
+ * de la page (phrases + $formules$) : il se pose tel quel dans le cahier.
+ */
 function stepsOf(equation: string, r: SolveOutcome): string[] {
-  const v = texOf(r.variable!);
-  const steps = [equationLatex(equation)];
+  const v = greekTex(texOf(r.variable!));
+  const steps = [`On part de l'équation : ${$(greekTex(equationLatex(equation)))}`];
   const c = r.coefficients;
+  const rootTex = (x: Root) => x.latex ?? x.text.replace(/i$/, "\\,i");
   if (c && r.degree === 1) {
     const [c0, c1] = c;
-    steps.push(`\\iff ${polyLatex(c, r.variable!)} = 0`);
-    if (Math.abs(c0) > 1e-12) steps.push(`\\iff ${polyLatex([0, c1], r.variable!)} = ${fmt(-c0)}`);
+    steps.push(`On regroupe tout dans le membre de gauche : ${$(`${polyLatex(c, r.variable!)} = 0`)}`);
+    if (Math.abs(c0) > 1e-12) steps.push(`On isole le terme en ${$(v)} : ${$(`${polyLatex([0, c1], r.variable!)} = ${fmt(-c0)}`)}`);
     const x = r.roots?.[0];
-    if (x) steps.push(`\\iff ${v} = ${Math.abs(c1 - 1) > 1e-12 ? `\\frac{${fmt(-c0)}}{${fmt(c1)}} = ` : ""}${x.latex ?? x.text}`);
+    if (x) {
+      steps.push(Math.abs(c1 - 1) > 1e-12
+        ? `On divise par ${$(fmt(c1))} : ${$(`${v} = \\frac{${fmt(-c0)}}{${fmt(c1)}} = ${rootTex(x)}`)}`
+        : `D'où ${$(`${v} = ${rootTex(x)}`)}`);
+      steps.push(`**Conclusion :** ${$(`S = \\left\\{ ${rootTex(x)} \\right\\}`)}`);
+    }
     return steps;
   }
   if (c && r.degree === 2) {
     const [c0, b, a] = c;
-    steps.push(`\\iff ${polyLatex(c, r.variable!)} = 0`);
-    steps.push(`a = ${fmt(a)},\\; b = ${fmt(b)},\\; c = ${fmt(c0)}`);
-    steps.push(`\\Delta = b^{2} - 4ac = ${par(b)}^{2} - 4 \\times ${par(a)} \\times ${par(c0)} = ${fmt(b * b - 4 * a * c0)}`);
     const d = b * b - 4 * a * c0;
-    if (d > 1e-12) steps.push(`\\Delta > 0 : ${v}_{1,2} = \\frac{-b \\pm \\sqrt{\\Delta}}{2a} = \\frac{${fmt(-b)} \\pm \\sqrt{${fmt(d)}}}{${fmt(2 * a)}}`);
-    else if (d < -1e-12) steps.push(`\\Delta < 0 : ${v}_{1,2} = \\frac{-b \\pm i\\sqrt{-\\Delta}}{2a} = \\frac{${fmt(-b)} \\pm i\\sqrt{${fmt(-d)}}}{${fmt(2 * a)}}`);
-    else steps.push(`\\Delta = 0 : ${v}_{0} = \\frac{-b}{2a} = \\frac{${fmt(-b)}}{${fmt(2 * a)}}`);
+    steps.push(`On regroupe tout dans le membre de gauche : ${$(`${polyLatex(c, r.variable!)} = 0`)}`);
+    steps.push(`C'est une équation du second degré ${$(`a${v}^{2} + b${v} + c = 0`)} avec ${$(`a = ${fmt(a)},\\; b = ${fmt(b)},\\; c = ${fmt(c0)}`)}.`);
+    steps.push(`On calcule le discriminant : ${$(`\\Delta = b^{2} - 4ac = ${par(b)}^{2} - 4 \\times ${par(a)} \\times ${par(c0)} = ${fmt(d)}`)}`);
+    const roots = r.roots ?? [];
+    if (d > 1e-12 && roots.length === 2) {
+      steps.push(`${$("\\Delta > 0")} : deux racines réelles distinctes.`);
+      steps.push($(`${v}_{1} = \\frac{-b - \\sqrt{\\Delta}}{2a} = \\frac{${fmt(-b)} - \\sqrt{${fmt(d)}}}{${fmt(2 * a)}} = ${rootTex(roots[0])}`));
+      steps.push($(`${v}_{2} = \\frac{-b + \\sqrt{\\Delta}}{2a} = \\frac{${fmt(-b)} + \\sqrt{${fmt(d)}}}{${fmt(2 * a)}} = ${rootTex(roots[1])}`));
+    } else if (Math.abs(d) <= 1e-12 && roots.length) {
+      steps.push(`${$("\\Delta = 0")} : une racine double.`);
+      steps.push($(`${v}_{0} = \\frac{-b}{2a} = \\frac{${fmt(-b)}}{${fmt(2 * a)}} = ${rootTex(roots[0])}`));
+    } else if (roots.length === 2) {
+      steps.push(`${$("\\Delta < 0")} : deux racines complexes conjuguées (${$(`\\sqrt{\\Delta} = i\\sqrt{${fmt(-d)}}`)}).`);
+      steps.push($(`${v}_{1,2} = \\frac{-b \\pm i\\sqrt{-\\Delta}}{2a} = \\frac{${fmt(-b)} \\pm i\\sqrt{${fmt(-d)}}}{${fmt(2 * a)}}`));
+      steps.push($(`${v}_{1} = ${rootTex(roots[0])},\\quad ${v}_{2} = ${rootTex(roots[1])}`));
+    }
+    steps.push(`**Conclusion :** ${$(`S = \\left\\{ ${roots.map(rootTex).join(" ;\\, ")} \\right\\}`)}`);
     return steps;
   }
   if (c && r.degree && r.degree > 2) {
-    steps.push(`\\iff ${polyLatex(c, r.variable!)} = 0`);
-    steps.push(`\\text{Polynôme de degré ${r.degree} : racines par la méthode de Durand-Kerner}`);
+    steps.push(`On regroupe tout dans le membre de gauche : ${$(`${polyLatex(c, r.variable!)} = 0`)}`);
+    steps.push(`Polynôme de degré ${r.degree} : racines calculées numériquement (méthode de Durand-Kerner).`);
+    const roots = r.roots ?? [];
+    if (roots.length) steps.push(`**Conclusion :** ${$(`S = \\left\\{ ${roots.map(rootTex).join(" ;\\, ")} \\right\\}`)}`);
     return steps;
   }
   if (r.method === "numerique") {
-    steps.push(`\\iff ${texOf(math.simplify(toZeroForm(equation)))} = 0`);
-    steps.push("\\text{Pas de forme polynomiale : racines cherchées par balayage puis dichotomie sur } [-100, 100]");
+    steps.push(`On regroupe tout dans le membre de gauche : ${$(`${greekTex(texOf(math.simplify(toZeroForm(equation))))} = 0`)}`);
+    steps.push(`Pas de forme polynomiale : on cherche les racines numériquement sur ${$("[-100 ;\\, 100]")} (balayage puis dichotomie).`);
   }
   return steps;
 }
@@ -650,12 +680,12 @@ function symbolicSolve(equation: string, zero: string, v: string): SolveOutcome 
     // a v^n = -b, signe tourne pour que a ne commence pas par « - ».
     let lhsA = a, rhs = math.simplify(`-(${b.toString()})`);
     if (lhsA.toString().startsWith("-")) { lhsA = math.simplify(`-(${a.toString()})`); rhs = math.simplify(b.toString()); }
-    const steps = [equationLatex(equation), `\\iff ${texOf(f)} = 0`];
+    const steps = [`On part de l'équation : ${$(greekTex(equationLatex(equation)))}`, `On isole ${$(vt)} : on passe tout d'un côté, ${$(`${greekTex(texOf(f))} = 0`)}`];
     const vn = n === 1 ? vt : n === 0.5 ? `\\sqrt{${vt}}` : `${vt}^{${n === -0.5 ? "-\\frac{1}{2}" : n}}`;
     const aOne = lhsA.toString() === "1";
-    if (!aOne) steps.push(`\\iff ${texOf(lhsA)} \\cdot ${vn} = ${texOf(rhs)}`);
+    if (!aOne) steps.push(`On garde le terme en ${$(vt)} à gauche : ${$(`${texOf(lhsA)} \\cdot ${vn} = ${texOf(rhs)}`)}`);
     const inside = math.simplify(`(${rhs.toString()}) / (${lhsA.toString()})`);
-    if (n !== 1) steps.push(`\\iff ${vn} = ${texOf(inside)}`);
+    if (n !== 1) steps.push(`On divise par ${$(texOf(lhsA))} : ${$(`${vn} = ${texOf(inside)}`)}`);
     let sol: MathNode, latex: string, text: string;
     if (n === 2) {
       sol = math.parse(`sqrt(${inside.toString()})`);
@@ -667,7 +697,8 @@ function symbolicSolve(equation: string, zero: string, v: string): SolveOutcome 
       text = sol.toString({ implicit: "hide" });
       if (n === 4) { latex = `\\pm ${latex}`; text = `±${text}`; }
     }
-    steps.push(`\\iff ${vt} = ${latex}`);
+    steps.push(n === 1 ? (aOne ? `D'où ${$(`${vt} = ${latex}`)}` : `On divise par ${$(texOf(lhsA))} : ${$(`${vt} = ${latex}`)}`) : `On prend la racine : ${$(`${vt} = ${latex}`)}`);
+    steps.push(`**Conclusion :** ${$(`${vt} = ${latex}`)}`);
     return { ok: true, variable: v, degree: Math.abs(n) >= 1 ? Math.abs(n) : 1, method: "litterale", roots: [{ text, value: NaN, latex }], steps };
   }
   return fail(`Pas de résolution littérale simple pour ${v} (donne des valeurs aux autres lettres)`);
@@ -685,14 +716,20 @@ export function implicitProducts(src: string): string {
   return src.split(/((?<![=<>!])=(?!=))/).map((part) => {
     if (part === "=" || !part.trim()) return part;
     try {
-      const node = math.parse(part).transform((n: any) => {
+      // Produits tous explicites : « p * (p + 2) * (p ^ 2 + 1) » se relit
+      // pareil (« p (p+2) » serait un appel de fonction) et sans parentheses
+      // en trop autour de « p * (p + 2) ».
+      const fix = (n: any): any => {
         if (n.type === "FunctionNode" && n.fn?.type === "SymbolNode" && typeof (math as any)[n.fn.name] !== "function"
             && n.args.length === 1 && n.args[0].type !== "SymbolNode") {
-          return new math.OperatorNode("*", "multiply", [new math.SymbolNode(n.fn.name), new math.ParenthesisNode(n.args[0])]);
+          return new math.OperatorNode("*", "multiply", [new math.SymbolNode(n.fn.name), new math.ParenthesisNode(fix(n.args[0]))]);
         }
-        return n;
-      });
-      return node.toString();
+        if (n.type === "OperatorNode" && n.fn === "multiply" && n.implicit) {
+          return new math.OperatorNode("*", "multiply", n.args.map(fix));
+        }
+        return n.map((c: any) => fix(c));
+      };
+      return fix(math.parse(part)).toString();
     } catch {
       return part;
     }
@@ -786,27 +823,49 @@ function identify(equation: string): SolveOutcome | null {
     if (!ok) continue;
     const xt = greekTex(texOf(x));
     const values = K.map((k, i) => ({ name: k, ...niceNumber(sol[i]) }));
-    const steps = [`\\text{Identification, pour tout } ${xt} :\\; ${greekTex(texOf(L))} = ${greekTex(texOf(R))}`];
+    const Ktex = K.map((k) => greekTex(texOf(k)));
+    const Lt = greekTex(texOf(L)), Rt = greekTex(texOf(R));
+    const steps = [`On cherche ${$(Ktex.join(",\\, "))} tels que, pour tout ${$(xt)} :`, $(`${Lt} = ${Rt}`)];
+    // Denominateur du premier membre, factorise : les poles se lisent.
+    const fac = factorFraction(L, x);
+    if (fac && fac.changed) steps.push(`On factorise le dénominateur : ${$(`${greekTex(texOf(fac.den))} = ${fac.factoredTex}`)}`);
+    const viaPole = new Set<number>();
     K.forEach((k, i) => {
-      const kt = greekTex(texOf(k));
-      let line = `${kt} = ${values[i].latex} \\quad \\text{(identification des coefficients)}`;
+      if (!fac) return;
       try {
-        // Terme k/D(x), D du premier degre : on multiplie par D et on prend x au pole.
-        // Le terme de k dans R (somme) : k fois c(x) ; D = 1/c.
+        // Terme k/(x - a) : on multiplie par (x - a), les autres termes
+        // s'annulent en x = a, reste k.
         const term = sumTerms(math.parse(R)).find((t) => depends(t.node, k));
-        if (!term) throw new Error("terme");
-        const c1 = term.node.transform((n: any) => (n.type === "SymbolNode" && n.name === k ? new math.ConstantNode(term.sign) : n));
+        if (!term) return;
+        const c1 = term.node.transform((n: any) => (n.type === "SymbolNode" && K.includes(n.name)
+          ? new math.ConstantNode(n.name === k ? term.sign : 0) : n));
         const D = math.simplify(`1 / (${c1.toString()})`);
         const c = polynomialCoefficients(D.toString(), x, 1);
-        if (c.length === 2 && Math.abs(c[1]) > 1e-12) {
-          const a = niceNumber(-c[0] / c[1]);
-          const dt = greekTex(texOf(D));
-          const dp = /[+-]/.test(dt.replace(/^-/, "")) ? `\\left(${dt}\\right)` : dt;
-          line = `${kt} = \\left[ ${dp} \\cdot ${greekTex(texOf(L))} \\right]_{${xt} = ${a.latex}} = ${values[i].latex}`;
-        }
-      } catch { /* identification seule */ }
-      steps.push(line);
+        if (c.length !== 2 || Math.abs(c[1]) < 1e-12) return;
+        const a = -c[0] / c[1];
+        const pole = fac.factors.findIndex((f) => f.root !== undefined && Math.abs(f.root - a) < 1e-9 && f.mult === 1);
+        if (pole < 0) return;
+        const an = niceNumber(a);
+        const dt = fac.factors[pole].tex;
+        const others = fac.factors.filter((_, j) => j !== pole);
+        const scale = c[1];
+        const denOthers = `${fac.lc * scale !== 1 ? fmt(fac.lc * scale) : ""}${others.map((f) => f.tex + (f.mult > 1 ? `^{${f.mult}}` : "")).join("")}` || "1";
+        const numAt = Number(fac.num.compile().evaluate({ [x]: a }));
+        const valsAt = others.map((f) => `\\left(${fmt(f.at(a))}\\right)${f.mult > 1 ? `^{${f.mult}}` : ""}`).join("");
+        const lcs = fac.lc * scale !== 1 ? `${fmt(fac.lc * scale)} \\times ` : "";
+        steps.push(`**Calcul de ${$(Ktex[i])}** (pôle simple ${$(`${xt} = ${an.latex}`)}) : on multiplie les deux membres par ${$(scale === 1 ? dt : `${fmt(scale)}${dt}`)}, puis on prend ${$(`${xt} = ${an.latex}`)}, les autres termes s'annulent :`);
+        steps.push($(`${Ktex[i]} = \\left[ \\frac{${greekTex(texOf(fac.num))}}{${denOthers}} \\right]_{${xt} = ${an.latex}} = \\frac{${fmt(numAt)}}{${lcs}${valsAt || "1"}} = ${values[i].latex}`));
+        viaPole.add(i);
+      } catch { /* identification */ }
     });
+    const rest = K.map((_, i) => i).filter((i) => !viaPole.has(i));
+    if (rest.length) {
+      try { steps.push(...coefficientSteps(L, R, x, K, values, viaPole)); } catch {
+        for (const i of rest) steps.push(`${$(`${Ktex[i]} = ${values[i].latex}`)} (identification des coefficients)`);
+      }
+    }
+    steps.push("**Conclusion :**");
+    steps.push($(`${Lt} = ${decompositionTex(R, K, values.map((v) => Number(eval1(v.text))), x)}`));
     return { ok: true, variable: x, method: "exacte", roots: [], values: values.map((v) => ({ ...v, latex: v.latex })), steps };
   }
   return null;
@@ -823,4 +882,157 @@ function sumTerms(n: MathNode, sign = 1, out: { sign: number; node: MathNode }[]
   if (x.type === "OperatorNode" && x.op === "-" && x.args.length === 1) return sumTerms(x.args[0], -sign, out);
   out.push({ sign, node: n });
   return out;
+}
+
+/**
+ * Detail par identification des coefficients : meme denominateur (celui
+ * du premier membre), le numerateur ecrit comme somme des inconnues fois
+ * des polynomes, puis une equation par puissance de x. Les polynomes sont
+ * obtenus par valeurs (interpolation), robuste quelle que soit l'ecriture.
+ */
+function coefficientSteps(L: string, R: string, x: string, K: string[], values: { text: string; latex: string }[], known: Set<number>): string[] {
+  const ln = strip0(math.parse(L));
+  const isFrac = ln.type === "OperatorNode" && ln.op === "/";
+  const num = isFrac ? ln.args[0] : ln, den = isFrac ? ln.args[1] : new math.ConstantNode(1);
+  const deg = Math.max(polynomialCoefficients(den.toString(), x, 12).length - 1, 0);
+  const numC = polynomialCoefficients(num.toString(), x, 12);
+  const denF = den.compile(), rF = math.parse(R).compile();
+  const zero = Object.fromEntries(K.map((k) => [k, 0]));
+  // Degre des polynomes des inconnues : au plus celui du denominateur, ou du premier membre (identite polynomiale).
+  const top = Math.max(deg, numC.length - 1, 4);
+  const xs = Array.from({ length: top + 1 }, (_, i) => 0.37 + 1.13 * i);
+  const fit = (f: (t: number) => number) => {
+    const V = xs.map((t) => Array.from({ length: top + 1 }, (_, j) => t ** j));
+    const c = gauss(V, xs.map(f));
+    if (!c) throw new Error("interpolation");
+    const r = c.map((v) => (Math.abs(v - Math.round(v)) < 1e-6 ? Math.round(v) : v));
+    while (r.length > 1 && Math.abs(r[r.length - 1]) < 1e-9) r.pop();
+    return r;
+  };
+  const polys = K.map((k) => fit((t) => Number(denF.evaluate({ [x]: t }))
+    * (Number(rF.evaluate({ ...zero, [k]: 1, [x]: t })) - Number(rF.evaluate({ ...zero, [x]: t })))));
+  const free = fit((t) => Number(denF.evaluate({ [x]: t })) * Number(rF.evaluate({ ...zero, [x]: t })));
+  const xt = greekTex(texOf(x));
+  const names = K.map((k) => greekTex(texOf(k)));
+  const polyTex = (c: number[]) => {
+    const t = polyLatex(c, x);
+    return /[+-]/.test(t.replace(/^-/, "")) ? `\\left(${t}\\right)` : t === "1" ? "" : t;
+  };
+  const restNames = K.map((_, i) => i).filter((i) => !known.has(i)).map((i) => names[i]);
+  const steps: string[] = [];
+  steps.push(isFrac
+    ? `**Calcul de ${$(restNames.join(",\\, "))}** : on réduit au même dénominateur ${$(greekTex(texOf(den)))} et on identifie les numérateurs :`
+    : `**Calcul de ${$(restNames.join(",\\, "))}** : on développe et on identifie les coefficients des puissances de ${$(xt)} :`);
+  const hasFree = free.some((c) => Math.abs(c) > 1e-9);
+  steps.push($(`${greekTex(texOf(num))} = ${hasFree ? `${polyLatex(free, x)} + ` : ""}${K.map((_, i) => `${names[i]}${polyTex(polys[i]) ? `\\,${polyTex(polys[i])}` : ""}`).join(" + ")}`));
+  steps.push(`On identifie les coefficients de chaque puissance de ${$(xt)} :`);
+  const maxJ = Math.max(numC.length, ...polys.map((q) => q.length), free.length) - 1;
+  for (let j = maxJ; j >= 0; j--) {
+    const lhs = K.map((_, i) => ({ c: polys[i][j] ?? 0, n: names[i] })).filter((t) => Math.abs(t.c) > 1e-9);
+    const rhsV = (numC[j] ?? 0) - (free[j] ?? 0);
+    if (!lhs.length) continue;
+    const sum = lhs.map((t, idx) => {
+      const a = Math.abs(t.c), sign = t.c < 0 ? (idx ? " - " : "-") : idx ? " + " : "";
+      return `${sign}${Math.abs(a - 1) < 1e-12 ? "" : niceNumber(a).latex}${t.n}`;
+    }).join("");
+    const pw = j === 0 ? "1" : j === 1 ? xt : `${xt}^{${j}}`;
+    steps.push($(`${pw} :\\quad ${sum} = ${niceNumber(rhsV).latex}`));
+  }
+  const found = K.map((_, i) => i).filter((i) => !known.has(i)).map((i) => `${names[i]} = ${values[i].latex}`).join(",\\; ");
+  if (known.size) {
+    const given = [...known].map((i) => `${names[i]} = ${values[i].latex}`).join(",\\; ");
+    steps.push(`On remplace ${$(given)} (trouvés par les pôles) et on résout : ${$(found)}`);
+  } else {
+    steps.push(`On résout ce système : ${$(found)}`);
+  }
+  return steps;
+}
+
+/** Denominateur du premier membre factorise sur R (racines reelles, trinomes sans racine). */
+function factorFraction(L: string, x: string): {
+  num: MathNode; den: MathNode; lc: number; changed: boolean; factoredTex: string;
+  factors: { tex: string; mult: number; root?: number; at: (t: number) => number }[];
+} | null {
+  const ln = strip0(math.parse(L));
+  if (ln.type !== "OperatorNode" || ln.op !== "/") return null;
+  const num = ln.args[0], den = ln.args[1];
+  let dc: number[];
+  try { dc = polynomialCoefficients(den.toString(), x, 12); } catch { return null; }
+  if (dc.length < 2) return null;
+  const roots = polynomialRoots(dc);
+  if (!roots) return null;
+  const xt = greekTex(texOf(x));
+  const lc = dc[dc.length - 1];
+  const factors: { tex: string; mult: number; root?: number; at: (t: number) => number }[] = [];
+  const seen = new Set<number>();
+  roots.forEach((r, i) => {
+    const m = r.multiplicity ?? 1;
+    if (typeof r.value === "number") {
+      const a = r.value, an = niceNumber(Math.abs(a));
+      factors.push({ tex: Math.abs(a) < 1e-12 ? xt : `\\left(${xt} ${a < 0 ? "+" : "-"} ${an.latex}\\right)`, mult: m, root: a, at: (t) => t - a });
+    } else if (r.value.im > 0 && !seen.has(i)) {
+      const { re, im } = r.value;
+      const q = [re * re + im * im, -2 * re, 1].map((v) => Math.round(v * 1e9) / 1e9);
+      factors.push({ tex: `\\left(${polyLatex(q, x)}\\right)`, mult: m, at: (t) => t * t - 2 * re * t + re * re + im * im });
+    }
+  });
+  // Ordre de la copie : x d'abord, puis les racines par valeur absolue (p(p-1)(p+1)(p-2)), trinomes a la fin.
+  const key = (f: { root?: number }) => (f.root === undefined ? [2, 0, 0] : Math.abs(f.root) < 1e-12 ? [0, 0, 0] : [1, Math.abs(f.root), -f.root]);
+  factors.sort((p, q) => { const a = key(p), b = key(q); return a[0] - b[0] || a[1] - b[1] || a[2] - b[2]; });
+  const factoredTex = `${lc !== 1 ? fmt(lc) : ""}${factors.map((f) => f.tex + (f.mult > 1 ? `^{${f.mult}}` : "")).join("")}`;
+  const plain = greekTex(texOf(den)).replace(/\\left|\\right|\\cdot|\\,|\s|[{}]/g, "");
+  return { num, den, lc, factors, factoredTex, changed: plain !== factoredTex.replace(/\\left|\\right|\\,|\s|[{}]/g, "") };
+}
+
+/** Valeur d'un nombre ecrit « -1/3 ». */
+function eval1(t: string): number {
+  return Number(math.evaluate(t));
+}
+
+/**
+ * Second membre avec les valeurs trouvees, terme par terme, propre :
+ * « \frac{1}{p} - \frac{1}{3(p+1)} », « -\frac{p+3}{4(p^2+p+2)} ».
+ */
+function decompositionTex(R: string, K: string[], vals: number[], x: string): string {
+  const scope = Object.fromEntries(K.map((k, i) => [k, vals[i]]));
+  let out = "";
+  for (const t of sumTerms(math.parse(R))) {
+    const n = strip0(t.node);
+    let numC: number[], denTex: string;
+    try {
+      if (n.type === "OperatorNode" && n.op === "/") {
+        const nf = n.args[0].compile();
+        const xs = [0.3, 1.7, 2.9, -1.3, 4.1];
+        const V = xs.map((s0) => [1, s0, s0 * s0]);
+        const c = gauss(V.slice(0, 3), xs.slice(0, 3).map((s0) => t.sign * Number(nf.evaluate({ ...scope, [x]: s0 }))));
+        if (!c) throw new Error("num");
+        numC = c.map((v) => (Math.abs(v) < 1e-12 ? 0 : v));
+        while (numC.length > 1 && Math.abs(numC[numC.length - 1]) < 1e-12) numC.pop();
+        denTex = greekTex(texOf(n.args[1]));
+      } else throw new Error("pas une fraction");
+    } catch {
+      const sub = t.node.transform((m: any) => (m.type === "SymbolNode" && m.name in scope ? math.parse(`(${niceNumber(scope[m.name]).text})`) : m));
+      out += `${out ? (t.sign < 0 ? " - " : " + ") : t.sign < 0 ? "-" : ""}${greekTex(texOf(sub))}`;
+      continue;
+    }
+    if (numC.every((c) => Math.abs(c) < 1e-12)) continue;
+    // Denominateur commun des coefficients : numerateur entier.
+    let q = 1;
+    for (const c of numC) { const nn = niceNumber(c); const m = /\/(\d+)$/.exec(nn.text); if (m) q = lcm(q, Number(m[1])); }
+    let ints = numC.map((c) => Math.round(c * q));
+    let neg = ints[ints.length - 1] < 0;
+    if (neg) ints = ints.map((c) => -c);
+    const numTex = polyLatex(ints, x);
+    const d = /[+-]/.test(denTex.replace(/^-/, "")) && q !== 1 ? `${q}\\left(${denTex}\\right)` : `${q !== 1 ? q : ""}${denTex}`;
+    out += `${out ? (neg ? " - " : " + ") : neg ? "-" : ""}\\frac{${numTex}}{${d}}`;
+  }
+  return out || "0";
+}
+
+function lcm(a: number, b: number): number {
+  return (a / gcd(a, b)) * b;
+}
+
+function strip0(n: any): any {
+  return n.type === "ParenthesisNode" ? strip0(n.content) : n;
 }

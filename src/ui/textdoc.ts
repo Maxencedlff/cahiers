@@ -1794,6 +1794,29 @@ export class TextDoc {
   }
 
   /**
+   * Morceau au format de la page (phrases, $formules$, sauts de ligne) pose
+   * sur des lignes neuves : sous la ligne du curseur, sinon a la fin.
+   */
+  insertDoc(md: string, atCaret: boolean): void {
+    if (this.field) this.commit(null);
+    this.lastAuto = null;
+    const frag = this.buildNodes(parseDoc(md));
+    const tail = anchor();
+    const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
+    if (r) {
+      r.collapse(true);
+      r.insertNode(tail);
+      r.insertNode(frag);
+      r.insertNode(el("br"));
+    } else {
+      if ((this.root.textContent ?? "").replace(/\u200b/g, "").trim() || this.root.querySelector(".eq, .doc-img")) this.root.append(el("br"));
+      this.root.append(frag, tail);
+    }
+    this.caretAfter(tail);
+    this.emit();
+  }
+
+  /**
    * Descend un element pose en fin de texte sous `clientY` (bas de l'encre) :
    * des sauts de ligne avant lui, pour ne jamais le poser sur l'ecriture.
    */
@@ -2488,8 +2511,8 @@ export class TextDoc {
           return true;
         }
       }
-      // "1/2+1/3" : un operateur derriere un denominateur d'un seul terme
-      // ferme la fraction, la suite s'ecrit dans le texte (et se relit avec).
+      // Une relation derriere le denominateur (« 3/p = ») ferme la fraction,
+      // la suite s'ecrit dans le texte (et se relit avec).
       if (DEN_EXIT_TEXT.has(key) && den && balanced && endOfSlashDen(mf, null)) {
         this.commit(true);
         this.insertTextAtCaret(key);
@@ -2511,8 +2534,8 @@ export class TextDoc {
     }
     if (!auto) {
       if (key === "/") this.pendingSlash = true;
-      // "1/2+1/3" : le denominateur d'une fraction tapee au "/" ne prend
-      // qu'un terme, comme dans le texte. Un operateur derriere en sort.
+      // Une relation ou l'Espace derriere le denominateur d'une fraction
+      // tapee au "/" en sort ; « + » et « - » restent en bas.
       if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) mf.executeCommand("moveAfterParent");
     }
     // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
@@ -3968,10 +3991,14 @@ function slashFracAt(mf: MathfieldElement): MlAtom | null {
   return a?.parentBranch === "below" && a.parent?.type === "genfrac" ? a.parent : null;
 }
 
-/** Touches qui finissent un denominateur d'un seul terme. */
-const DEN_EXIT = new Set(["+", "-", "=", "<", ">", ",", ";", "*", " "]);
+/**
+ * Touches qui finissent le denominateur d'une fraction tapee au "/" : une
+ * relation, une virgule, l'Espace. « + » et « - » y restent (« 2/(p+2) » se
+ * tape « 2/p+2 ») ; on sort par Espace ou fleche droite.
+ */
+const DEN_EXIT = new Set(["=", "<", ">", ",", ";", " "]);
 /** Les memes, dans une fraction ouverte depuis le texte (l'Espace y est deja traitee). */
-const DEN_EXIT_TEXT = new Set(["+", "-", "=", "<", ">", ",", ";"]);
+const DEN_EXIT_TEXT = new Set(["=", "<", ">", ",", ";"]);
 
 /**
  * Curseur a la fin du denominateur d'une fraction tapee au "/", et ce

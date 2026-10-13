@@ -1,5 +1,6 @@
 import { el, toast } from "../dom";
 import { renderTex } from "../tex";
+import { parseDoc } from "../../core/text/doc";
 import { CalcEngine, greekNames, normalizeInput, format, frNumber, engFormat, type AngleMode, type ImagUnit } from "../../core/calc/engine";
 import { derivative, nthDerivative, simplifyExpr, substitute, type DerivStep } from "../../core/calc/derive";
 import { antiderivative, definiteIntegral } from "../../core/calc/integrate";
@@ -51,6 +52,8 @@ export interface CalculatorHost {
    * Absent : le bouton n'est pas affiche.
    */
   onSend?: (expr: string, result: string, latex: string, meta: CalcSendMeta) => void;
+  /** « Envoyer le détail dans la page » : lignes au format du texte (phrases + $formules$). */
+  onSendDetail?: (lines: string[]) => void;
 }
 
 /** Saisies conservees par onglet : changer d'onglet ne perd rien. */
@@ -1137,8 +1140,9 @@ export class Calculator {
       const detail = () => {
         if (!r.steps?.length) return;
         let shown = false;
-        const box = el("div", { class: "steps", style: { display: "none" } },
-          ...r.steps.map((t) => el("div", { class: "step" }, renderTex(t))));
+        const lines = r.steps;
+        const box = el("div", { class: "steps solve-steps", style: { display: "none" } },
+          ...lines.map((t) => el("div", { class: "step" }, ...docLineNodes(t))));
         const btn = el("button", {
           onclick: () => {
             shown = !shown;
@@ -1146,7 +1150,15 @@ export class Calculator {
             btn.textContent = shown ? "Masquer le détail" : "Afficher le détail";
           },
         }, "Afficher le détail");
-        out.append(btn, box);
+        const sendDetail = this.host.onSendDetail;
+        const put = sendDetail ? el("button", {
+          class: "calc-send", title: "Pose la rédaction au curseur de la page, formules comprises",
+          onclick: () => {
+            if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
+            sendDetail(lines);
+          },
+        }, "Envoyer le détail dans la page") : null;
+        out.append(el("div", { class: "row" }, btn, put), box);
       };
       // Identification : plusieurs inconnues trouvees ensemble.
       if (r.values?.length) {
@@ -1400,6 +1412,16 @@ function greekLatex(name: string): string {
     Γ: "Gamma", Δ: "Delta", Θ: "Theta", Λ: "Lambda", Σ: "Sigma", Φ: "Phi", Ψ: "Psi", Ω: "Omega",
   };
   return name.replace(/[α-ωΑ-Ω]/g, (c) => (g[c] ? `\\${g[c]} ` : c)).trim();
+}
+
+/** Ligne du detail (format du texte de la page) : phrases, gras, formules KaTeX. */
+function docLineNodes(md: string): Node[] {
+  return parseDoc(md).flatMap((t): Node[] => {
+    if (t.kind === "math") return [renderTex(t.latex)];
+    if (t.kind !== "text") return [];
+    const n = document.createTextNode(t.text);
+    return [t.bold ? el("b", {}, n) : n];
+  });
 }
 
 function renderSteps(step: DerivStep, depth = 0): HTMLElement {

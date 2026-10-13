@@ -3574,6 +3574,27 @@ export class PageView {
     return true;
   }
 
+  /**
+   * Morceau de texte (format de la page : phrases, $formules$, lignes) pose
+   * au curseur, sinon a la fin : le detail d'une resolution de la calculatrice.
+   */
+  insertDoc(md: string): boolean {
+    const loaded = this.activePage();
+    if (!loaded) return false;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
+    const atCaret = loaded.doc.hasCaret();
+    if (atCaret) this.notePreEdit(loaded);
+    loaded.noPush = !atCaret;
+    try {
+      loaded.doc.insertDoc(md, atCaret);
+    } finally {
+      loaded.noPush = false;
+    }
+    this.fitSheet(loaded);
+    toast("Détail posé dans la page");
+    return true;
+  }
+
   /** Pose en fin de texte : descendu sous l'encre la plus basse, s'il y en a dessous. */
   private belowInk(loaded: LoadedPage, node: HTMLElement): void {
     let bottom = 0;

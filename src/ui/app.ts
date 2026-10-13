@@ -379,6 +379,8 @@ export class App {
           },
           // Matrices, Résoudre, Littéral : une formule du texte, éditable.
           onSend: (_expr, _result, latex) => { this.focusedTab()?.view?.insertFormula(latex); },
+          // Resoudre : la redaction complete (phrases et formules) au curseur.
+          onSendDetail: (lines) => { this.focusedTab()?.view?.insertDoc(lines.join("\n")); },
         });
         return this.calculator;
       });
