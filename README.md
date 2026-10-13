@@ -139,7 +139,7 @@ les deux PC.
   saut : recherche, repere, lien, liste des pages.
 - Liens entre pages : taper `[[` dans le texte ouvre un selecteur (titres de
   pages, titres #, formules ; matiere et intercalaire filtrent), `Entree` pose
-  le lien. Dans la recherche (`Ctrl+K`), « Copier le lien » (`Ctrl+Maj+C`) puis
+  le lien. Dans la recherche (`Ctrl+F`), « Copier le lien » (`Ctrl+Maj+C`) puis
   `Ctrl+V` dans une page. Un clic, un appui au doigt ou au stylet (sans encre)
   ou `Ctrl+Entree` suit le lien ; clic droit ou `F2` change son texte. Le lien
   vise l'id de la page : il survit aux insertions et a la pagination. Page a la
@@ -277,7 +277,7 @@ de nouveau ne le recopie pas.
 On écrit, surligne, tape du texte et des formules par-dessus exactement comme
 sur une page normale (lasso, gomme, `Ctrl+Z` compris) ; le PDF reste un fond,
 jamais modifié. Une page de PDF ne déborde jamais : le texte tapé s'arrête au
-bas de la feuille. Le texte du PDF est indexé : `Ctrl+K` retrouve un mot du
+bas de la feuille. Le texte du PDF est indexé : `Ctrl+F` retrouve un mot du
 poly et l'encadre sur la page. L'export PDF de l'intercalaire rend le document
 d'origine avec les annotations par-dessus (rendu en haute densité).
 
@@ -334,7 +334,7 @@ affiche « non reconnu, réessayer ». La barre d'etat compte les envois du mois
 
 ## Recherche et reperes « pas compris »
 
-`Ctrl+K` cherche dans tous les cahiers, ou seulement dans le cahier ouvert
+`Ctrl+F` cherche dans tous les cahiers, ou seulement dans le cahier ouvert
 (bouton a cote du champ). Le texte est compare tel qu'on le lit : sans
 casse ni accents, gras et couleurs ignores, formules relues (« vbe » trouve
 V_be, « pi » trouve π). Plusieurs mots : tous doivent y etre, dans n'importe
@@ -351,7 +351,7 @@ recadree, zones math/texte reconnues, surligneur. Filtres en puces :
 matiere, couleurs (touches 1 a 5), intercalaire. Un appui ouvre la page a
 l'endroit, `Alt+←` revient a la vue. « Exporter en PDF » imprime la fiche.
 
-`Ctrl+F` pose le repere a la hauteur du curseur (ou du dernier trait) et
+`Ctrl+Maj+F` pose le repere a la hauteur du curseur (ou du dernier trait) et
 garde la ligne : la vue « Pas compris » (depuis le menu, ou le badge d'une
 matiere) dit ce qui n'etait pas compris, ouvre l'endroit exact, et
 « Compris » (ou `Suppr`) le retire sans ouvrir la page.
@@ -362,30 +362,33 @@ date ou la taille de son fichier change (OneDrive, explorateur).
 
 ## Raccourcis
 
-La liste complete est dans l'application : **F1** (ou `Ctrl+/`, ou le bouton
-clavier en haut a droite). Elle est generee depuis la table unique
+La liste complete est dans l'application : **F1** (ou `Ctrl+/`, ou « Raccourcis
+clavier » dans le menu ⋯ et les Reglages ; d'abord l'essentiel, puis tout). Sur Mac,
+les touches s'affichent ⌘ ⇧ ⌥. Elle est generee depuis la table unique
 `src/core/shortcuts.ts`, qui sert aussi au clavier : elle ne peut pas mentir.
 Les lettres seules tapent du texte, comme dans Word ; les raccourcis passent
 tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 
 | | |
 |---|---|
-| `Ctrl+F` | repere « pas compris » (meme en tapant ; « Annuler » dans le message) |
+| `Ctrl+Maj+F` | repere « pas compris » (meme en tapant ; « Annuler » dans le message) |
 | `Ctrl+Pg↓` / `Ctrl+Pg↑` | page suivante, precedente (`Pg↓` `Pg↑` seuls hors du texte) |
 | `Ctrl+Maj+Pg↓` / `Ctrl+Maj+Pg↑` | intercalaire suivant, precedent |
 | `Ctrl+N` / `Ctrl+Maj+N` | nouvelle page a la fin, inserer apres la page courante |
 | `Ctrl+T` | nouvel intercalaire dans le cahier en vue |
-| `Ctrl+G` | liste des pages, taper un numero y va (ou un appui sur « p. 4 / 12 ») |
+| `Ctrl+G` | liste des pages de la barre laterale, taper un numero y va (ou un appui sur « p. 4 / 12 ») |
 | `Alt+←` | revenir d'avant un saut (aussi le bouton retour de la souris) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | zoom avant, arrière (50 à 300 %), retour à 100 % ; aussi Ctrl+molette et pinch à deux doigts, chaque panneau le sien |
 | `Ctrl+P` / `Ctrl+Maj+P` | exporter en PDF la page, tout l'intercalaire |
 | `Ctrl+E` / `Ctrl+Maj+E` | exporter en Word (.docx) la page, tout l'intercalaire |
 | `Ctrl+O` | importer un PDF apres la page courante, pour l'annoter (aussi : deposer un .pdf sur la page) |
 | `Ctrl+Z` / `Ctrl+Y` (ou `Ctrl+Maj+Z`) | annuler, retablir |
-| `Ctrl+M` | menu, et retour au meme endroit |
-| `Ctrl+Maj+M` | ruban Maths : ouvrir ou fermer le volet |
+| `Ctrl+M` | accueil, et retour au meme endroit |
+| `Ctrl+Maj+S` | barre laterale : afficher ou masquer |
+| `Ctrl+,` | reglages |
+| `Ctrl+Maj+M` | volet des formules (Σ) : ouvrir ou fermer |
 | `Ctrl+Maj+T` | theme : clair, sombre, celui de Windows |
-| `Ctrl+K` | recherche globale |
+| `Ctrl+F` (ou `Ctrl+K`) | recherche dans tous les cahiers, en panneau par-dessus la page |
 | `Ctrl+Maj+K` | reviser : extraits d'une couleur (theoremes, definitions...) par matiere, export PDF |
 | `Ctrl+L` | calculatrice |
 | `Ctrl+Maj+L` | envoyer le dernier resultat de la calculatrice dans la page (au curseur du texte, sinon sous le dernier contenu) |

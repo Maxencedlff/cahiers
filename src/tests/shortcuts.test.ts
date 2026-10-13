@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
   SHORTCUTS, GROUPS, ctrlCommand, escapeAction, isReloadKey, keysOf, titleOf, pageLabel, parsePageInput,
-  type EscapeState, type KeyLike,
+  keyLabel, isApplePlatform, setMacKeys, usesMacKeys, type EscapeState, type KeyLike,
 } from "../core/shortcuts";
 import { MATH_TEMPLATES } from "../core/templates";
 import { SYMBOLS, symbolName } from "../core/symbols";
@@ -41,8 +41,18 @@ describe("table des raccourcis", () => {
 });
 
 describe("ctrlCommand", () => {
-  it("Ctrl+F pose un repere, quel que soit le focus (D3)", () => {
-    expect(ctrlCommand(ctrl("f"))).toBe("flag");
+  it("Ctrl+F = recherche (convention universelle) ; Ctrl+Maj+F pose un repere, quel que soit le focus (D3)", () => {
+    expect(ctrlCommand(ctrl("f"))).toBe("search");
+    expect(ctrlCommand(ctrl("k"))).toBe("search");
+    expect(ctrlCommand(ctrl("f", true))).toBe("flag");
+    expect(keysOf("search")).toBe("Ctrl+F");
+  });
+
+  it("Reglages (Ctrl+,), barre laterale (Ctrl+Maj+S) ; Ctrl+D ne bascule plus le doigt", () => {
+    expect(ctrlCommand(ctrl(","))).toBe("settings");
+    expect(ctrlCommand(ctrl("s", true))).toBe("sidebar");
+    expect(ctrlCommand(ctrl("d"))).toBeNull();
+    expect(ctrlCommand(ctrl("d", true))).toBe("viewMode");
   });
 
   it("Maj change la commande : intercalaire, insertion, panneau droit", () => {
@@ -112,8 +122,8 @@ describe("ctrlCommand", () => {
 
 describe("infobulles et indicateur de page", () => {
   it("titleOf ajoute les touches de la table", () => {
-    expect(keysOf("flag")).toBe("Ctrl+F");
-    expect(titleOf("Pas compris", "flag")).toBe("Pas compris (Ctrl+F)");
+    expect(keysOf("flag")).toBe("Ctrl+Maj+F");
+    expect(titleOf("Pas compris", "flag")).toBe("Pas compris (Ctrl+Maj+F)");
     expect(titleOf("Intercalaire suivant", "nextDivider")).toBe("Intercalaire suivant (Ctrl+Maj+Pg↓)");
   });
 
@@ -130,6 +140,37 @@ describe("infobulles et indicateur de page", () => {
     expect(parsePageInput("9", nums)).toEqual({ error: "Pas de page 9 : cet intercalaire va de 1 à 4" });
     expect("error" in parsePageInput("abc", nums)).toBe(true);
     expect("error" in parsePageInput("", nums)).toBe(true);
+  });
+});
+
+describe("libelles des touches selon la plateforme", () => {
+  it("Mac : ⌘ ⇧ ⌥ sans « + » ; Windows et Linux : en toutes lettres", () => {
+    expect(keyLabel("Ctrl+Maj+F", true)).toBe("⌘⇧F");
+    expect(keyLabel("Alt+E", true)).toBe("⌥E");
+    expect(keyLabel("Ctrl+,", true)).toBe("⌘,");
+    expect(keyLabel("Ctrl+Maj+F", false)).toBe("Ctrl+Maj+F");
+    expect(keyLabel("F1", true)).toBe("F1");
+  });
+
+  it("plateforme Apple reconnue par l'agent ou la plateforme", () => {
+    expect(isApplePlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)")).toBe(true);
+    expect(isApplePlatform("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)")).toBe(true);
+    expect(isApplePlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Win32")).toBe(false);
+  });
+
+  it("keysOf suit la plateforme choisie", () => {
+    const was = usesMacKeys();
+    setMacKeys(true);
+    expect(keysOf("calc")).toBe("⌘L");
+    setMacKeys(false);
+    expect(keysOf("calc")).toBe("Ctrl+L");
+    setMacKeys(was);
+  });
+
+  it("la fiche F1 montre une douzaine de raccourcis essentiels", () => {
+    const n = SHORTCUTS.filter((s) => s.essential).length;
+    expect(n).toBeGreaterThanOrEqual(10);
+    expect(n).toBeLessThanOrEqual(14);
   });
 });
 
@@ -153,13 +194,25 @@ describe("reglages de disposition", () => {
   };
   afterEach(() => { store.clear(); delete (globalThis as { localStorage?: unknown }).localStorage; });
 
-  it("calculatrice fermee, ruban Maths non epingle, theme systeme et feuille claire par defaut", () => {
+  it("calculatrice fermee, volet des formules non epingle, theme systeme et feuille Auto par defaut", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     const s = loadSettings();
     expect(s.calcOpen).toBe(false);
     expect(s.mathPinned).toBe(false);
     expect(s.theme).toBe("system");
-    expect(s.sheet).toBe("light");
+    expect(s.sheet).toBe("auto");
+    expect(s.sidebar).toBe(true);
+    expect(s.calcDetached).toBe(false);
+  });
+
+  it("disposition 3 : l'ancienne feuille « claire » par defaut passe en Auto, un choix Sépia reste", () => {
+    (globalThis as { localStorage?: unknown }).localStorage = ls;
+    store.set("cahiers.settings.v1", JSON.stringify({ sheet: "light", layout: 2 }));
+    expect(loadSettings().sheet).toBe("auto");
+    store.set("cahiers.settings.v1", JSON.stringify({ sheet: "light", layout: 3 }));
+    expect(loadSettings().sheet).toBe("light");
+    store.set("cahiers.settings.v1", JSON.stringify({ sheet: "sepia", layout: 2 }));
+    expect(loadSettings().sheet).toBe("sepia");
   });
 
   it("l'ancien defaut « calculatrice ouverte » est ferme une fois, puis respecte", () => {
@@ -167,7 +220,7 @@ describe("reglages de disposition", () => {
     store.set("cahiers.settings.v1", JSON.stringify({ calcOpen: true }));
     const s = loadSettings();
     expect(s.calcOpen).toBe(false);
-    expect(s.layout).toBe(2);
+    expect(s.layout).toBe(3);
     // Rouverte ensuite par l'utilisateur (Ctrl+L) : le choix tient.
     store.set("cahiers.settings.v1", JSON.stringify({ ...s, calcOpen: true }));
     expect(loadSettings().calcOpen).toBe(true);
@@ -184,7 +237,7 @@ describe("reglages de disposition", () => {
     expect("mathOpen" in s).toBe(false);
     store.set("cahiers.settings.v1", JSON.stringify({ theme: "noir", sheet: 3, layout: 2 }));
     expect(loadSettings().theme).toBe("system");
-    expect(loadSettings().sheet).toBe("light");
+    expect(loadSettings().sheet).toBe("auto");
   });
 
   it("Ctrl+Maj+M ouvre le ruban Maths, Ctrl+Maj+T change le theme ; Ctrl+M reste le menu", () => {

@@ -1,7 +1,7 @@
 /**
- * Indicateur d'etat compact (logique pure). Un point vert quand tout va
- * bien ; orange ou rouge avec un texte court seulement s'il y a un
- * probleme. Le detail complet (reseau, conversion, enregistrement, stylet,
+ * Indicateur d'etat compact (logique pure). Rien a l'ecran quand tout va
+ * bien ; orange ou rouge avec un mot seulement s'il y a un probleme
+ * (« Reconnaissance non configurée » compte : orange). Le detail complet (reseau, conversion, enregistrement, stylet,
  * quota, dossier) va dans le volet ouvert au survol ou a l'appui.
  */
 
@@ -74,10 +74,13 @@ export function statusSummary(s: StatusInput): StatusSummary {
     lines.push({ level: "err", label: "Conversion", text: s.lastError ?? "Clés MyScript refusées : la file est arrêtée" });
     problems.push({ level: "err", short: "Clés refusées" });
   } else if (!s.backendReady) {
+    // Pas une panne, mais l'ecriture ne sera jamais convertie : on le dit
+    // en orange, un mot, jusqu'a la saisie des cles (Reglages).
     lines.push({
-      level: "ok", label: "Conversion",
-      text: s.pending ? `${s.pending} en attente, reconnaissance non configurée` : "Reconnaissance non configurée",
+      level: "warn", label: "Conversion",
+      text: s.pending ? `${s.pending} en attente, reconnaissance non configurée` : "Reconnaissance non configurée : l'encre est gardée telle quelle",
     });
+    problems.push({ level: "warn", short: "Reconnaissance non configurée" });
   } else {
     lines.push({
       level: "ok", label: "Conversion",

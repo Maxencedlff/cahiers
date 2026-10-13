@@ -54,6 +54,8 @@ export interface CalculatorHost {
   onSend?: (expr: string, result: string, latex: string, meta: CalcSendMeta) => void;
   /** « Envoyer le détail dans la page » : lignes au format du texte (phrases + $formules$). */
   onSendDetail?: (lines: string[]) => void;
+  /** « Détacher » (fenetre flottante) ou « Ancrer » (panneau de droite). */
+  onDetach?: (detached: boolean) => void;
 }
 
 /** Saisies conservees par onglet : changer d'onglet ne perd rien. */
@@ -216,10 +218,18 @@ export class Calculator {
     if (wasDocked || !this.floatPlaced) {
       this.floatPlaced = true;
       this.root.style.left = `${Math.max(8, window.innerWidth - 428 - 16)}px`;
-      this.root.style.top = "110px";
+      this.root.style.top = `${this.minTop + 8}px`;
     }
   }
   private floatPlaced = false;
+  /** Haut minimal de la fenetre flottante : jamais sur la barre du haut. */
+  private minTop = 8;
+
+  /** L'appli donne le bas de sa barre du haut : la fenetre reste dessous. */
+  setMinTop(px: number): void {
+    this.minTop = Math.max(8, Math.round(px));
+    this.root.style.setProperty("--calc-top", `${this.minTop}px`);
+  }
 
   /* ---------------- fenetre ---------------- */
 
@@ -245,14 +255,15 @@ export class Calculator {
     // Toujours ramenee dans l'ecran : elle a pu etre laissee hors champ.
     const r = this.root.getBoundingClientRect();
     if (r.left + r.width > window.innerWidth) this.root.style.left = `${Math.max(8, window.innerWidth - r.width - 20)}px`;
-    if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 20)}px`;
+    if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(this.minTop, window.innerHeight - r.height - 20)}px`;
+    if (r.top < this.minTop) this.root.style.top = `${this.minTop}px`;
   }
 
   /** Remonte la fenetre flottante si son bas sort de l'ecran. */
   private keepInView(): void {
     if (!this.visible || this.root.classList.contains("docked")) return;
     const r = this.root.getBoundingClientRect();
-    if (r.bottom > window.innerHeight - 8) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 8)}px`;
+    if (r.bottom > window.innerHeight - 8) this.root.style.top = `${Math.max(this.minTop, window.innerHeight - r.height - 8)}px`;
   }
 
   /** Focus et selection dans le recepteur, sans defiler. */
@@ -312,11 +323,29 @@ export class Calculator {
   /** Deja posee dans ce conteneur (colonne ou zone de travail). */
   isIn(container: HTMLElement): boolean { return this.root.parentElement === container; }
 
+  /** Bouton « Détacher » / « Ancrer » de l'en-tete. */
+  private detachBtn = el("button", { class: "ghost calc-detach" });
+
+  /**
+   * L'appli dit si la calculatrice peut changer de place (pas au telephone)
+   * et si elle flotte parce qu'on l'a detachee (le bouton propose alors
+   * de l'ancrer).
+   */
+  setDetachable(can: boolean, detached: boolean): void {
+    this.detachBtn.hidden = !can;
+    const docked = this.isDocked;
+    this.detachBtn.textContent = docked ? "Détacher" : detached ? "Ancrer" : "";
+    this.detachBtn.hidden = !can || (!docked && !detached);
+    this.detachBtn.title = docked ? "Fenêtre flottante, déplaçable" : "Panneau à droite de la page";
+  }
+
   private head(): HTMLElement {
+    this.detachBtn.addEventListener("click", () => this.host.onDetach?.(this.isDocked));
     const head = el("div", { class: "calc-head" },
       el("strong", {}, "Calculatrice"),
       el("div", { class: "spacer" }),
-      el("button", { class: "ghost", title: "Fermer", onclick: () => this.hide() }, "✕"),
+      this.detachBtn,
+      el("button", { class: "ghost calc-close", "aria-label": "Fermer la calculatrice", title: "Fermer (Ctrl+L)", onclick: () => this.hide() }, "✕"),
     );
     // Deplacement au doigt comme a la souris.
     let start: { x: number; y: number; left: number; top: number } | null = null;
@@ -333,7 +362,7 @@ export class Calculator {
       const left = Math.max(0, Math.min(window.innerWidth - 80, start.left + e.clientX - start.x));
       const top = Math.max(0, Math.min(window.innerHeight - 50, start.top + e.clientY - start.y));
       this.root.style.left = `${left}px`;
-      this.root.style.top = `${top}px`;
+      this.root.style.top = `${Math.max(this.minTop, top)}px`;
     });
     const stop = () => { start = null; head.classList.remove("dragging"); };
     head.addEventListener("pointerup", stop);
@@ -641,16 +670,15 @@ export class Calculator {
         const cls = [
           FAMILY_CLASS[k.family],
           k.action === "second" && this.second ? "on" : "",
-          k.second ? "shifted" : "",
+          shifted ? "shifted" : "",
         ].filter(Boolean).join(" ");
         const btn = el("button", {
           class: cls,
           style: k.span ? { gridColumn: `span ${k.span}` } : {},
           onclick: () => press(k),
         });
-        // La touche 2nd modifie l'affichage des touches concernees :
-        // elle ne laisse pas deviner ce qu'elles vont faire.
-        if (k.second && !shifted) btn.append(el("span", { class: "second" }, k.second.label));
+        // Les secondes fonctions ne s'affichent qu'avec 2nd : le pave reste
+        // lisible ; 2nd change le libelle des touches concernees (rien a deviner).
         btn.append(document.createTextNode(label));
         keys.append(btn);
       }
@@ -848,12 +876,12 @@ export class Calculator {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
       view = null;
-      if (!fn) { info.textContent = "Tape une fonction de x (ou de f, t...)."; return; }
+      if (!fn) { info.replaceChildren("Tape une fonction de x (ou de f, t...)."); return; }
       const v = plotVariable(fn);
 
       const plot = samplePlot(fn, from, to, 700, v, angle, logX());
       if (!plot.ok || !plot.samples) {
-        info.textContent = plot.message ?? "Expression invalide";
+        info.replaceChildren(plot.message ?? "Expression invalide");
         return;
       }
       // Fenetre fixee (ymin / ymax) ou calee sur les quantiles : une
@@ -867,6 +895,7 @@ export class Calculator {
       const xText = (x: number) => (logX() ? engReading(x, unit) : fr(round4(x)));
 
       const parts: string[] = [];
+      const rows: [string, string][] = [];
       if (range.error) parts.push(`${range.error}.`);
       if (st.db) {
         // Coupure a -3 dB sous le gain maximal visible (passe-bas, passe-haut, passe-bande).
@@ -880,23 +909,19 @@ export class Calculator {
         ctx.restore();
         ctx.fillStyle = "#d97706";
         for (const c of cuts) { ctx.beginPath(); ctx.arc(X(c), ly, 3.5, 0, Math.PI * 2); ctx.fill(); }
-        parts.push(cuts.length
-          ? `Coupure à −3 dB : ${v} ≈ ${cuts.slice(0, 3).map(xText).join(" ; ")}.`
-          : "Pas de coupure à −3 dB visible.");
+        rows.push(["Coupure à −3 dB", cuts.length ? `${v} ≈ ${cuts.slice(0, 3).map(xText).join(" ; ")}` : "aucune visible"]);
       } else {
         const roots = rootsInWindow(fn, from, to, v, angle, logX());
         ctx.fillStyle = "#dc2626";
         if (axisY !== null) {
           for (const r of roots) { ctx.beginPath(); ctx.arc(X(r), axisY, 3.5, 0, Math.PI * 2); ctx.fill(); }
         }
-        parts.push(roots.length
-          ? `Racines : ${roots.slice(0, 8).map(xText).join(" ; ")}${roots.length > 8 ? ` … et ${roots.length - 8} autres` : ""}.`
-          : "Aucune racine visible.");
+        rows.push(["Racines", roots.length
+          ? `${roots.slice(0, 8).map(xText).join(" ; ")}${roots.length > 8 ? ` … et ${roots.length - 8} autres` : ""}`
+          : "aucune visible"]);
         const ext = extremaInWindow(fn, from, to, v, 800, angle, logX());
-        if (ext.length) {
-          parts.push(ext.slice(0, 4).map((p) => `${p.kind} (${xText(p.x)} ; ${frNumber(p.y)})`).join(", ")
-            + (ext.length > 4 ? ` … et ${ext.length - 4} autres` : "") + ".");
-        }
+        for (const p of ext.slice(0, 4)) rows.push([p.kind === "max" ? "Maximum" : "Minimum", `(${xText(p.x)} ; ${frNumber(p.y)})`]);
+        if (ext.length > 4) parts.push(`… et ${ext.length - 4} autres extremums.`);
       }
 
       // Lecture d'un point au toucher.
@@ -906,10 +931,14 @@ export class Calculator {
         if (Number.isFinite(y)) {
           ctx.fillStyle = "#0f172a";
           ctx.beginPath(); ctx.arc(X(readX), Y(y), 4, 0, Math.PI * 2); ctx.fill();
-          parts.unshift(`Point : ${v} = ${xText(readX)}, y = ${row.y}${st.db ? " dB" : ""}.`);
+          rows.unshift(["Point", `${v} = ${xText(readX)}, y = ${row.y}${st.db ? " dB" : ""}`]);
         }
       }
-      info.textContent = parts.join(" ");
+      // Resultats en tableau : on les lit d'un coup d'oeil.
+      info.replaceChildren(
+        rows.length ? el("table", { class: "tbl calc-results" }, ...rows.map(([k, val]) => el("tr", {}, el("th", {}, k), el("td", {}, val)))) : "",
+        parts.length ? el("div", { class: "small muted" }, parts.join(" ")) : "",
+      );
     };
 
     canvas.addEventListener("pointerdown", (e) => {

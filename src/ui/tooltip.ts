@@ -1,4 +1,4 @@
-import { effectiveTheme, type SheetTone, type ThemePref } from "../core/theme";
+import { effectiveSheet, effectiveTheme, type SheetPref, type ThemePref } from "../core/theme";
 
 /**
  * Infobulles du chrome : nom de l'outil et son raccourci, dans une bulle
@@ -7,7 +7,7 @@ import { effectiveTheme, type SheetTone, type ThemePref } from "../core/theme";
  * une bulle qui reste affichee masquerait la page.
  *
  * Un bouton porte `data-tip` (nom) et, s'il en a un, `data-keys`
- * (« Alt+E »). `data-tip-side` = right (rail), bottom (barre du haut) ou top (indicateur de page).
+ * (« Alt+E »). `data-tip-side` = right, bottom (barre du haut) ou top (palette, indicateur de page).
  */
 
 let bubble: HTMLElement | null = null;
@@ -85,10 +85,13 @@ const media = typeof window !== "undefined" && window.matchMedia
  * la feuille (sur la racine de l'appli seulement : l'export PDF, pose hors
  * de l'appli, garde toujours la feuille claire et l'encre noire).
  */
-export function applyAppearance(appRoot: HTMLElement, pref: ThemePref, sheet: SheetTone): void {
+export function applyAppearance(appRoot: HTMLElement, pref: ThemePref, sheet: SheetPref): void {
   const theme = effectiveTheme(pref, !!media?.matches);
   document.documentElement.dataset.theme = theme;
-  appRoot.dataset.sheet = sheet;
+  // « Auto » : feuille sombre en theme sombre (export toujours blanc).
+  appRoot.dataset.sheet = effectiveSheet(sheet, theme);
+  // Police systeme de la plateforme (SF sur Mac, Segoe UI Variable sur Windows).
+  document.documentElement.dataset.platform = /Macintosh|iPhone|iPad/.test(navigator.userAgent) ? "apple" : "other";
 }
 
 /** Windows change de theme : rappelle `run` si l'on suit le systeme. */
