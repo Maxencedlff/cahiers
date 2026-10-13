@@ -962,7 +962,8 @@ export function findFormulas(line: string, mode: ScanMode = "final"): FoundFormu
  * formule convertie automatiquement (sa source tapee), ou le texte tape
  * dans le noeud du curseur (toujours le dernier).
  */
-export interface LinePart { kind: "text" | "eq" | "cur"; str: string }
+/** `fixed` : formule faite a l'editeur (relue en clair), jamais redefaite en texte. */
+export interface LinePart { kind: "text" | "eq" | "cur"; str: string; fixed?: boolean }
 
 /**
  * Formules a (re)mettre en forme sur une ligne relue : celles qui touchent
@@ -993,7 +994,7 @@ export function planLine(
   let formulas = pick(eqIdx);
   let undone = -1;
   const g = parts.length - 2;
-  if (g >= 0 && parts[g].kind === "eq" && /^[\p{L}\p{N}]/u.test(parts[g + 1].str)
+  if (g >= 0 && parts[g].kind === "eq" && !parts[g].fixed && /^[\p{L}\p{N}]/u.test(parts[g + 1].str)
       && !formulas.some((f) => covers(f, g))) {
     undone = g;
     formulas = pick(eqIdx.filter((i) => i !== g));

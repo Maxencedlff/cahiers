@@ -2745,6 +2745,13 @@ export class TextDoc {
         if (n >= 0) break;
       } else if (prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src) {
         back.push({ node: prev, kind: "eq", str: prev.dataset.src, a: 0, b: 0, head: "" });
+      } else if (prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.latex && !prev.closest(".raw")) {
+        // Formule faite a l'editeur (sans source tapee) : relue en clair, elle
+        // se fond dans la formule de la ligne (« (A)/(B) » tape autour d'elle
+        // devient une fraction) ; jamais redefaite en texte (`fixed`).
+        const plain = texToPlain(prev.dataset.latex);
+        if (!plain) break;
+        back.push({ node: prev, kind: "eq", str: plain, a: 0, b: 0, head: "", fixed: true });
       } else if (!(prev instanceof HTMLElement && inlineWrap(prev))) {
         break;
       }

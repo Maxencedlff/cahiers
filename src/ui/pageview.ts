@@ -1934,6 +1934,13 @@ export class PageView {
         }
       }
       this.setFlowText(from, text);
+      // Le « texte d'avant la frappe » de `from` date d'avant la remontee : le
+      // debordement qui suit l'aurait pris pour son annulation, et Ctrl+Z
+      // aurait rendu `from` sans la suite remontee (perte du 13/10, la page
+      // n'etait plus qu'en corbeille). Plus de retour en arriere par-dessus.
+      from.prevText = undefined;
+      from.lastShift = undefined;
+      this.flowUndo = null;
       this.repaintFlowed(from);
       this.queueSave(from);
       this.host.onPageChange?.(this.current, this.total);
@@ -2280,6 +2287,24 @@ export class PageView {
       // Page d'apres : contenu d'avant, ou corbeille si le debordement l'a creee.
       if (u.toBlocks === null) {
         const check = toShown?.page ?? (await this.serial(() => this.host.repo.readPage(this.notebook, this.divider, toNum)).catch(() => null));
+        // Garde-fou : la page creee ne part a la corbeille que si son texte
+        // revient bien dans `from` ; sinon on n'annule rien (jamais de perte).
+        const toText = (check ? this.bodyText(check)?.content ?? "" : "").replace(/[\s​]/g, "");
+        const backText = (u.fromText ?? "").replace(/[\s​]/g, "");
+        // Ce qu'on vient de taper (un bout d'au plus 10 caracteres d'affilee) n'y est pas encore.
+        const comesBack = (): boolean => {
+          if (backText.includes(toText)) return true;
+          for (let len = 1; len <= 10; len++) {
+            for (let i = 0; i + len <= toText.length; i++) {
+              if (backText.includes(toText.slice(0, i) + toText.slice(i + len))) return true;
+            }
+          }
+          return false;
+        };
+        if (check?.id === u.toId && toText && u.fromText !== null && !comesBack()) {
+          toast("Annulation du passage à la page suivante impossible sans perdre du texte : rien n'a été changé", "warn", 6000);
+          return;
+        }
         if (check?.id === u.toId) {
           await this.serial(async () => {
             await this.host.repo.deletePage(this.notebook, this.divider, toNum);

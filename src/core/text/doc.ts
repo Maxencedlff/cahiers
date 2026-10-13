@@ -615,11 +615,15 @@ export function texToPlain(tex: string): string {
   let s = tex.replace(/\\left|\\right|\\displaystyle/g, "").replace(/\\[dt]frac(?![A-Za-z])/g, "\\frac")
     // Fractions abregees de MathLive : \frac12, \frac1{x}, \frac{a}2.
     .replace(/\\frac\s*([0-9A-Za-z])\s*([0-9A-Za-z])/g, "\\frac{$1}{$2}")
-    .replace(/\\frac\s*([0-9A-Za-z])\s*\{/g, "\\frac{$1}{");
+    .replace(/\\frac\s*([0-9A-Za-z])\s*\{/g, "\\frac{$1}{")
+    // Racine abregee : « \sqrt7 », « \sqrt x » -> « \sqrt{7} ».
+    .replace(/\\sqrt\s*([0-9A-Za-z])/g, "\\sqrt{$1}");
   // De l'interieur vers l'exterieur : un groupe sans accolade a la fois.
   for (let k = 0; k < 30; k++) {
     const next = s
       .replace(/\\(?:mathrm|text|operatorname|mathbf|mathit|mathbb|vec|overline)\{([^{}]*)\}/g, "$1")
+      // Groupe nu (« { p}^{2} » de MathLive), pas l'argument d'une commande ni d'un ^ ou _.
+      .replace(/(^|[^\\A-Za-z^_}])\{([^{}]*)\}/g, "$1$2")
       .replace(/(\\frac\{[^{}]*\})\s*([0-9A-Za-z])/g, "$1{$2}")
       .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (_a, n: string, d: string) => `${wrapNum(n)}/${wrapDen(d)}`)
       // « i\sqrt{7} » -> « i sqrt(7) », jamais « isqrt(7) ».

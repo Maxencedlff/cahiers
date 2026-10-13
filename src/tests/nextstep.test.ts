@@ -83,6 +83,13 @@ describe("inconnues du dernier membre : valeurs remplacees", () => {
     const above = ["Conclusion :", chain, "= alpha + beta (p+1/2-i sqrt(7)/2)/(p+1/2+i sqrt(7)/2)"].join("\n");
     expect(nextStepSuggest("donc α =", above)?.insert).toBe(" (-7 + 5i sqrt(7))/56");
     expect(nextStepSuggest("donc β = ", above)?.insert).toBe("(-7 - 5i sqrt(7))/56");
+    // Ligne telle qu'enregistree dans la page (MathLive : « \sqrt7 », « { p}^{2} »).
+    const saved = [
+      "\\frac{2}{ p\\left( p+2\\right)\\left({ p}^{2}+ p+2\\right)} = \\frac{1}{2 p} - \\frac{1}{4\\left( p+2\\right)} - \\frac{ p + 3}{4\\left({ p}^{2}+ p+2\\right)}",
+      "\\frac{\\alpha}{p+\\frac12-\\frac{i\\sqrt7}{2}}", "\\frac{\\beta}{p+\\frac12+i\\;\\frac{\\sqrt7}{2}}",
+    ].map(texToPlain);
+    const line = `${saved[0]}=${saved[1]}+ ${saved[2]}`;
+    expect(nextStepSuggest("donc α =", `${line}\n= alpha + beta (p+1/2-i sqrt(7)/2)/(p+1/2+i sqrt(7)/2)`)?.insert).toBe(" (-7 + 5i sqrt(7))/56");
     // Signe du terme pris en compte : « - b/(p+1) » donne b = 2.
     expect(nextStepSuggest("donc b =", "2/(p(p+1)(p+2)) = a/p - b/(p+1) + c/(p+2)")?.insert).toBe(" 2");
   });
