@@ -416,7 +416,9 @@ class Parser {
       if (t?.t === "op" && PRODUCT.has(t.s)) {
         this.skipSp();
         // Un point suivi d'un espace finit une phrase ("Q1. Zener").
-        if (t.s === "." && this.toks[this.i + 1]?.t !== "id" && this.toks[this.i + 1]?.s !== "(") { this.i = save; break; }
+        // " . " entoure d'espaces dans une formule : un produit ("vbatt . Ru/(R + Ru)").
+        const spacedDot = sp && this.seenOp && this.toks[this.i + 1]?.t === "sp";
+        if (t.s === "." && !spacedDot && this.toks[this.i + 1]?.t !== "id" && this.toks[this.i + 1]?.s !== "(") { this.i = save; break; }
         this.i++;
         this.seenOp = true;
         const rhs = this.unary();
@@ -503,9 +505,12 @@ class Parser {
     const t = this.toks[j];
     if (t?.t !== "id" || t.s in BIGOPS) return false;
     const letter = /^[A-Za-z]$/.test(t.s);
-    if (!letter && (stopWord(t.s) || isUnit(t.s) || !validIdent(t.s))) return false;
+    const deriv = /^d[A-Za-zα-ωΔ]/.test(t.s) && this.toks[j + 1]?.s === "/";
+    if (!letter && !deriv && (stopWord(t.s) || isUnit(t.s) || !validIdent(t.s))) return false;
     const n = this.toks[j + 1];
     if (n?.t === "op" && (n.s === "(" || n.s === "^" || n.s === "_")) return true;
+    // Derivee : "i = C dv/dt".
+    if (n?.t === "op" && n.s === "/" && /^d./.test(t.s) && this.toks[j + 2]?.t === "id" && DIFF.test(this.toks[j + 2].s)) return true;
     const short = letter || isGreek(t.s) || GREEK_SUB.test(t.s) || DELTA.test(t.s) || loneVariable(t.s) || /^j?[A-Z]\d?$/.test(t.s);
     if (!short) return false;
     let k = j + 1;
@@ -797,8 +802,9 @@ class Parser {
       return { tex: identTex(t.s), ops: 0, vars: 1 };
     }
     if (t.t === "other" && (t.s === "[" || t.s === "]")) return this.interval() ?? (t.s === "[" ? this.evalBracket() : null);
-    // Groupe a la LaTeX "{...}" (indice "i_{L(t)}", exposant "e^{-pt}") : invisible.
-    if (t.t === "other" && t.s === "{") {
+    // Groupe a la LaTeX "{...}" colle a "^" ou "_" (indice "i_{L(t)}",
+    // exposant "e^{-pt}") : invisible. Ailleurs ("Ru = {Ru}"), du texte.
+    if (t.t === "other" && t.s === "{" && (this.toks[this.i - 1]?.s === "^" || this.toks[this.i - 1]?.s === "_")) {
       const save = this.i;
       this.i++;
       const inner = this.relation();

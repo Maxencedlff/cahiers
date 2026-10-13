@@ -652,6 +652,7 @@ export class TextDoc {
     this.root.addEventListener("paste", (e) => {
       if (this.field) return;
       e.preventDefault();
+      if (this.live) this.endLive("pause");
       const dt = e.clipboardData;
       // Photo copiee ou coupee dans Cahiers (Ctrl+C / Ctrl+X sur la photo).
       const clipText = (dt?.getData("text/plain") ?? "").trim();
@@ -910,6 +911,7 @@ export class TextDoc {
     if (this.root.isConnected && content === this.content) return;
     this.field = null;
     this.fieldOrigin = null;
+    this.live = null;
     this.lastAuto = null;
     this.lastLine = null;
     this.root.replaceChildren();
@@ -1966,6 +1968,7 @@ export class TextDoc {
    */
   insertLive(id: string, atCaret: boolean): HTMLElement {
     if (this.field) this.commit(null);
+    if (this.live) this.endLive(null);
     const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
     if (r) liftToRoot(r, this.root, 1);
     const fig = this.insertImage(id, r ?? undefined, true);
@@ -1981,6 +1984,7 @@ export class TextDoc {
    */
   insertFormula(latex: string, atCaret: boolean): HTMLElement {
     if (this.field) this.commit(null);
+    if (this.live) this.endLive(null);
     this.lastAuto = null;
     const eq = makeEq(latex);
     const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
@@ -2017,6 +2021,7 @@ export class TextDoc {
    */
   insertDoc(md: string, atCaret: boolean): void {
     if (this.field) this.commit(null);
+    if (this.live) this.endLive(null);
     this.lastAuto = null;
     const frag = this.buildNodes(parseDoc(md));
     const tail = anchor();
@@ -4002,8 +4007,6 @@ function docFromHtml(html: string): string {
   const doc = new DOMParser().parseFromString(html, "text/html");
   return doc.querySelector("[data-cahiers]")?.getAttribute("data-cahiers") ?? "";
 }
-
-
 
 function insertInField(mf: MathfieldElement, template: string): void {
   // Alt+P (Alt+I) dans l'exposant (l'indice) deja rempli : on en sort, comme une bascule.

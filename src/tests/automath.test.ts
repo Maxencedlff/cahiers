@@ -593,6 +593,11 @@ describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
     expect(one("y = e^t gamma(t)").tex).toBe("y = e^{t}\\,\\gamma\\left(t\\right)");
     expect(one("lim_(p->0) p S(p)").tex).toBe("\\lim_{p \\to 0} p\\,S\\left(p\\right)");
     expect(one("int_0^T A e^(-pt) dt").tex).toBe("\\int_{0}^{T} A\\,e^{-p\\,t}\\,\\mathrm{d}t");
+    expect(one("i = C dv/dt").tex).toBe("i = C\\,\\frac{\\mathrm{d}v}{\\mathrm{d}t}");
+    expect(one("E = m c^2").tex).toBe("E = m\\,c^{2}");
+    expect(one("vs = vbatt . Ru/(R + Ru)").tex).toBe("v_s = \\frac{v_{batt} \\cdot R_u}{R + R_u}");
+    // Point colle au mot d'avant : fin de phrase.
+    expect(findFormulas("on a x = 2. Ensuite y = 3").map((f) => f.latex)).toEqual(["x = 2", "y = 3"]);
     expect(one("dvs/dt = ic/C").tex).toBe("\\frac{\\mathrm{d}v_s}{\\mathrm{d}t} = \\frac{i_c}{C}");
     expect(one("iL(t) - iL(0) = E(1-alpha)/L t").tex)
       .toBe("i_L\\left(t\\right) - i_L\\left(0\\right) = \\frac{E\\left(1 - \\alpha\\right)}{L}\\,t");
