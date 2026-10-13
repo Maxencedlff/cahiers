@@ -10,9 +10,10 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, mathWordsAtEnd, planLine, slashOpensFraction,
-  subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
+  cleanMathLive, findFormulas, greekWordAtEnd, liveComplete, liveFormula, mathWordsAtEnd, planLine,
+  slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
+import { PALETTE } from "../core/palette";
 import { recordLatex } from "../core/symbols";
 import { appAltKey } from "../core/templates";
 import { linesToReach, TEXT_LEFT, TEXT_RIGHT } from "../core/textlayout";
@@ -224,6 +225,7 @@ export function setTypingColor(color: ColorKey | null): void {
   typingColor = color;
   // Texte selectionne : il prend la couleur, comme dans Word.
   lastDoc?.colorSelection(color);
+  lastDoc?.paintColorTag();
 }
 
 /** Presse-papiers interne : le morceau copie, formules et couleurs comprises. */
@@ -242,20 +244,6 @@ const SYMBOL_CHARS: Record<string, string> = {
   "\\pm": "±", "\\partial": "∂", "\\Omega": "Ω", "\\eta": "η", "\\varepsilon": "ε",
 };
 
-/**
- * Raccourcis d'une fraction ouverte par "/" : lettres grecques et fonctions
- * seulement. Les raccourcis complets de MathLive changent "or" en ∨ jusque
- * dans "rapport".
- */
-const AUTO_SHORTCUTS: Record<string, string> = {
-  alpha: "\\alpha", beta: "\\beta", gamma: "\\gamma", delta: "\\delta", eps: "\\varepsilon",
-  epsilon: "\\varepsilon", eta: "\\eta", theta: "\\theta", lambda: "\\lambda", mu: "\\mu",
-  pi: "\\pi", rho: "\\rho", sigma: "\\sigma", tau: "\\tau", phi: "\\varphi", omega: "\\omega",
-  Gamma: "\\Gamma", Delta: "\\Delta", Theta: "\\Theta", Lambda: "\\Lambda", Sigma: "\\Sigma",
-  Phi: "\\Phi", Omega: "\\Omega",
-  sin: "\\sin", cos: "\\cos", tan: "\\tan", ln: "\\ln", log: "\\log", exp: "\\exp",
-  sqrt: "\\sqrt{#?}",
-};
 
 /**
  * Raccourcis ajoutes a ceux de MathLive dans Alt+=. "in" : jamais colle a
@@ -282,8 +270,6 @@ interface Line { segs: LineSeg[]; full: string; curStart: number }
 /** Mot grec remplace par sa lettre : `at` = position juste apres la lettre. */
 interface GreekDone { node: Text; at: number; word: string; char: string }
 
-/** Fraction ouverte par "/" : ce qui a servi de numerateur. */
-interface AutoFrac { mf: MathfieldElement; numSrc: string; head: string }
 
 export class TextDoc {
   readonly root: HTMLElement;
@@ -294,8 +280,6 @@ export class TextDoc {
   private quiet = false;
   /** Formule rouverte : son LaTeX et sa source, pour la rendre intacte si rien ne change. */
   private fieldOrigin: { latex: string; src?: string; value: string } | null = null;
-  /** Fraction ouverte automatiquement par "/", s'il y en a une. */
-  private autoFrac: AutoFrac | null = null;
   /** Fractions de la formule ouvertes par "/" tape (pas par un modele). */
   private slashFracs = new WeakSet<object>();
   /** "/" vient d'etre tape : la fraction creee est relevee au prochain input. */
@@ -309,6 +293,16 @@ export class TextDoc {
    * "traverse"), Retour arriere efface normalement et seul Ctrl+Z l'annule.
    */
   private lastAuto: { eqs: HTMLElement[]; greek?: GreekDone | null; expectSpace: boolean; atCaret: boolean } | null = null;
+  /**
+   * Formule en cours de frappe derriere un "/" : le texte tape (`src`, depuis
+   * le debut de la formule) se dessine en formule a chaque touche, lu par le
+   * meme analyseur que le reste du texte (liveFormula). Le curseur reste
+   * juste apres. `base` : le texte a l'ouverture ("num/"), Retour arriere
+   * la rend en texte. Jamais l'editeur MathLive.
+   */
+  private live: { eq: HTMLElement; src: string; base: string } | null = null;
+  /** Etiquette de la couleur de frappe, en marge de la ligne du curseur. */
+  private colorTag: HTMLElement | null = null;
   /** La derniere relecture a fini sa derniere formule au curseur (voir planLine). */
   private madeAtCaret = false;
   /** Lettre grecque posee par la derniere relecture ("pi" -> π). */
@@ -326,6 +320,7 @@ export class TextDoc {
     if (!sel?.rangeCount) return;
     const r = sel.getRangeAt(0);
     if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
+    this.paintColorTag();
     this.markSelectedEqs(sel.isCollapsed ? null : r);
     // Curseur deplace : la suggestion grisee ne vaut plus.
     const g = this.ghostAt;
@@ -514,6 +509,7 @@ export class TextDoc {
    */
   dispose(): void {
     this.hideGhost();
+    this.colorTag?.remove();
     document.removeEventListener("selectionchange", this.onSelectionChange);
     document.removeEventListener("pointerdown", this.onOutsideDown, { capture: true });
     this.dropMarker?.remove();
@@ -541,6 +537,11 @@ export class TextDoc {
     this.root.addEventListener("input", (e) => {
       if (this.quiet) return;
       const ie = e as InputEvent;
+      // Fraction en cours de frappe : ce qui vient d'etre tape la prolonge.
+      if (this.live) {
+        if (!ie.isComposing) this.absorbLive();
+        if (this.live) { this.emit(); return; }
+      }
       this.tidyLines();
       // Ctrl+Z d'un remplacement ("→" redevient "->") : le navigateur
       // reselectionne "->", la frappe suivante l'effacerait. Curseur apres.
@@ -553,33 +554,24 @@ export class TextDoc {
         if (this.lastAuto.expectSpace && ie.inputType === "insertText" && ie.data === " ") this.lastAuto.expectSpace = false;
         else this.lastAuto = null;
       }
-      // Espace fine insecable devant : ; ? ! (hors code et formule).
-      if (!this.field && ie.inputType === "insertText" && ie.data && ":;?!".includes(ie.data)) {
-        this.replaceBeforeCaret(frenchSpaceAtEnd);
-      }
-      // `commande` : le texte entre les deux ` passe en chasse fixe.
-      if (!this.field && ie.inputType === "insertText" && ie.data === "`" && this.autoCode()) { this.emit(); return; }
-      // Symbole a deux touches remplace tout de suite ("->" -> →), puis
-      // la formule se met en forme apres une courte pause de frappe.
-      if (autoMath && !this.field && ie.inputType === "insertText") {
-        this.replaceBeforeCaret(symbolAtEnd);
-        if (this.idleTimer) clearTimeout(this.idleTimer);
-        this.idleTimer = setTimeout(() => {
-          this.idleTimer = null;
-          const sel = document.getSelection();
-          if (this.field || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
-          const made = this.convertLine("pause");
-          if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret };
-          this.scheduleGhost();
-        }, 900);
-      }
-      if (ie.inputType === "insertText" && !ie.isComposing) this.scheduleGhost();
-      else this.hideGhost();
+      // Touche morte (« ^ » en AZERTY) : la frappe arrive en composition,
+      // traitee a sa fin (compositionend) comme une frappe ordinaire.
+      if (ie.inputType === "insertText") { if (this.afterTyped(ie.data ?? "")) return; }
+      else if (!ie.isComposing) this.hideGhost();
+      this.emit();
+    });
+    this.root.addEventListener("compositionend", (e) => {
+      if (this.quiet || this.field) return;
+      const data = e.data ?? "";
+      if (this.live) { this.absorbLive(); this.emit(); return; }
+      if (!data) return;
+      this.colorComposed(data);
+      this.afterTyped(data);
       this.emit();
     });
     // "[[" : selecteur de lien (core/links.ts), avant la frappe en couleur.
     this.root.addEventListener("beforeinput", (e) => {
-      if (this.field || e.inputType !== "insertText" || e.data !== "[" || !this.links) return;
+      if (this.field || this.live || e.inputType !== "insertText" || e.data !== "[" || !this.links) return;
       if (this.openPicker()) { e.preventDefault(); e.stopImmediatePropagation(); }
     });
     // Frappe dans la couleur choisie : si le curseur n'est pas deja dans un
@@ -597,8 +589,15 @@ export class TextDoc {
     });
     this.root.addEventListener("keydown", (e) => this.onKey(e));
     // Un clic ailleurs : la derniere mise en forme n'est plus annulable.
-    this.root.addEventListener("pointerdown", () => { this.lastAuto = null; this.lastLine = null; this.hideGhost(); });
-    this.root.addEventListener("focusout", () => this.hideGhost());
+    this.root.addEventListener("pointerdown", () => {
+      if (this.live) this.endLive("pause");
+      this.lastAuto = null; this.lastLine = null; this.hideGhost();
+    });
+    this.root.addEventListener("focusout", () => {
+      this.hideGhost();
+      this.colorTag?.remove();
+      if (this.live) this.endLive("pause");
+    });
     this.root.addEventListener("compositionstart", () => this.hideGhost());
     this.root.addEventListener("focusin", () => { lastDoc = this; });
     this.root.addEventListener("click", (e) => {
@@ -692,6 +691,217 @@ export class TextDoc {
     });
   }
 
+  /**
+   * Apres une frappe de texte (insertText, ou fin de composition d'une
+   * touche morte) : espace fine, `code`, symbole a deux touches, mise en
+   * forme a la pause, suggestion. Vrai si la frappe est deja enregistree.
+   */
+  private afterTyped(data: string): boolean {
+    if (this.field) return false;
+    // Espace fine insecable devant : ; ? ! (hors code et formule).
+    if (data && ":;?!".includes(data)) this.replaceBeforeCaret(frenchSpaceAtEnd);
+    // `commande` : le texte entre les deux ` passe en chasse fixe.
+    if (data === "`" && this.autoCode()) { this.emit(); return true; }
+    // Symbole a deux touches remplace tout de suite ("->" -> →), puis
+    // la formule se met en forme apres une courte pause de frappe.
+    if (autoMath) {
+      this.replaceBeforeCaret(symbolAtEnd);
+      if (this.idleTimer) clearTimeout(this.idleTimer);
+      this.idleTimer = setTimeout(() => {
+        this.idleTimer = null;
+        const sel = document.getSelection();
+        if (this.field || this.live || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
+        const made = this.convertLine("pause");
+        if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret };
+        this.scheduleGhost();
+      }, 900);
+    }
+    this.scheduleGhost();
+    return false;
+  }
+
+  /**
+   * Texte compose (touche morte) qui n'a pas pris la couleur de frappe :
+   * mis dans un segment de cette couleur, comme une frappe ordinaire.
+   */
+  private colorComposed(data: string): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (!(node instanceof Text) || !this.root.contains(node) || colorAt(node, this.root) === typingColor) return;
+    if (node.parentElement?.closest("code, .eq")) return;
+    const off = r.startOffset;
+    if (off < data.length || node.data.slice(off - data.length, off) !== data) return;
+    const range = document.createRange();
+    range.setStart(node, off - data.length);
+    range.setEnd(node, off);
+    insertColored(range, data);
+  }
+
+  /**
+   * Etiquette de la couleur de frappe en marge de la ligne du curseur,
+   * tant qu'elle est active : on voit que la suite sera « Théorème ».
+   */
+  paintColorTag(): void {
+    const host = this.root.parentElement;
+    const sel = document.getSelection();
+    const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
+    const entry = typingColor ? PALETTE.find((p) => p.key === typingColor) : undefined;
+    const show = !!entry && !!host && !!r && sel!.isCollapsed && this.root.contains(r.startContainer)
+      && this.root.contentEditable !== "false" && document.activeElement === this.root;
+    const rect = show ? caretRect(r!, this.root) : null;
+    if (!show || !rect || !entry || !host) { this.colorTag?.remove(); return; }
+    const tag = this.colorTag ?? el("div", { class: "text-color-tag", "aria-hidden": "true" });
+    this.colorTag = tag;
+    tag.textContent = entry.label;
+    tag.style.color = inkCssColor(entry.key);
+    if (!tag.isConnected) host.append(tag);
+    const hr = host.getBoundingClientRect();
+    const padL = parseFloat(getComputedStyle(this.root).paddingLeft) || 0;
+    tag.style.right = `${Math.round(hr.width - padL + 8)}px`;
+    tag.style.top = `${Math.round(rect.top - hr.top + (rect.height - tag.offsetHeight) / 2)}px`;
+  }
+
+  /* ---------------- formule tapee derriere "/" ---------------- */
+
+  /** Dessine la formule en cours a partir de son texte. */
+  private paintLive(): void {
+    const lv = this.live;
+    if (!lv) return;
+    const tex = liveFormula(lv.src);
+    const eq = tex !== null ? makeEq(tex, lv.src)
+      : el("span", { class: "eq eq-raw", contenteditable: "false", dataset: { latex: "", src: lv.src } }, lv.src);
+    eq.classList.add("live");
+    lv.eq.replaceWith(eq);
+    lv.eq = eq;
+  }
+
+  /** Curseur juste apres la formule en cours, dans un texte. */
+  private caretAfterLive(rest = ""): void {
+    const lv = this.live;
+    if (!lv) return;
+    const next = lv.eq.nextSibling;
+    let t: Text;
+    if (next instanceof Text) { t = next; t.insertData(0, "\u200b" + rest); }
+    else { t = document.createTextNode("\u200b" + rest); lv.eq.after(t); }
+    document.getSelection()?.collapse(t, 1 + rest.length);
+  }
+
+  /**
+   * Ce qui a ete tape juste apres la formule en cours passe dedans, jusqu'a
+   * ce qui la ferme : Espace, relation, virgule ou point quand le terme est
+   * fini, parenthese fermante sans ouvrante. Le reste reste du texte.
+   */
+  private absorbLive(): void {
+    const lv = this.live;
+    if (!lv) return;
+    const sel = document.getSelection();
+    if (!lv.eq.isConnected || !sel?.rangeCount || !sel.isCollapsed) { this.endLive("pause"); return; }
+    const r = sel.getRangeAt(0);
+    const parent = lv.eq.parentNode!;
+    const after = r.startContainer === parent
+      ? r.startOffset > Array.prototype.indexOf.call(parent.childNodes, lv.eq)
+      : !!(lv.eq.compareDocumentPosition(r.startContainer) & Node.DOCUMENT_POSITION_FOLLOWING) && !lv.eq.contains(r.startContainer);
+    // Curseur ailleurs qu'apres la formule : on a quitte la frappe.
+    if (!after) { this.endLive("pause"); return; }
+    const typed = document.createRange();
+    typed.setStartAfter(lv.eq);
+    typed.setEnd(r.startContainer, r.startOffset);
+    if (typed.cloneContents().querySelector?.(".eq, .doc-img, br, .dl")) { this.endLive("pause"); return; }
+    const text = typed.toString().replace(/\u200b/g, "");
+    if (!text) return;
+    let k = 0;
+    for (; k < text.length; k++) {
+      const c = text[k];
+      const balanced = count(lv.src, "(") <= count(lv.src, ")");
+      if (c === ")" && balanced) break;
+      if (c === "\n" || (liveComplete(lv.src) && " =<>,;.:!?≈≤≥≠→⇒⇔".includes(c))) break;
+      lv.src += c;
+    }
+    typed.deleteContents();
+    const rest = text.slice(k);
+    this.paintLive();
+    this.caretAfterLive(rest);
+    if (rest) this.endLive("pause");
+  }
+
+  /**
+   * Fin de la formule en cours : elle redevient le texte tape, relu avec la
+   * ligne (`mode`, null = sans relecture : l'appelant s'en charge).
+   */
+  private endLive(mode: ScanMode | null): void {
+    const lv = this.live;
+    this.live = null;
+    if (!lv?.eq.isConnected) return;
+    const sel = document.getSelection();
+    const r = sel?.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+    // Dans le texte du curseur : la relecture le prend comme la frappe en cours.
+    const next = lv.eq.nextSibling;
+    if (next instanceof Text) {
+      // (Le curseur, apres le \u200b de tete, suit l'insertion tout seul.)
+      next.insertData(0, lv.src);
+      lv.eq.remove();
+    } else {
+      lv.eq.replaceWith(document.createTextNode(lv.src));
+      if (r && sel && r.startContainer.isConnected) { sel.removeAllRanges(); sel.addRange(r); }
+    }
+    if (mode && autoMath) {
+      const made = this.convertLine(mode);
+      if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret };
+    }
+    this.emit();
+  }
+
+  /** La formule en cours rendue en texte tel quel (Ctrl+Z, Retour arriere a l'ouverture). */
+  private dropLive(): void {
+    const lv = this.live;
+    this.live = null;
+    if (!lv?.eq.isConnected) return;
+    const raw = rawSpan(lv.src);
+    lv.eq.replaceWith(raw);
+    this.caretBeside(raw, true);
+    this.emit();
+  }
+
+  /** Touche pendant la frappe d'une formule au "/". Vrai si elle est prise ici. */
+  private liveKey(e: KeyboardEvent): boolean {
+    const lv = this.live!;
+    if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process"].includes(e.key)) return true;
+    const mod = e.ctrlKey || e.metaKey || e.altKey;
+    if (e.key === "Backspace" && !mod) {
+      e.preventDefault();
+      if (lv.src === lv.base) { this.dropLive(); return true; }
+      lv.src = lv.src.slice(0, -1);
+      this.paintLive();
+      this.caretAfterLive();
+      this.emit();
+      return true;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      this.dropLive();
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      this.endLive("pause");
+      return true;
+    }
+    // Espace : sort de la fraction si le terme est fini (la relecture de
+    // l'Espace suit), sinon il s'y ecrit ("1/(1 + x)").
+    if (e.key === " " && !mod) {
+      if (liveComplete(lv.src)) { this.endLive(null); return false; }
+      return true;
+    }
+    if (e.key === "Enter") { this.endLive(null); return false; }
+    // Caractere tape : il arrive par input et prolonge la formule.
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) return true;
+    this.endLive("pause");
+    return false;
+  }
+
   /* ---------------- contenu ---------------- */
 
   get content(): string { return serializeDoc(this.read()); }
@@ -701,7 +911,6 @@ export class TextDoc {
     if (this.root.isConnected && content === this.content) return;
     this.field = null;
     this.fieldOrigin = null;
-    this.autoFrac = null;
     this.lastAuto = null;
     this.lastLine = null;
     this.root.replaceChildren();
@@ -793,6 +1002,11 @@ export class TextDoc {
         if (child.classList.contains("doc-link")) {
           const d = child.dataset;
           if (d.href) out.push({ kind: "link", label: d.label ?? child.textContent ?? "", href: d.href, ...(d.hint ? { hint: d.hint } : {}) });
+          continue;
+        }
+        // Formule en cours de frappe au "/" : enregistree telle que tapee.
+        if (child.classList.contains("eq") && child.classList.contains("live")) {
+          out.push({ kind: "text", text: child.dataset.src ?? "", bold, italic, color });
           continue;
         }
         if (child.classList.contains("eq")) {
@@ -2295,7 +2509,7 @@ export class TextDoc {
    * Rend une formule figee editable. `at` : ou poser le curseur dedans.
    * `template` : LaTeX MathLive a inserer aussitot (#? = case a remplir).
    */
-  private editEq(eq: HTMLElement, at: "start" | "end", template = "", numSrc?: string): void {
+  private editEq(eq: HTMLElement, at: "start" | "end", template = ""): void {
     if (editingDoc && editingDoc !== this) editingDoc.commit(null);
     if (this.field) this.commit(null);
     this.lastAuto = null;
@@ -2313,14 +2527,10 @@ export class TextDoc {
     mf.smartSuperscript = false;
     // Les Alt+lettre sont a l'appli (Alt+P puissance, Alt+V vecteur...).
     mf.keybindings = mf.keybindings.filter((k) => !appAltKey(k.key));
-    // Raccourcis en minuscules seulement : "PI" reste P fois I. Dans une
-    // fraction ouverte par "/", grecs et fonctions seulement.
-    mf.inlineShortcuts = numSrc !== undefined
-      ? AUTO_SHORTCUTS
-      : { ...mf.inlineShortcuts, ...FIELD_SHORTCUTS };
+    // Raccourcis en minuscules seulement : "PI" reste P fois I.
+    mf.inlineShortcuts = { ...mf.inlineShortcuts, ...FIELD_SHORTCUTS };
     this.field = mf;
     this.fieldOrigin = template ? null : { latex: eq.dataset.latex ?? "", src: eq.dataset.src, value: mf.getValue("latex").trim() };
-    this.autoFrac = null;
     editingDoc = this;
     lastDoc = this;
 
@@ -2366,10 +2576,6 @@ export class TextDoc {
     if (template) {
       mf.insert(template, { selectionMode: "placeholder", focus: true });
       lowerBoundFirst(mf);
-      if (numSrc !== undefined) {
-        const parts = fracParts(mf.getValue("latex"));
-        if (parts) this.autoFrac = { mf, numSrc, head: parts.head };
-      }
       this.emit();
     } else {
       mf.position = at === "start" ? 0 : mf.lastOffset;
@@ -2410,9 +2616,7 @@ export class TextDoc {
     if (editingDoc === this) editingDoc = null;
     const value = mf.getValue("latex").trim();
     const origin = this.fieldOrigin;
-    const auto = this.autoFrac?.mf === mf ? this.autoFrac : null;
     this.fieldOrigin = null;
-    this.autoFrac = null;
     this.root.contentEditable = "true";
 
     let eq: HTMLElement | null = null;
@@ -2421,13 +2625,10 @@ export class TextDoc {
       // prolongeable par la frappe qui suit.
       eq = makeEq(origin.latex, origin.src);
     } else if (cleanMathLive(value)) {
-      // Fraction ouverte par "/" et denominateur simple : relue comme le
-      // texte ("Id = Vz/R1"), elle reste prolongeable elle aussi.
-      const typed = auto ? autoSource(auto, value) : null;
       // Sortie MathLive relue pour KaTeX (\differentialD, cases vides),
       // puis les indices ; si KaTeX refuse le resultat, la version sans.
       const clean = cleanMathLive(value);
-      eq = typed ? makeEq(typed.latex, typed.src) : makeEq(firstRendered([subscriptVars(clean), clean]));
+      eq = makeEq(firstRendered([subscriptVars(clean), clean]));
     }
     let mark: Node;
     if (eq) {
@@ -2455,7 +2656,6 @@ export class TextDoc {
   /** Touche dans la formule en cours : vrai si elle est traitee ici. */
   private fieldKey(key: string, shift: boolean, mf: MathfieldElement): boolean {
     const value = mf.getValue("latex");
-    const auto = this.autoFrac?.mf === mf ? this.autoFrac : null;
     // "sqrt(x)" puis ")" : la racine est finie, la parenthese ferme celle d'avant.
     if (key === ")" && endOfBalancedSurd(mf)) mf.executeCommand("moveAfterParent");
     // "_" ou "^" tapes a la LaTeX ("int_0^1") : deja dans la case ; "^"
@@ -2485,64 +2685,18 @@ export class TextDoc {
     // Exposant ou indice fini au bout d'une formule posee depuis le texte
     // (e Alt+P 23) : Espace rend la main au texte ("e^{23} suite"), fleche
     // droite sort d'un coup. Dans une formule rouverte, rien ne change.
-    if (!auto && !shift && (key === " " || key === "ArrowRight") && !this.fieldOrigin
+    if (!shift && (key === " " || key === "ArrowRight") && !this.fieldOrigin
       && ((endOfScript(mf) && scriptIsLast(mf)) || (key === " " && afterLastScript(mf)))) {
       this.commit(true);
       if (key === " ") this.insertTextAtCaret(" ");
       return true;
     }
     // Espace a la fin d'un indice ou d'une borne remplis : on en sort ("int_0^1 x").
-    if (key === " " && !auto && endOfScript(mf)) mf.executeCommand("moveAfterParent");
-    if (auto) {
-      const parts = fracParts(value);
-      const den = parts ? parts.den.replace(/\\placeholder\{\}/g, "").trim() : null;
-      // Retour arriere juste apres l'ouverture : "num/" redevient du texte
-      // ("10 m/s", "les E/S" quand la barre n'etait pas une fraction).
-      if (key === "Backspace" && den === "" && parts?.head === auto.head) {
-        this.undoAutoFrac(mf, auto);
-        return true;
-      }
-      const balanced = den !== null && count(den, "(") === count(den, ")");
-      if (key === " ") {
-        // Espace avant le denominateur ("Vz / R") : sans effet.
-        if (den === "") return true;
-        // Denominateur fini : la fraction se ferme, la phrase continue en texte.
-        if (den && balanced) {
-          const eq = this.commit(true);
-          const made = autoMath ? this.convertLine("space") : [];
-          this.insertTextAtCaret(" ");
-          this.lastAuto = made.length ? { eqs: made, expectSpace: false, atCaret: this.madeAtCaret }
-            : eq ? { eqs: [eq], expectSpace: false, atCaret: true } : null;
-          return true;
-        }
-      }
-      // Une relation derriere le denominateur (« 3/p = ») ferme la fraction,
-      // la suite s'ecrit dans le texte (et se relit avec).
-      if (DEN_EXIT_TEXT.has(key) && den && balanced && endOfSlashDen(mf, null)) {
-        this.commit(true);
-        this.insertTextAtCaret(key);
-        return true;
-      }
-      // Parenthese fermante sans ouvrante dans le denominateur : elle ferme
-      // celle d'avant la fraction ("Vz (1 + R2/R1)").
-      if (key === ")" && den && balanced) {
-        this.commit(true);
-        this.insertTextAtCaret(")");
-        return true;
-      }
-      if (key === "Enter" && !shift) {
-        this.commit(true);
-        if (autoMath) this.convertLine("final");
-        this.newLine();
-        return true;
-      }
-    }
-    if (!auto) {
-      if (key === "/") this.pendingSlash = true;
-      // Une relation ou l'Espace derriere le denominateur d'une fraction
-      // tapee au "/" en sort ; « + » et « - » restent en bas.
-      if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) mf.executeCommand("moveAfterParent");
-    }
+    if (key === " " && endOfScript(mf)) mf.executeCommand("moveAfterParent");
+    if (key === "/") this.pendingSlash = true;
+    // Une relation ou l'Espace derriere le denominateur d'une fraction
+    // tapee au "/" en sort ; « + » et « - » restent en bas.
+    if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) mf.executeCommand("moveAfterParent");
     // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
     if (key === "Enter" && !shift) {
       this.commit(true);
@@ -2565,18 +2719,6 @@ export class TextDoc {
     return false;
   }
 
-  /** Annule la fraction automatique : le numerateur et la barre redeviennent du texte. */
-  private undoAutoFrac(mf: MathfieldElement, auto: AutoFrac): void {
-    this.field = null;
-    this.fieldOrigin = null;
-    this.autoFrac = null;
-    if (editingDoc === this) editingDoc = null;
-    this.root.contentEditable = "true";
-    const raw = rawSpan(`${auto.numSrc}/`);
-    mf.replaceWith(raw);
-    this.emit();
-    this.caretBeside(raw, true);
-  }
 
   /**
    * Pose une formule au curseur. `template` est du LaTeX MathLive ; #@ prend
@@ -2585,6 +2727,7 @@ export class TextDoc {
    */
   insertMath(template = ""): void {
     if (this.field) { insertInField(this.field, template); return; }
+    if (this.live) this.endLive("pause");
     this.root.focus({ preventScroll: true });
     const sel = document.getSelection();
     let range = sel?.rangeCount ? sel.getRangeAt(0) : null;
@@ -2918,18 +3061,23 @@ export class TextDoc {
     if (fi < 0) fi = segs.length - 1;
     const first = segs[fi];
     const touched = segs.slice(fi);
-    const prevLatex = touched.filter((s) => s.kind === "eq").map((s) => (s.node as HTMLElement).dataset.latex ?? "").join(" ");
     const lead = first.kind === "eq" ? "" : first.head + first.str.slice(0, found.start - first.a);
     const marker = document.createTextNode("");
     (first.node.parentNode ?? parent).insertBefore(marker, first.node);
     for (const s of touched) s.node.parentNode?.removeChild(s.node);
-    const eq = makeEq("");
+    // La formule se dessine depuis le texte tape, sans editeur : le "/" et
+    // la suite s'y ajoutent a chaque touche (voir absorbLive).
+    const src = `${num}/`;
+    const eq = el("span", { class: "eq live", contenteditable: "false" });
     if (lead) marker.parentNode!.insertBefore(document.createTextNode(lead), marker);
     marker.parentNode!.insertBefore(eq, marker);
-    marker.parentNode!.insertBefore(document.createTextNode("\u200b" + after), marker);
+    if (after) marker.parentNode!.insertBefore(document.createTextNode(after), marker);
     marker.remove();
-    recordLatex(found.latex.replace(MARK, ""), prevLatex);
-    this.editEq(eq, "end", found.latex.replace(MARK, "#?"), num);
+    this.live = { eq, src, base: src };
+    this.lastAuto = null;
+    this.paintLive();
+    this.caretAfterLive();
+    this.emit();
     return true;
   }
 
@@ -3355,6 +3503,11 @@ export class TextDoc {
 
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
+    // Fraction en cours de frappe au "/" : ses touches d'abord.
+    if (this.live) {
+      if (!this.live.eq.isConnected) this.live = null;
+      else if (this.liveKey(e)) return;
+    }
     // Suggestion grisee : Fleche droite la pose, Echap l'oublie, le reste aussi.
     if (this.ghostAt && !["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) {
       const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
@@ -3425,8 +3578,13 @@ export class TextDoc {
     // et se relit sans surprise. Seuls les titres et les puces ont un bloc.
     if (e.key === "Enter") {
       e.preventDefault();
+      // Formule selectionnee (Maj+fleche) : Entree l'ouvre pour la corriger.
+      const picked = !e.shiftKey && !e.ctrlKey && !e.altKey ? this.selectedEq() : null;
+      if (picked) { this.editEq(picked, "end"); return; }
       if (autoMath) this.convertLine("final");
       this.newLine();
+      // La couleur de frappe vaut pour la ligne : la suivante repart en noir.
+      if (typingColor) { typingColor = null; this.paintColorTag(); }
       return;
     }
     // Debut de ligne "# ", "- ", "1. " : titre ou liste (D11).
@@ -3460,17 +3618,21 @@ export class TextDoc {
       }
       return;
     }
-    // Retour arriere ou Suppr colle a une formule : on entre dedans pour la
-    // corriger au clavier, au lieu de l'effacer d'un bloc.
-    if ((e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey) {
+    // Retour arriere ou Suppr colle a une formule : elle part d'un bloc,
+    // Ctrl+Z la rend (jamais l'editeur ; un clic ou Entree l'ouvre).
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey && !e.altKey && !e.metaKey) {
       const sel = document.getSelection();
       if (sel?.rangeCount && sel.isCollapsed) {
-        const forward = e.key === "Delete";
-        const eq = neighbour(sel.getRangeAt(0), forward);
+        const eq = neighbour(sel.getRangeAt(0), e.key === "Delete");
         if (eq instanceof HTMLElement && eq.classList.contains("eq")) {
           e.preventDefault();
-          this.editEq(eq, forward ? "start" : "end");
-          if (!forward && waiting) waiting.keys.push(new KeyboardEvent("keydown", { key: "Backspace" }));
+          const r = document.createRange();
+          r.selectNode(eq);
+          sel.removeAllRanges();
+          sel.addRange(r);
+          // Par la pile d'annulation du navigateur : Ctrl+Z la remet.
+          if (!document.execCommand("delete")) eq.remove();
+          this.emit();
           return;
         }
       }
@@ -3486,16 +3648,21 @@ export class TextDoc {
       if (k === "b" || k === "g") { e.preventDefault(); document.execCommand("bold"); this.emit(); return; }
       if (k === "i") { e.preventDefault(); document.execCommand("italic"); this.emit(); return; }
     }
-    // Fleches : entrer dans la formule voisine au lieu de la sauter.
-    if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !e.shiftKey) {
-      const sel = document.getSelection();
-      if (!sel?.rangeCount || !sel.isCollapsed) return;
-      const next = neighbour(sel.getRangeAt(0), e.key === "ArrowRight");
-      if (next instanceof HTMLElement && next.classList.contains("eq")) {
-        e.preventDefault();
-        this.editEq(next, e.key === "ArrowRight" ? "start" : "end");
-      }
-    }
+    // Fleches : elles passent la formule d'un bloc (un clic ou Entree sur
+    // la formule selectionnee l'ouvre).
+  }
+
+  /** Formule seule dans la selection (rien d'autre que des blancs autour), sinon null. */
+  private selectedEq(): HTMLElement | null {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || sel.isCollapsed) return null;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.commonAncestorContainer)) return null;
+    const eqs = Array.from(this.root.querySelectorAll<HTMLElement>(".eq")).filter((q) => r.intersectsNode(q));
+    if (eqs.length !== 1) return null;
+    const frag = r.cloneContents();
+    frag.querySelectorAll(".eq").forEach((q) => q.remove());
+    return (frag.textContent ?? "").replace(/[\s\u200b]/g, "") ? null : eqs[0];
   }
 }
 
@@ -3826,52 +3993,6 @@ function count(s: string, c: string): number {
   return s.split(c).length - 1;
 }
 
-/**
- * Derniere fraction d'une formule MathLive, quand elle la termine :
- * `head` = tout jusqu'au numerateur compris, `den` = le denominateur.
- */
-function fracParts(latex: string): { head: string; den: string } | null {
-  // MathLive abrege les fractions de chiffres (\frac34) : on remet les accolades.
-  const full = latex.trimEnd()
-    .replace(/\\frac(\d)(\d)/g, "\\frac{$1}{$2}")
-    .replace(/\\frac(\d)(?=\{)/g, "\\frac{$1}")
-    .replace(/(\\frac\{[^{}]*\})([0-9A-Za-z])$/, "$1{$2}");
-  const last = lastGroup(full);
-  if (!last) return null;
-  const num = lastGroup(last.before);
-  if (!num || !/\\frac\s*$/.test(num.before)) return null;
-  return { head: last.before, den: last.body };
-}
-
-/** Dernier groupe {...} qui termine `s`, et ce qui le precede. */
-function lastGroup(s: string): { before: string; body: string } | null {
-  const t = s.trimEnd();
-  if (!t.endsWith("}")) return null;
-  let depth = 0;
-  for (let i = t.length - 1; i >= 0; i--) {
-    const c = t[i];
-    if ((c === "{" || c === "}") && t[i - 1] === "\\") { i--; continue; }
-    if (c === "}") depth++;
-    else if (c === "{" && --depth === 0) return { before: t.slice(0, i), body: t.slice(i + 1, -1) };
-  }
-  return null;
-}
-
-/**
- * Formule saisie dans une fraction ouverte par "/" : si le numerateur n'a
- * pas bouge et que le denominateur est simple ("R1", "(beta.Ru)"), elle est
- * relue comme du texte tape (meme rendu que le reste, source gardee).
- */
-function autoSource(auto: AutoFrac, value: string): { latex: string; src: string } | null {
-  const parts = fracParts(value);
-  if (!parts || parts.head !== auto.head) return null;
-  const den = latexToSource(parts.den);
-  if (!den) return null;
-  const src = `${auto.numSrc}/${den}`;
-  const f = findFormulas(src);
-  if (f.length !== 1 || f[0].start !== 0 || f[0].end !== src.trimEnd().length) return null;
-  return { latex: f[0].latex, src };
-}
 
 function insertInField(mf: MathfieldElement, template: string): void {
   // Alt+P (Alt+I) dans l'exposant (l'indice) deja rempli : on en sort, comme une bascule.
@@ -4012,18 +4133,14 @@ function slashFracAt(mf: MathfieldElement): MlAtom | null {
  * tape « 2/p+2 ») ; on sort par Espace ou fleche droite.
  */
 const DEN_EXIT = new Set(["=", "<", ">", ",", ";", " "]);
-/** Les memes, dans une fraction ouverte depuis le texte (l'Espace y est deja traitee). */
-const DEN_EXIT_TEXT = new Set(["=", "<", ">", ",", ";"]);
-
 /**
  * Curseur a la fin du denominateur d'une fraction tapee au "/", et ce
  * denominateur est un seul terme (chiffres, lettres, parenthese, racine).
- * `slashFracs` null : n'importe quelle fraction (celle ouverte depuis le texte).
  */
-function endOfSlashDen(mf: MathfieldElement, slashFracs: WeakSet<object> | null): boolean {
+function endOfSlashDen(mf: MathfieldElement, slashFracs: WeakSet<object>): boolean {
   const a = caretAtom(mf);
   const p = a?.parent;
-  if (!a || !p || a.parentBranch !== "below" || p.type !== "genfrac" || (slashFracs && !slashFracs.has(p))) return false;
+  if (!a || !p || a.parentBranch !== "below" || p.type !== "genfrac" || !slashFracs.has(p)) return false;
   const den = p.branch("below") ?? [];
   const items = den.slice(1);
   if (!items.length || den[den.length - 1] !== a) return false;

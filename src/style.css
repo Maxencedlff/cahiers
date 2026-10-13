@@ -1065,6 +1065,13 @@ kbd {
 }
 .text-ghost-eq .katex { font-size: 1em; }
 
+/* Couleur de frappe active : son nom en marge de la ligne du curseur
+   (textdoc.ts, paintColorTag). Jamais dans le contenu. */
+.text-color-tag {
+  position: absolute; z-index: 4; pointer-events: none; white-space: nowrap;
+  font: 600 calc(11px * var(--k, 1)) / 1.4 system-ui, sans-serif; opacity: .8;
+}
+
 /* Photo posee dans le texte : sa propre ligne, largeur en unites de page. */
 .text-doc .doc-img {
   display: block; position: relative; margin: .4em 0;
