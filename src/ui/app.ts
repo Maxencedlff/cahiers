@@ -250,8 +250,9 @@ export class App {
     this.eraserMode = this.settings.eraserMode === "precise" ? "precise" : "stroke";
     this.color = this.settings.color;
     this.touchWrites = this.settings.touchWrites;
-    this.textColor = this.settings.textColor;
-    setTypingColor(this.textColor);
+    // La couleur de frappe vaut pour une ligne : on repart toujours en noir.
+    this.textColor = null;
+    setTypingColor(null);
     this.width = this.settings.width;
     this.autoConvert = this.settings.autoConvert;
     setAutoMath(this.settings.autoMath);

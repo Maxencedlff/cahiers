@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  cleanMathLive, findFormulas, greekWordAtEnd, latexToSource, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
+  cleanMathLive, findFormulas, glueDen, greekWordAtEnd, latexToSource, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type LinePart,
 } from "../core/text/automath";
 
@@ -626,3 +626,19 @@ describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
     expect(liveSplit("Is = Vz /", " R")).toEqual({ src: "Is = Vz / R", rest: "" });
   });
 });
+
+describe("denominateur tape colle : + et - y restent", () => {
+  it("glueDen", () => {
+    expect(glueDen("2/p+2")).toBe("2/(p+2)");
+    expect(glueDen("1/x^2-1")).toBe("1/(x^2-1)");
+    expect(glueDen("1/2 + 1/3")).toBe("1/2 + 1/3");
+    expect(glueDen("5/p(p^2+1)")).toBe("5/p(p^2+1)");
+    expect(glueDen("1/x^-2")).toBe("1/x^-2");
+    expect(glueDen("a = 3/(p+1)")).toBe("a = 3/(p+1)");
+  });
+  it("affichage pendant la frappe", () => {
+    expect(liveFormula("2/p+")).toBe("\\frac{2}{p + \\placeholder{}}");
+    expect(liveFormula("2/p+2")).toBe(liveFormula("2/(p+2)"));
+  });
+});
+

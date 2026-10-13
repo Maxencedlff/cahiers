@@ -1154,10 +1154,56 @@ export function liveFormula(src: string): string | null {
   if (/[/^_+\-−*·×(=<>≤≥≈≠→|]$/.test(s)) s += LIVE_MARK;
   // "1/sqrt" : la fonction attend son argument.
   else if (/(?:^|[^A-Za-z])(?:sqrt|sin|cos|tan|ln|log|exp)$/.test(s)) s += `(${LIVE_MARK})`;
+  s = glueDen(s);
   s += ")".repeat(open);
   const f = findFormulas(s).find((x) => x.start === 0 && x.end === s.length);
   if (!f) return null;
   return f.latex.replace(/Z_\{qx\}|Zqx/g, "\\placeholder{}");
+}
+
+/**
+ * Denominateur tape sans espace autour d'un « + » ou d'un « - » : il les
+ * garde (« 2/p+2 » -> « 2/(p+2) », « 1/x^2-1 » -> « 1/(x^2-1) »), comme on
+ * l'ecrit a la main en tapant vite. Avec des espaces, c'est une somme
+ * (« 1/2 + 1/3 »). Un groupe deja entre parentheses ne bouge pas.
+ */
+export function glueDen(s: string): string {
+  const isOp = (c: string | undefined) => c === "+" || c === "-" || c === "−";
+  const stop = (c: string) => /[\s=<>,;/*·×]/.test(c) || isOp(c);
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const k = s.indexOf("/", i);
+    if (k < 0) { out += s.slice(i); break; }
+    out += s.slice(i, k + 1);
+    let j = k + 1;
+    const start = j;
+    // Un terme : jusqu'au premier operateur ou blanc hors parentheses ; un
+    // signe juste apres ^, _ ou ( en fait partie (« x^-2 »).
+    const term = () => {
+      let depth = 0;
+      const t0 = j;
+      while (j < s.length) {
+        const c = s[j];
+        if (c === "(") depth++;
+        else if (c === ")") { if (depth === 0) break; depth--; }
+        else if (depth === 0 && stop(c) && !(isOp(c) && /[\^_(]/.test(s[j - 1] ?? ""))) break;
+        j++;
+      }
+      return j > t0;
+    };
+    if (!term()) { i = j; continue; }
+    let glued = false;
+    while (isOp(s[j]) && !/\s/.test(s[j - 1] ?? " ") && j + 1 < s.length && !/\s/.test(s[j + 1])) {
+      j++;
+      if (!term()) break;
+      glued = true;
+    }
+    const den = s.slice(start, j);
+    out += glued && !(den.startsWith("(") && den.endsWith(")") && count(den, "(") === 1) ? `(${den})` : den;
+    i = j;
+  }
+  return out;
 }
 
 /**

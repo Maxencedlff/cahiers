@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  cleanMathLive, findFormulas, greekWordAtEnd, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
+  cleanMathLive, findFormulas, glueDen, greekWordAtEnd, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -834,6 +834,8 @@ export class TextDoc {
     const lv = this.live;
     this.live = null;
     if (!lv?.eq.isConnected) return;
+    // « 2/p+2 » tape colle : le denominateur garde le « + » (glueDen), la relecture aussi.
+    lv.src = glueDen(lv.src);
     const sel = document.getSelection();
     const r = sel?.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
     // Dans le texte du curseur : la relecture le prend comme la frappe en cours.
