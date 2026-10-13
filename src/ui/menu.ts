@@ -341,7 +341,7 @@ export function notebookMenu(
     }]),
     {
       label: "Couleur", icon: "palette", sub: colors.map((c) => ({
-        label: `${NOTEBOOK_COLOR_NAMES[c] ?? c}${c !== color && usedColors.includes(c) ? " (déjà prise)" : ""}`,
+        label: `${NOTEBOOK_COLOR_NAMES[c] ?? "Couleur actuelle"}${c !== color && usedColors.includes(c) ? " (déjà prise)" : ""}`,
         swatch: c, checked: c === color ? true : undefined,
         run: () => { if (c !== color) void host.setNotebookColor?.(dir, c); },
       })),

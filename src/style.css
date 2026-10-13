@@ -842,7 +842,7 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
 /* Hauteur bornee a l'ecran : le corps defile, jamais le pave (1366x768). */
 /* Hauteur bornee a l'ecran ; le pave entier passe avant la barre du haut
    (en 768 px, la calculatrice deplacable peut la recouvrir). */
-.calc:not(.docked) { max-height: calc(100vh - 16px); }
+.calc:not(.docked) { max-height: calc(100vh - var(--calc-top, 8px) - 8px); }
 .calc:not(.docked) .calc-body { max-height: none; }
 .calc-body { flex: 1 1 auto; min-height: 0; }
 .calc-body > * { flex-shrink: 0; }
@@ -1583,3 +1583,5 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .status-btn .status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28vw; }
 .status-btn { min-width: 0; flex: 0 1 auto; }
 .tb-title { flex: 0 1 auto; }
+/* Au doigt, les raccourcis clavier des menus ne servent a rien. */
+@media (pointer: coarse) { .ctx-keys, .sb-search kbd, .sb-keys { display: none; } }

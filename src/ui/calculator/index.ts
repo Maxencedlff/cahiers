@@ -218,10 +218,18 @@ export class Calculator {
     if (wasDocked || !this.floatPlaced) {
       this.floatPlaced = true;
       this.root.style.left = `${Math.max(8, window.innerWidth - 428 - 16)}px`;
-      this.root.style.top = "110px";
+      this.root.style.top = `${this.minTop + 8}px`;
     }
   }
   private floatPlaced = false;
+  /** Haut minimal de la fenetre flottante : jamais sur la barre du haut. */
+  private minTop = 8;
+
+  /** L'appli donne le bas de sa barre du haut : la fenetre reste dessous. */
+  setMinTop(px: number): void {
+    this.minTop = Math.max(8, Math.round(px));
+    this.root.style.setProperty("--calc-top", `${this.minTop}px`);
+  }
 
   /* ---------------- fenetre ---------------- */
 
@@ -247,14 +255,15 @@ export class Calculator {
     // Toujours ramenee dans l'ecran : elle a pu etre laissee hors champ.
     const r = this.root.getBoundingClientRect();
     if (r.left + r.width > window.innerWidth) this.root.style.left = `${Math.max(8, window.innerWidth - r.width - 20)}px`;
-    if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 20)}px`;
+    if (r.top + r.height > window.innerHeight) this.root.style.top = `${Math.max(this.minTop, window.innerHeight - r.height - 20)}px`;
+    if (r.top < this.minTop) this.root.style.top = `${this.minTop}px`;
   }
 
   /** Remonte la fenetre flottante si son bas sort de l'ecran. */
   private keepInView(): void {
     if (!this.visible || this.root.classList.contains("docked")) return;
     const r = this.root.getBoundingClientRect();
-    if (r.bottom > window.innerHeight - 8) this.root.style.top = `${Math.max(8, window.innerHeight - r.height - 8)}px`;
+    if (r.bottom > window.innerHeight - 8) this.root.style.top = `${Math.max(this.minTop, window.innerHeight - r.height - 8)}px`;
   }
 
   /** Focus et selection dans le recepteur, sans defiler. */
@@ -353,7 +362,7 @@ export class Calculator {
       const left = Math.max(0, Math.min(window.innerWidth - 80, start.left + e.clientX - start.x));
       const top = Math.max(0, Math.min(window.innerHeight - 50, start.top + e.clientY - start.y));
       this.root.style.left = `${left}px`;
-      this.root.style.top = `${top}px`;
+      this.root.style.top = `${Math.max(this.minTop, top)}px`;
     });
     const stop = () => { start = null; head.classList.remove("dragging"); };
     head.addEventListener("pointerup", stop);

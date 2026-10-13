@@ -436,11 +436,14 @@ export class App {
     if (where === "panel") {
       if (!calc.isIn(slot.side)) calc.dock(slot.side);
     } else if (!calc.isIn(slot.work) || calc.isDocked) {
+      calc.setMinTop(this.tabbar.getBoundingClientRect().bottom + 8);
       calc.float(slot.work);
       // Ouverte, elle est ramenee dans l'ecran (show la recale).
       if (calc.isVisible) calc.show();
     }
     calc.root.classList.toggle("sheet", where === "sheet");
+    // Flottante, elle ne recouvre jamais la barre du haut.
+    calc.setMinTop(where === "float" ? this.tabbar.getBoundingClientRect().bottom + 8 : 8);
     calc.setDetachable(where !== "sheet", where === "float" && this.settings.calcDetached);
     slot.side.classList.toggle("closed", !calc.isVisible || !calc.isDocked);
   }
