@@ -24,6 +24,8 @@ export const MATH_TEMPLATES: MathTemplate[] = [
   { label: "\\lim", insert: "\\lim_{#?\\to#?}#?", title: "Limite", key: "l" },
   { label: "\\frac{\\mathrm{d}}{\\mathrm{d}x}", insert: "\\frac{\\mathrm{d}#?}{\\mathrm{d}#?}", title: "Dérivée", key: "d" },
   { label: "\\vec{u}", insert: "\\vec{#?}", title: "Vecteur", key: "v" },
+  // Barre sur ce qui precede le curseur (« alpha » puis Alt+B : ᾱ) : conjugue, moyenne.
+  { label: "\\overline{z}", insert: "\\overline{#@}", title: "Barre (conjugué, moyenne) sur ce qui précède le curseur", key: "b" },
   { label: "\\binom{n}{k}", insert: "\\binom{#?}{#?}", title: "Coefficient binomial" },
   { label: "|x|", insert: "\\left|#?\\right|", title: "Valeur absolue" },
   { label: "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}", insert: "\\begin{pmatrix}#?&#?\\\\#?&#?\\end{pmatrix}", title: "Matrice 2×2", key: "m" },

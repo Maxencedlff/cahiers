@@ -2621,12 +2621,15 @@ export class TextDoc {
         const before = (node.textContent ?? "").slice(0, range.startOffset).replace(/\u200b/g, "");
         taken = trailingOperand(before);
         if (taken) {
+          // « alpha » tape juste avant (pas encore converti) : la lettre α.
+          const greek = /^[A-Za-z]+$/.test(taken) ? greekWordAtEnd(taken) : null;
           const text = node.textContent ?? "";
           const end = range.startOffset;
           const start = text.slice(0, end).lastIndexOf(taken);
           range.setStart(node, start);
           range.setEnd(node, end);
           range.deleteContents();
+          if (greek) taken = greek;
         }
       }
     }
