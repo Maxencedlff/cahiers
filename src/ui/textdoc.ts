@@ -31,6 +31,11 @@ let editingDoc: TextDoc | null = null;
 /** Dernier document ou le curseur etait. */
 let lastDoc: TextDoc | null = null;
 
+/** Calcul de la derniere page tapee, pour la calculatrice (Ctrl+J). */
+export function lastCalcSource(): string | null {
+  return lastDoc?.calcSource() ?? null;
+}
+
 /**
  * MathLive ne prend le focus que 60 ms apres focus() (voir son onFocus).
  * Les touches tapees dans l'intervalle, Alt+= puis "1/x" enchaines, iraient
@@ -402,6 +407,29 @@ export class TextDoc {
       if (text.trim()) return text;
     }
     return "";
+  }
+
+  /**
+   * Calcul a envoyer a la calculatrice (Ctrl+J) : la formule en cours
+   * d'edition entiere, sinon la ligne du curseur, de sa premiere a sa
+   * derniere formule (« donc » et la ponctuation autour restent), en clair.
+   */
+  calcSource(): string | null {
+    if (this.field) return texToPlain(this.field.getValue("latex")) || null;
+    const sel = document.getSelection();
+    const r = sel?.rangeCount && this.root.contains(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0) : this.savedRange;
+    if (!r || !this.root.contains(r.startContainer)) return null;
+    const before = document.createRange();
+    before.setStart(this.root, 0);
+    before.setEnd(r.startContainer, r.startOffset);
+    const n = docLines(normalizeTokens(this.readNodes(before.cloneContents()))).length;
+    const line = docLines(normalizeTokens(this.readNodes(this.root)))[Math.max(0, n - 1)];
+    if (!line) return null;
+    const toks = line.tokens;
+    const first = toks.findIndex((t) => t.kind === "math"), last = toks.map((t) => t.kind).lastIndexOf("math");
+    const part = first >= 0 ? toks.slice(first, last + 1) : toks;
+    const text = part.map((t) => (t.kind === "text" ? t.text : t.kind === "math" ? texToPlain(t.latex) : "")).join("").trim();
+    return text || null;
   }
 
   /** Retire la suggestion grisee. */

@@ -10,7 +10,7 @@ import { REVIEW_COLORS, focusQuery, type ReviewItem } from "../core/review";
 import type { Bounds } from "../core/ink/stroke";
 import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
 import { buildMathBar, MATH_TEMPLATES } from "./mathbar";
-import { insertMathTemplate, isEditingDoc, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
+import { insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE, NEUTRAL_INK, labelOf, shortcutOf } from "../core/palette";
 import type { ColorKey, InkColor, ToolKind } from "../core/types";
@@ -2816,6 +2816,12 @@ export class App {
       case "search": void this.showSearch(); return true;
       case "review": void this.showReview({}); return true;
       case "calc": void this.toggleCalculator(); return true;
+      case "solveCalc": {
+        const src = lastCalcSource();
+        if (!src) { toast("Place le curseur sur une ligne de calcul (ou dans une formule)", "warn"); return true; }
+        void this.loadCalculator().then((calc) => { this.placeCalculator(calc); calc.solveText(src); this.placeCalculator(calc); });
+        return true;
+      }
       case "sendCalc":
         if (!this.calculator) toast("Rien à envoyer : ouvre la calculatrice (Ctrl+L)", "warn");
         else this.calculator.sendLast();

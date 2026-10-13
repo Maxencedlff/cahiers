@@ -356,6 +356,14 @@ export class Calculator {
     );
   }
 
+  /** Calcul venu de la page (Ctrl+J) : onglet Résoudre, résolu tout de suite. */
+  solveText(text: string): void {
+    this.state.resoudre.eq = text;
+    this.show();
+    this.selectTab("resoudre");
+    this.body.querySelector<HTMLButtonElement>("button.primary")?.click();
+  }
+
   /** Change d'onglet ; le premier champ prend le focus (sauf au pave). */
   selectTab(id: Tab): void {
     this.tab = id;

@@ -16,7 +16,7 @@ export type Command =
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
   | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf" | "viewMode"
-  | "maths" | "theme";
+  | "maths" | "theme" | "solveCalc";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -73,6 +73,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: "→", label: "Formule déjà écrite proposée en grisé : Flèche droite la pose (Échap ou toute autre touche l'ignore, Ctrl+Z la retire)", group: "Pendant le cours" },
   { keys: "Suppr / Retour arrière", label: "À la fin d'une page / au début de sa suite : la suite remonte dans le blanc (menu : Tasser les pages)", group: "Pendant le cours" },
   { keys: "Ctrl+X, Ctrl+V", label: "Photo sélectionnée : la couper puis la coller sur une autre page (Ctrl+C : la copier)", group: "Pendant le cours" },
+  ctrl("j", false, "solveCalc", "Résoudre la formule (ou la ligne du curseur) dans la calculatrice, avec le détail", "Pendant le cours"),
   ctrl("r", false, "convert", "Conversion de l'écriture : au fil de la plume ou sur zone", "Pendant le cours"),
   {
     keys: "Échap",
