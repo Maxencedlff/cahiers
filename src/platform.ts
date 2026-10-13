@@ -54,9 +54,10 @@ export async function detectPlatform(): Promise<Platform> {
   }
 
   const { invoke } = await import("@tauri-apps/api/core");
-  const fs = new TauriFs(invoke as never);
-  const rootLabel = await fs.rootLabel();
   const machine = await invoke<string>("machine_name");
+  // Le nom de la machine signe aussi les copies de conflit ecrites par Repo.
+  const fs = new TauriFs(invoke as never, machine);
+  const rootLabel = await fs.rootLabel();
 
   let keys: { applicationKey: string; hmacKey: string } | null = null;
   try {

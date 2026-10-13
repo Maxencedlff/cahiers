@@ -21,6 +21,19 @@ export interface FsAdapter {
   listFilesStat?(rel: string): Promise<FileStat[]>;
   readText(rel: string): Promise<string>;
   writeText(rel: string, content: string): Promise<void>;
+  /**
+   * Ecriture conditionnelle (R1) : le fichier n'est remplace que s'il a
+   * encore la date et la taille `expect` (celles de la derniere lecture),
+   * ou n'existe pas si `expect` est null. Sinon rien n'est ecrit et l'etat
+   * du disque est rendu. Absent : Repo ecrit comme avant, sans garde.
+   */
+  writeTextIf?(rel: string, content: string, expect: FileStamp | null): Promise<CondWrite>;
+  /** Lecture avec la date et la taille prises AVANT la lecture. */
+  readTextStat?(rel: string): Promise<{ content: string; stat: FileStat | null }>;
+  /** Date et taille d'un fichier, null s'il n'existe pas. */
+  stat?(rel: string): Promise<FileStat | null>;
+  /** Nom de cette machine (copies de conflit `NNNN.page-<PC>.json`). */
+  readonly machine?: string;
   exists(rel: string): Promise<boolean>;
   mkdir(rel: string): Promise<void>;
   remove(rel: string): Promise<void>;
@@ -44,6 +57,24 @@ export interface FileStat {
   /** Date de modification, en ms (avec decimales cote Windows). */
   mtime: number;
   size: number;
+}
+
+/** Ce qui identifie une version d'un fichier sur le disque. */
+export interface FileStamp {
+  mtime: number;
+  size: number;
+}
+
+/** Resultat d'une ecriture conditionnelle. */
+export interface CondWrite {
+  ok: boolean;
+  /** Ecrit : le fichier ecrit. Refuse : le fichier tel qu'il est (null s'il n'existe pas). */
+  stat: FileStat | null;
+}
+
+export function sameStamp(a: FileStamp | null | undefined, b: FileStamp | null | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return a.size === b.size && Math.abs(a.mtime - b.mtime) < 0.001;
 }
 
 /** "data:image/png;base64,AAA" donne ["image/png", "AAA"]. */
@@ -71,13 +102,22 @@ export class TauriFs implements FsAdapter {
   readonly kind = "tauri" as const;
   /** Images deja lues : un rendu de page ne relit plus chaque photo par IPC. */
   private images = new DataUrlCache();
-  constructor(private invoke: InvokeFn) {}
+  constructor(private invoke: InvokeFn, readonly machine?: string) {}
 
   listDirs(rel: string) { return this.invoke<string[]>("list_dirs", { rel }); }
   listFiles(rel: string) { return this.invoke<string[]>("list_files", { rel }); }
   listFilesStat(rel: string) { return this.invoke<FileStat[]>("list_files_meta", { rel }); }
   readText(rel: string) { return this.invoke<string>("read_text", { rel }); }
   writeText(rel: string, content: string) { return this.invoke<void>("write_text", { rel, content }); }
+  writeTextIf(rel: string, content: string, expect: FileStamp | null) {
+    return this.invoke<CondWrite>("write_text_if", {
+      rel, content, expect: expect ? { mtime: expect.mtime, size: expect.size } : null,
+    });
+  }
+  readTextStat(rel: string) {
+    return this.invoke<{ content: string; stat: FileStat | null }>("read_text_meta", { rel });
+  }
+  stat(rel: string) { return this.invoke<FileStat | null>("stat_path", { rel }); }
   exists(rel: string) { return this.invoke<boolean>("path_exists", { rel }); }
   mkdir(rel: string) { return this.invoke<void>("make_dir", { rel }); }
   remove(rel: string) {
@@ -146,9 +186,40 @@ export class BrowserFs implements FsAdapter {
     this.tree = loaded ?? {};
   }
 
+  readonly machine: string = "NAVIGATEUR";
+
+  /**
+   * Persiste l'arbre. Un depassement de quota remonte (R9) : la file de
+   * sauvegarde affiche alors « Non enregistré » au lieu de croire la page
+   * ecrite. L'appelant remet l'arbre en memoire dans son etat d'avant.
+   */
   private flush() {
     if (!this.persist) return;
-    try { localStorage.setItem(LS_KEY, JSON.stringify(this.tree)); } catch { /* quota */ }
+    localStorage.setItem(LS_KEY, JSON.stringify(this.tree));
+  }
+
+  /** Applique `change`, persiste, et defait tout si la persistance echoue. */
+  private commit(change: () => void): void {
+    const tree = { ...this.tree };
+    const revs = new Map(this.revs);
+    const clock = this.clock;
+    change();
+    try {
+      this.flush();
+    } catch (e) {
+      this.tree = tree;
+      this.revs = revs;
+      this.clock = clock;
+      const quota = e instanceof Error && /quota/i.test(`${e.name} ${e.message}`);
+      throw new Error(quota ? "stockage du navigateur plein (quota dépassé)" : `stockage du navigateur indisponible : ${String(e)}`);
+    }
+  }
+
+  /** Version d'un fichier ; un fichier relu du stockage en recoit une a la premiere demande. */
+  private revOf(rel: string): number {
+    let r = this.revs.get(rel);
+    if (r == null) { r = ++this.clock; this.revs.set(rel, r); }
+    return r;
   }
 
   private childrenOf(rel: string): string[] {
@@ -175,9 +246,25 @@ export class BrowserFs implements FsAdapter {
     const prefix = rel === "" ? "" : rel + "/";
     return (await this.listFiles(rel)).map((name) => ({
       name,
-      mtime: this.revs.get(prefix + name) ?? 0,
+      mtime: this.revOf(prefix + name),
       size: (this.tree[prefix + name] ?? "").length,
     }));
+  }
+  async stat(rel: string): Promise<FileStat | null> {
+    const v = this.tree[rel];
+    if (v == null) return null;
+    return { name: rel.slice(rel.lastIndexOf("/") + 1), mtime: this.revOf(rel), size: v.length };
+  }
+  async readTextStat(rel: string) {
+    const stat = await this.stat(rel);
+    return { content: await this.readText(rel), stat };
+  }
+  /** Meme contrat que la commande Rust write_text_if. */
+  async writeTextIf(rel: string, content: string, expect: FileStamp | null): Promise<CondWrite> {
+    const current = await this.stat(rel);
+    if (!sameStamp(current, expect)) return { ok: false, stat: current };
+    await this.writeText(rel, content);
+    return { ok: true, stat: await this.stat(rel) };
   }
   async readText(rel: string) {
     const v = this.tree[rel];
@@ -185,41 +272,62 @@ export class BrowserFs implements FsAdapter {
     return v;
   }
   async writeText(rel: string, content: string) {
-    const parts = rel.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      const dir = parts.slice(0, i).join("/");
-      if (!(dir in this.tree)) this.tree[dir] = null;
-    }
-    this.tree[rel] = content;
-    this.revs.set(rel, ++this.clock);
-    this.flush();
+    if (this.tree[rel] === null) throw new Error(`${rel} est un dossier`);
+    this.commit(() => {
+      const parts = rel.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join("/");
+        if (!(dir in this.tree)) this.tree[dir] = null;
+      }
+      this.tree[rel] = content;
+      this.revs.set(rel, ++this.clock);
+    });
   }
   async exists(rel: string) { return rel === "" || rel in this.tree; }
   async mkdir(rel: string) {
-    const parts = rel.split("/");
-    for (let i = 1; i <= parts.length; i++) {
-      const dir = parts.slice(0, i).join("/");
-      if (!(dir in this.tree)) this.tree[dir] = null;
-    }
-    this.flush();
+    this.commit(() => {
+      const parts = rel.split("/");
+      for (let i = 1; i <= parts.length; i++) {
+        const dir = parts.slice(0, i).join("/");
+        if (!(dir in this.tree)) this.tree[dir] = null;
+      }
+    });
   }
   async remove(rel: string) {
-    for (const key of Object.keys(this.tree)) {
-      if (key === rel || key.startsWith(rel + "/")) { delete this.tree[key]; this.revs.delete(key); }
-    }
-    this.flush();
-  }
-  async rename(from: string, to: string) {
-    for (const key of Object.keys(this.tree)) {
-      if (key === from || key.startsWith(from + "/")) {
-        const next = to + key.slice(from.length);
-        this.tree[next] = this.tree[key];
-        delete this.tree[key];
-        this.revs.delete(key);
-        this.revs.set(next, ++this.clock);
+    this.commit(() => {
+      for (const key of Object.keys(this.tree)) {
+        if (key === rel || key.startsWith(rel + "/")) { delete this.tree[key]; this.revs.delete(key); }
       }
-    }
-    this.flush();
+    });
+  }
+  /**
+   * Comme la commande Rust : jamais par-dessus une destination existante
+   * (R2). Un fichier deplace garde sa version (le disque garde la date) :
+   * une page renumerotee reste « la meme » pour l'ecriture conditionnelle.
+   */
+  async rename(from: string, to: string) {
+    if (!(from in this.tree)) throw new Error(`${from} introuvable`);
+    const caseOnly = from.toLowerCase() === to.toLowerCase();
+    if (to in this.tree && !caseOnly) throw new Error(`${to} existe déjà : rien n'a été écrasé`);
+    this.commit(() => {
+      for (const key of Object.keys(this.tree)) {
+        if (key === from || key.startsWith(from + "/")) {
+          const next = to + key.slice(from.length);
+          const rev = this.revOf(key);
+          const value = this.tree[key];
+          delete this.tree[key];
+          this.revs.delete(key);
+          this.tree[next] = value;
+          this.revs.set(next, rev);
+        }
+      }
+      // Dossiers parents de la destination (comme create_dir_all cote Rust).
+      const parts = to.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join("/");
+        if (!(dir in this.tree)) this.tree[dir] = null;
+      }
+    });
   }
   /** En mode navigateur on garde la data URL telle quelle. */
   async writeDataUrl(rel: string, dataUrl: string) { await this.writeText(rel, dataUrl); }

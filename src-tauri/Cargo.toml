@@ -32,6 +32,10 @@ features = [
   "Storage_Streams",
   "Globalization",
   "Foundation_Collections",
+  # Renommage sans ecrasement (MoveFileExW) et nom de la machine.
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
 ]
 
 [profile.release]

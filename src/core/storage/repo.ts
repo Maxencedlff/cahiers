@@ -1,5 +1,5 @@
-import type { FileStat, FsAdapter } from "./fs";
-import { joinPath } from "./fs";
+import type { FileStamp, FileStat, FsAdapter } from "./fs";
+import { joinPath, sameStamp } from "./fs";
 import {
   META_VERSION, SCHEMA_VERSION, emptyPage, isFutureVersion, pageFileName, parsePageNumber,
   type NotebookMeta, type Page, type PaperKind, type Stroke,
@@ -10,12 +10,20 @@ import { joinWords } from "../ink/words";
 import { indexPage, type FlagHit, type PageIndex } from "./search";
 import { parseConflictName, renumberConflictName } from "../sync";
 import {
+  conflictCopyName, contentKey, hashText, mergedPage, planExternal, type DiskBase,
+} from "../writeguard";
+import {
+  VERSIONS_DIR, parseVersionName, planVersionPurge, shouldSnapshot, trashToPurge, versionFileName,
+} from "../versions";
+import {
   MAX_DEPTH, buildTree, childPath, depthOf, findNode, flattenTree, leafName, moveRefusal, parentPath,
   remapKeys, renamePrefix, subtreeHeight, type DividerNode, type RawDir,
 } from "../dividers";
 
 export const VRAC = "Vrac";
 export const META_FILE = "cahier.json";
+/** Copie de secours de cahier.json, refaite avant chaque mise a jour (R5). */
+export const META_BAK = "cahier.json.bak";
 export const ASSETS_DIR = "assets";
 /**
  * Corbeille, a la racine (ESEO/.corbeille). Le point la cache du menu. Une
@@ -93,6 +101,38 @@ export interface NotebookSummary {
   modified: string;
 }
 
+/**
+ * Resultat de l'ecriture d'une page (R1, R2). `n` : numero reellement
+ * ecrit (different du numero demande si la page avait change de numero sur
+ * le disque : la vue doit se relire).
+ *  - written  : ecrite, rien d'autre a faire ;
+ *  - merged   : le disque avait change (encre seulement) : son encre a ete
+ *               ajoutee a la notre ; la vue reprend les traits de `disk` ;
+ *  - replaced : nous n'avions change que l'encre, le disque autre chose :
+ *               `page` (celle du disque + notre encre) est ecrite, la vue
+ *               la recharge ;
+ *  - conflict : les deux ont change : notre version est dans la copie
+ *               `copy`, rien n'est ecrase ; `page` = celle du disque
+ *               (null : la page a disparu ou est illisible), la vue recharge.
+ */
+export type WriteOutcome =
+  | { kind: "written"; n: number }
+  | { kind: "merged"; n: number; disk: Page; added: number }
+  | { kind: "replaced"; n: number; page: Page }
+  | { kind: "conflict"; n: number; copy: string; page: Page | null };
+
+/** Version gardee d'une page (`.versions/<id>/<horodatage>.json`). */
+export interface PageVersion {
+  file: string;
+  /** Date de la version (ms). */
+  at: number;
+}
+
+/** Ce que Repo sait du fichier d'une page lue ou ecrite. */
+interface Base extends DiskBase {
+  stat: FileStat | null;
+}
+
 /** Une page d'intercalaire et son resume ; null si elle est illisible. */
 export interface ScannedPage {
   n: number;
@@ -120,6 +160,16 @@ export class Repo {
   private metaChain = new Map<string, Promise<unknown>>();
   /** Dossiers de la racine vus sans page, et quand (voir PROBE_TTL_MS). */
   private noPages = new Map<string, number>();
+  /**
+   * Version du disque de chaque page en memoire (R1) : date, taille et
+   * empreinte du fichier a la lecture ou a la derniere ecriture. Attachee a
+   * l'objet Page lui-meme : une page lue pour la recherche n'a aucune
+   * influence sur celle que la vue ecrit.
+   */
+  private bases = new WeakMap<Page, Base>();
+  /** Dernier instantane de chaque page (matiere + id), en ms. */
+  private lastSnap = new Map<string, number>();
+  private trashChecked = false;
 
   constructor(private fs: FsAdapter) {}
 
@@ -183,17 +233,40 @@ export class Repo {
   }
 
   async readMeta(dir: string): Promise<NotebookMeta> {
-    const path = joinPath(dir, META_FILE);
-    if (await this.fs.exists(path)) {
+    for (const name of [META_FILE, META_BAK]) {
+      const path = joinPath(dir, name);
+      if (!(await this.fs.exists(path))) continue;
       try {
-        const parsed = JSON.parse(await this.fs.readText(path)) as NotebookMeta;
-        return this.normalizeMeta(dir, parsed);
+        return this.normalizeMeta(dir, parseMetaText(await this.fs.readText(path)));
       } catch {
-        // Fichier illisible : on ne perd pas le cahier pour autant,
-        // le disque reste la source de verite.
+        // Fichier illisible : on ne perd pas le cahier pour autant (la copie
+        // de secours d'abord, sinon les valeurs par defaut), le disque reste
+        // la source de verite.
       }
     }
     return this.normalizeMeta(dir, null);
+  }
+
+  /**
+   * cahier.json pour une mise a jour : un fichier present mais illisible
+   * (JSON tronque, OneDrive pas fini) n'est jamais remplace par des valeurs
+   * par defaut (R5) : l'ordre des intercalaires, les modes et les fonds
+   * seraient perdus. Rend aussi le texte lu, pour la copie de secours.
+   */
+  private async readMetaForUpdate(dir: string): Promise<{ meta: NotebookMeta; raw: string | null }> {
+    const path = joinPath(dir, META_FILE);
+    if (!(await this.fs.exists(path))) return { meta: this.normalizeMeta(dir, null), raw: null };
+    let raw: string;
+    let parsed: NotebookMeta;
+    try {
+      raw = await this.fs.readText(path);
+      parsed = parseMetaText(raw);
+    } catch (e) {
+      throw new Error(`cahier.json de « ${dir} » est illisible (${e instanceof Error ? e.message : String(e)}) : `
+        + "rien n'a été modifié. Vérifie que OneDrive a fini de le télécharger ; "
+        + `une copie de secours est dans ${META_BAK} si elle existe.`);
+    }
+    return { meta: this.normalizeMeta(dir, parsed), raw };
   }
 
   /**
@@ -225,8 +298,10 @@ export class Repo {
   private updateMeta(dir: string, change: (m: NotebookMeta) => void): Promise<NotebookMeta> {
     const prev = this.metaChain.get(dir) ?? Promise.resolve();
     const run = prev.catch(() => undefined).then(async () => {
-      const meta = await this.readMeta(dir);
+      const { meta, raw } = await this.readMetaForUpdate(dir);
       change(meta);
+      // Copie de secours de la version lue (lisible), avant de la remplacer.
+      if (raw != null) await this.fs.writeText(joinPath(dir, META_BAK), raw).catch(() => undefined);
       await this.writeMeta(dir, meta);
       return meta;
     });
@@ -576,14 +651,59 @@ export class Repo {
       .sort((a, b) => a - b);
   }
 
-  async readPage(dir: string, divider: string, n: number): Promise<Page> {
+  /**
+   * Lit une page et retient la version du disque (date, taille, empreinte)
+   * pour l'ecriture conditionnelle (R1). `track` faux : lecture pour la
+   * recherche, rien n'est retenu.
+   */
+  async readPage(dir: string, divider: string, n: number, track = true): Promise<Page> {
     const path = joinPath(dir, divider, pageFileName(n));
-    const raw = await this.fs.readText(path);
-    const p = JSON.parse(raw) as Page;
-    return migratePage(p);
+    if (!track || !this.fs.readTextStat) return migratePage(JSON.parse(await this.fs.readText(path)) as Page);
+    const { content, stat } = await this.fs.readTextStat(path);
+    const page = migratePage(JSON.parse(content) as Page);
+    this.bases.set(page, { stat, hash: hashText(content), key: contentKey(page) });
+    return page;
   }
 
-  async writePage(dir: string, divider: string, n: number, page: Page): Promise<void> {
+  /**
+   * `to` remplace `from` (copie de travail, version restauree) : il est
+   * ecrit comme la suite de la meme lecture du disque.
+   */
+  shareBase(from: Page, to: Page): void {
+    const b = this.bases.get(from);
+    if (b) this.bases.set(to, { ...b });
+  }
+
+  /**
+   * Le fichier de la page a-t-il change sur le disque depuis sa lecture (ou
+   * sa derniere ecriture) ici ? Faux si on n'en sait rien. Un fichier
+   * seulement touche (meme contenu) n'est pas un changement.
+   */
+  async diskChanged(dir: string, divider: string, n: number, page: Page): Promise<boolean> {
+    const base = this.bases.get(page);
+    if (!base?.stat || !this.fs.stat || !this.fs.readTextStat) return false;
+    const path = joinPath(dir, divider, pageFileName(n));
+    const cur = await this.fs.stat(path);
+    if (sameStamp(cur, base.stat)) return false;
+    if (!cur) return true;
+    const { content, stat } = await this.fs.readTextStat(path);
+    if (hashText(content) !== base.hash) return true;
+    base.stat = stat;
+    return false;
+  }
+
+  /**
+   * Ecrit une page sans jamais ecraser autre chose qu'elle-meme (R1, R2) :
+   *  - le fichier vise doit etre celui lu (date + taille), sinon il est relu :
+   *    meme contenu = simple touche, on ecrit ; autre page (autre id) = la
+   *    page est cherchee par son id ; meme page changee ailleurs = fusion de
+   *    l'encre si rien d'autre n'a change d'un cote, sinon copie de conflit ;
+   *  - avant d'ecraser, la version du disque est gardee dans `.versions`
+   *    (au plus une toutes les 10 minutes par page).
+   * Voir WriteOutcome. Sans ecriture conditionnelle (adaptateur minimal),
+   * ecrit comme avant.
+   */
+  async writePage(dir: string, divider: string, n: number, page: Page): Promise<WriteOutcome> {
     // Garde-fou : une page d'une version plus recente n'est jamais reecrite
     // par celle-ci (elle perdrait ce qu'elle ne connait pas).
     if (isFutureVersion(page)) throw new Error("page créée par une version plus récente de Cahiers, laissée intacte");
@@ -591,11 +711,253 @@ export class Repo {
     const path = joinPath(dir, divider, pageFileName(n));
     this.forget(path);
     try {
-      await this.fs.writeText(path, serializePage(page));
+      if (!this.fs.writeTextIf || !this.fs.readTextStat || !this.fs.stat) {
+        await this.snapshotBefore(dir, page.id, path, true);
+        await this.fs.writeText(path, serializePage(page));
+        return { kind: "written", n };
+      }
+      return await this.guardedWrite(dir, divider, n, page, 0);
     } finally {
       // Une lecture partie pendant l'ecriture a pu remettre l'ancienne version.
       this.forget(path);
     }
+  }
+
+  private async guardedWrite(dir: string, divider: string, n: number, page: Page, depth: number): Promise<WriteOutcome> {
+    const fs = this.fs as Required<Pick<FsAdapter, "writeTextIf" | "readTextStat" | "stat">> & FsAdapter;
+    const path = joinPath(dir, divider, pageFileName(n));
+    const base = this.bases.get(page) ?? null;
+    // Date et taille attendues ; undefined : page jamais lue ici, a regarder.
+    let expect: FileStamp | null | undefined = base?.stat ?? undefined;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (expect === undefined) {
+        const cur = await fs.stat(path);
+        if (cur) {
+          const seen = await this.inspect(dir, divider, n, page, base, depth);
+          if (seen.outcome) return seen.outcome;
+          expect = seen.stat;
+        } else {
+          expect = null;
+        }
+      }
+      const content = serializePage(page);
+      if (expect) await this.snapshotBefore(dir, page.id, path, false);
+      const res = await fs.writeTextIf(path, content, expect);
+      if (res.ok) {
+        this.bases.set(page, { stat: res.stat, hash: hashText(content), key: contentKey(page) });
+        return { kind: "written", n };
+      }
+      if (!res.stat) {
+        // Le fichier n'est plus la (renumerote ou supprime ailleurs).
+        if (!base) { expect = null; continue; }
+        return this.relocate(dir, divider, n, page, depth);
+      }
+      const seen = await this.inspect(dir, divider, n, page, base, depth);
+      if (seen.outcome) return seen.outcome;
+      expect = seen.stat;
+    }
+    throw new Error(`${path} change sans arrêt sur le disque : écriture reportée`);
+  }
+
+  /**
+   * Le fichier de la page n'est pas celui attendu : on le lit. Rend soit
+   * une issue (fusion, copie de conflit, page retrouvee ailleurs), soit la
+   * date a attendre pour reessayer (meme contenu, simplement touche).
+   */
+  private async inspect(
+    dir: string, divider: string, n: number, page: Page, base: Base | null, depth: number,
+  ): Promise<{ outcome?: WriteOutcome; stat: FileStamp | null }> {
+    const fs = this.fs as Required<Pick<FsAdapter, "writeTextIf" | "readTextStat">> & FsAdapter;
+    const path = joinPath(dir, divider, pageFileName(n));
+    let raw: string, stat: FileStat | null;
+    try {
+      ({ content: raw, stat } = await fs.readTextStat(path));
+    } catch {
+      // Disparu entre-temps : on recommence (le fichier sera absent).
+      return { stat: null };
+    }
+    if (!stat) return { stat: null };
+    if (base && hashText(raw) === base.hash) return { stat };
+    let disk: Page | null = null;
+    try { disk = migratePage(JSON.parse(raw) as Page); } catch { disk = null; }
+    if (disk && disk.id !== page.id) return { outcome: await this.relocate(dir, divider, n, page, depth), stat };
+    if (!disk) {
+      // Fichier illisible (telechargement OneDrive pas fini) : jamais ecrase.
+      const copy = await this.writeConflictCopy(dir, divider, n, page);
+      return { outcome: { kind: "conflict", n, copy, page: null }, stat };
+    }
+    if (isFutureVersion(disk)) {
+      const copy = await this.writeConflictCopy(dir, divider, n, page);
+      return { outcome: { kind: "conflict", n, copy, page: disk }, stat };
+    }
+    const diskBase: Base = { stat, hash: hashText(raw), key: contentKey(disk) };
+    const plan = planExternal(base, page, disk);
+    if (plan === "conflict") {
+      const copy = await this.writeConflictCopy(dir, divider, n, page);
+      this.bases.set(disk, diskBase);
+      return { outcome: { kind: "conflict", n, copy, page: disk }, stat };
+    }
+    const merged = mergedPage(plan, page, disk);
+    merged.page.modified = nowIso();
+    const content = serializePage(merged.page);
+    await this.snapshotBefore(dir, page.id, path, false);
+    const res = await fs.writeTextIf(path, content, stat);
+    // Change encore entre-temps : on recommence depuis le debut.
+    if (!res.ok) return { stat: res.stat };
+    const written: Base = { stat: res.stat, hash: hashText(content), key: contentKey(merged.page) };
+    if (plan === "ours") {
+      // La vue reprend l'encre du disque : sa page vaut alors celle ecrite.
+      this.bases.set(page, written);
+      return { outcome: { kind: "merged", n, disk, added: merged.added }, stat };
+    }
+    this.bases.set(merged.page, written);
+    return { outcome: { kind: "replaced", n, page: merged.page }, stat };
+  }
+
+  /**
+   * Le fichier vise ne porte plus la page (R2) : elle est cherchee par son
+   * id dans l'intercalaire et ecrite la ou elle est. Introuvable (supprimee
+   * sur l'autre PC) : notre version part dans une copie de conflit.
+   */
+  private async relocate(dir: string, divider: string, n: number, page: Page, depth: number): Promise<WriteOutcome> {
+    const found = depth < 2 ? await this.findPageNumber(dir, divider, page.id) : null;
+    if (found != null && found !== n) return this.guardedWrite(dir, divider, found, page, depth + 1);
+    const copy = await this.writeConflictCopy(dir, divider, n, page);
+    return { kind: "conflict", n, copy, page: null };
+  }
+
+  /** Numero de la page d'id `id` dans l'intercalaire (lecture du disque), ou null. */
+  async findPageNumber(dir: string, divider: string, id: string): Promise<number | null> {
+    for (const num of await this.listPageNumbers(dir, divider)) {
+      try {
+        const raw = await this.fs.readText(joinPath(dir, divider, pageFileName(num)));
+        if (raw.includes(id) && (JSON.parse(raw) as Page).id === id) return num;
+      } catch { /* page illisible : la suivante */ }
+    }
+    return null;
+  }
+
+  /**
+   * Notre version d'une page qu'on ne peut pas ecrire sans ecraser autre
+   * chose : `NNNN.page-<PC>.json` a cote, jamais par-dessus un fichier.
+   * Elle apparait comme toute copie de conflit (bandeau, fusion, corbeille).
+   */
+  async writeConflictCopy(dir: string, divider: string, n: number, page: Page): Promise<string> {
+    const rel = joinPath(dir, divider);
+    const content = serializePage(page);
+    for (let i = 0; i < 20; i++) {
+      const taken = await this.fs.listFiles(rel).catch(() => [] as string[]);
+      const name = conflictCopyName(n, this.fs.machine, taken);
+      const path = joinPath(rel, name);
+      if (this.fs.writeTextIf) {
+        const res = await this.fs.writeTextIf(path, content, null);
+        if (res.ok) return name;
+      } else if (!(await this.fs.exists(path))) {
+        await this.fs.writeText(path, content);
+        return name;
+      }
+    }
+    throw new Error("copie de conflit impossible à écrire");
+  }
+
+  /* ---------------- historique des versions ---------------- */
+
+  private versionsDir(dir: string, pageId: string): string {
+    return joinPath(dir, VERSIONS_DIR, pageId.replace(/[^A-Za-z0-9_-]+/g, "_") || "page");
+  }
+
+  /** Versions gardees d'une page, la plus recente d'abord. */
+  async listVersions(dir: string, pageId: string): Promise<PageVersion[]> {
+    const rel = this.versionsDir(dir, pageId);
+    if (!(await this.fs.exists(rel))) return [];
+    const out: PageVersion[] = [];
+    for (const file of await this.fs.listFiles(rel)) {
+      const at = parseVersionName(file);
+      if (at != null) out.push({ file, at });
+    }
+    return out.sort((a, b) => b.at - a.at || b.file.localeCompare(a.file));
+  }
+
+  async readVersion(dir: string, pageId: string, file: string): Promise<Page> {
+    if (parseVersionName(file) == null) throw new Error(`${file} n'est pas une version`);
+    return migratePage(JSON.parse(await this.fs.readText(joinPath(this.versionsDir(dir, pageId), file))) as Page);
+  }
+
+  /** Ecrit une version (texte d'une page) maintenant ; rend son nom. */
+  private async saveVersion(dir: string, pageId: string, raw: string, now: number): Promise<string> {
+    const rel = this.versionsDir(dir, pageId);
+    await this.fs.mkdir(rel);
+    let file = versionFileName(new Date(now));
+    for (let i = 2; await this.fs.exists(joinPath(rel, file)); i++) {
+      file = versionFileName(new Date(now)).replace(/\.json$/, `-${i}.json`);
+    }
+    await this.fs.writeText(joinPath(rel, file), raw);
+    this.lastSnap.set(`${dir}\u0000${pageId}`, now);
+    return file;
+  }
+
+  /**
+   * Avant d'ecraser `path` : sa version actuelle part dans `.versions`, si
+   * la derniere date de plus de 10 minutes. Jamais bloquant : un historique
+   * en echec n'empeche pas d'enregistrer la page. Purge selon
+   * planVersionPurge a la premiere fois de la seance pour cette page.
+   */
+  private async snapshotBefore(dir: string, pageId: string, path: string, mayBeAbsent: boolean): Promise<void> {
+    try {
+      const key = `${dir}\u0000${pageId}`;
+      const now = Date.now();
+      let last = this.lastSnap.get(key);
+      if (last === undefined) {
+        const list = await this.listVersions(dir, pageId);
+        last = list.length ? list[0].at : -Infinity;
+        this.lastSnap.set(key, last);
+        const drop = new Set(planVersionPurge(list.map((v) => v.at), now));
+        for (const v of list) {
+          if (drop.has(v.at)) await this.fs.remove(joinPath(this.versionsDir(dir, pageId), v.file)).catch(() => undefined);
+        }
+      }
+      if (!shouldSnapshot(Number.isFinite(last) ? last : null, now)) return;
+      if (mayBeAbsent && !(await this.fs.exists(path))) return;
+      const raw = await this.fs.readText(path);
+      // Seulement si c'est bien cette page (R2) : jamais la version d'une autre.
+      if (!raw.includes(pageId)) return;
+      await this.saveVersion(dir, pageId, raw, now);
+    } catch { /* historique facultatif */ }
+  }
+
+  /**
+   * Restaure une version : la page actuelle (`current`, deja ecrite) passe
+   * d'abord en version, puis le contenu de `file` est ecrit sous le meme id.
+   * Rend la page ecrite et l'issue de l'ecriture.
+   */
+  async restoreVersion(
+    dir: string, divider: string, n: number, current: Page, file: string,
+  ): Promise<{ page: Page; outcome: WriteOutcome }> {
+    const old = await this.readVersion(dir, current.id, file);
+    await this.saveVersion(dir, current.id, serializePage(current), Date.now());
+    const page: Page = { ...old, id: current.id };
+    if (current.continues !== undefined && old.continues === undefined) delete page.continues;
+    this.shareBase(current, page);
+    const outcome = await this.writePage(dir, divider, n, page);
+    return { page, outcome };
+  }
+
+  /* ---------------- corbeille ---------------- */
+
+  /**
+   * Vide de la corbeille les suppressions de plus de 30 jours, jamais
+   * celles d'apres (ni un dossier qu'on ne sait pas dater). Rend leur nombre.
+   */
+  async purgeTrash(now = Date.now()): Promise<number> {
+    if (!(await this.fs.exists(TRASH_DIR))) return 0;
+    let done = 0;
+    for (const bin of trashToPurge(await this.fs.listDirs(TRASH_DIR), now)) {
+      try {
+        await this.fs.remove(joinPath(TRASH_DIR, bin));
+        done++;
+      } catch { /* fichier tenu par OneDrive : au prochain lancement */ }
+    }
+    return done;
   }
 
   /* ---------------- copies de conflit OneDrive ---------------- */
@@ -901,7 +1263,7 @@ export class Repo {
       try {
         // Lu APRES le listing : au pire plus recent que la date gardee, et
         // alors la prochaine fois la date differe et la page est relue.
-        const index = indexPage(await this.readPage(dir, divider, n));
+        const index = indexPage(await this.readPage(dir, divider, n, false));
         if (stamp) this.cache.set(path, { stamp, index });
         out.push({ n, index });
       } catch {
@@ -978,6 +1340,11 @@ export class Repo {
   }
 
   async ensureRootLayout(): Promise<void> {
+    // Au lancement : la corbeille perd ce qui a plus de 30 jours (en fond).
+    if (!this.trashChecked) {
+      this.trashChecked = true;
+      void this.purgeTrash().catch(() => 0);
+    }
     if (!(await this.fs.exists(VRAC))) {
       await this.fs.mkdir(joinPath(VRAC, "Notes"));
       await this.writeMeta(VRAC, {
@@ -1003,6 +1370,13 @@ export function remapMeta(meta: NotebookMeta, from: string, to: string): Noteboo
     meta.paper = remapKeys(meta.paper, from, to);
   }
   return meta;
+}
+
+/** cahier.json lu : objet JSON (BOM d'un editeur Windows retire), sinon erreur. */
+function parseMetaText(raw: string): NotebookMeta {
+  const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("contenu inattendu");
+  return parsed as NotebookMeta;
 }
 
 /** Horodatage lisible et triable d'une suppression : 2026-10-01_14-03-22-123. */

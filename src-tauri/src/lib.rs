@@ -7,10 +7,12 @@
 //! Le verrou d'instance est LOCAL a la machine : il n'ecrit jamais rien dans
 //! le dossier synchronise, sinon un plantage sur un PC bloquerait l'autre.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -57,11 +59,58 @@ fn root_path(state: State<Root>) -> Res<String> {
     Ok(root_of(&state)?.to_string_lossy().to_string())
 }
 
+/// Nom de la machine : il signe les fichiers de presence et les copies de
+/// conflit (`0003.page-<PC>.json`). Il doit etre stable d'un lancement a
+/// l'autre et identique quelle que soit la facon dont l'appli est lancee
+/// (HOSTNAME n'est presque jamais exporte hors d'un terminal).
 #[tauri::command]
 fn machine_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "un autre PC".to_string())
+    host_name().unwrap_or_else(|| "un autre PC".to_string())
+}
+
+fn clean_host(raw: &str) -> Option<String> {
+    let t = raw.trim().trim_end_matches('\0').trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+#[cfg(windows)]
+fn host_name() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::SystemInformation::{ComputerNameNetBIOS, GetComputerNameExW};
+    // Nom NetBIOS : celui que montre Windows (et que COMPUTERNAME recopie).
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    let api = unsafe { GetComputerNameExW(ComputerNameNetBIOS, PWSTR(buf.as_mut_ptr()), &mut len) }
+        .ok()
+        .and_then(|_| clean_host(&String::from_utf16_lossy(&buf[..len as usize])));
+    api.or_else(|| std::env::var("COMPUTERNAME").ok().and_then(|v| clean_host(&v)))
+}
+
+#[cfg(not(windows))]
+fn host_name() -> Option<String> {
+    if let Some(v) = std::env::var("HOSTNAME").ok().and_then(|v| clean_host(&v)) {
+        return Some(v);
+    }
+    for file in ["/etc/hostname", "/proc/sys/kernel/hostname"] {
+        if let Some(v) = fs::read_to_string(file).ok().and_then(|v| clean_host(&v)) {
+            return Some(v);
+        }
+    }
+    // macOS : pas de /etc/hostname.
+    for args in [&["--get", "ComputerName"][..], &["--get", "LocalHostName"][..]] {
+        if let Ok(out) = std::process::Command::new("scutil").args(args).output() {
+            if out.status.success() {
+                if let Some(v) = clean_host(&String::from_utf8_lossy(&out.stdout)) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| clean_host(&String::from_utf8_lossy(&o.stdout)))
 }
 
 #[tauri::command]
@@ -108,6 +157,92 @@ struct FileMeta {
     size: u64,
 }
 
+fn mtime_ms(meta: &fs::Metadata) -> f64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// Date et taille d'un fichier, ou None s'il n'existe pas (ou n'est pas un fichier).
+fn stat_of(path: &Path) -> Option<FileMeta> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    Some(FileMeta {
+        name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        mtime: mtime_ms(&meta),
+        size: meta.len(),
+    })
+}
+
+/// Date et taille attendues par une ecriture conditionnelle.
+#[derive(serde::Deserialize)]
+struct Expect {
+    mtime: f64,
+    size: u64,
+}
+
+/// Le fichier est-il encore celui qu'on a lu (meme date, meme taille) ?
+/// `None` attendu : le fichier ne doit pas exister.
+fn matches(current: Option<&FileMeta>, expect: Option<&Expect>) -> bool {
+    match (current, expect) {
+        (None, None) => true,
+        (Some(c), Some(e)) => c.size == e.size && (c.mtime - e.mtime).abs() < 0.001,
+        _ => false,
+    }
+}
+
+#[tauri::command]
+fn stat_path(state: State<Root>, rel: String) -> Res<Option<FileMeta>> {
+    let path = resolve(&root_of(&state)?, &rel)?;
+    Ok(stat_of(&path))
+}
+
+#[derive(serde::Serialize)]
+struct TextWithMeta {
+    content: String,
+    stat: Option<FileMeta>,
+}
+
+/// Lit un fichier avec sa date et sa taille, prises AVANT la lecture : si le
+/// fichier change entre les deux, la date gardee est l'ancienne, et la
+/// prochaine ecriture conditionnelle verra le changement (jamais l'inverse).
+#[tauri::command(async)]
+fn read_text_meta(state: State<'_, Root>, rel: String) -> Res<TextWithMeta> {
+    let path = resolve(&root_of(&state)?, &rel)?;
+    let stat = stat_of(&path);
+    let content = fs::read_to_string(&path).map_err(|e| fail(format!("{} : {}", rel, e)))?;
+    Ok(TextWithMeta { content, stat })
+}
+
+#[derive(serde::Serialize)]
+struct CondWrite {
+    ok: bool,
+    /// Apres une ecriture reussie : le fichier ecrit. Sinon : ce qui est sur le disque.
+    stat: Option<FileMeta>,
+}
+
+/// Ecriture conditionnelle (R1) : le fichier n'est remplace que s'il est
+/// encore celui qu'on a lu (`expect`, date + taille), ou absent si
+/// `expect` est null. Sinon rien n'est ecrit et l'etat du disque est rendu :
+/// une page modifiee par OneDrive (l'autre PC) n'est jamais ecrasee en
+/// silence. Le verrou du chemin couvre la verification ET l'ecriture.
+#[tauri::command(async)]
+fn write_text_if(state: State<'_, Root>, rel: String, content: String, expect: Option<Expect>) -> Res<CondWrite> {
+    let path = resolve(&root_of(&state)?, &rel)?;
+    let lock = path_lock(&path);
+    let _guard = lock.lock().map_err(|_| fail("verrou d'ecriture indisponible"))?;
+    let current = stat_of(&path);
+    if !matches(current.as_ref(), expect.as_ref()) {
+        return Ok(CondWrite { ok: false, stat: current });
+    }
+    write_durable_unlocked(&path, &rel, content.as_bytes())?;
+    Ok(CondWrite { ok: true, stat: stat_of(&path) })
+}
+
 #[tauri::command]
 fn list_files_meta(state: State<Root>, rel: String) -> Res<Vec<FileMeta>> {
     let path = resolve(&root_of(&state)?, &rel)?;
@@ -121,12 +256,7 @@ fn list_files_meta(state: State<Root>, rel: String) -> Res<Vec<FileMeta>> {
         if !meta.is_file() {
             continue;
         }
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
+        let mtime = mtime_ms(&meta);
         out.push(FileMeta {
             name: entry.file_name().to_string_lossy().to_string(),
             mtime,
@@ -175,11 +305,55 @@ fn retry_locked<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
 /// atomique : le fichier est soit l'ancien, soit le nouveau, jamais un moitie.
 /// Sans sync_all, une coupure de batterie juste apres pouvait garder le
 /// renommage mais pas les donnees : une page de 0 octet.
+///
+/// Deux ecritures du meme chemin en meme temps (commandes async, sur des
+/// fils differents) passent l'une apres l'autre (`path_lock`), et chaque
+/// ecriture a son propre fichier temporaire (`temp_path`) : avant, les deux
+/// ecrivaient le meme « .tmp-write » et l'une renommait le fichier de
+/// l'autre a moitie ecrit.
 fn write_durable(path: &Path, rel: &str, bytes: &[u8]) -> Res<()> {
+    let lock = path_lock(path);
+    let _guard = lock.lock().map_err(|_| fail("verrou d'ecriture indisponible"))?;
+    write_durable_unlocked(path, rel, bytes)
+}
+
+/// Verrous par chemin, pour toute la vie du processus. Une entree n'est
+/// retiree que si plus personne ne la tient.
+fn path_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let table = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = match table.lock() {
+        Ok(m) => m,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // Menage : les verrous que personne ne tient (le tableau ne grossit pas).
+    if map.len() > 256 {
+        map.retain(|_, l| Arc::strong_count(l) > 1);
+    }
+    // Windows ignore la casse : « Cours » et « cours » sont le meme fichier.
+    let key = if cfg!(windows) {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    } else {
+        path.to_path_buf()
+    };
+    map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+}
+
+/// Fichier temporaire propre a cette ecriture : nom du fichier, numero du
+/// processus et compteur. Jamais une page ni une copie de conflit (il ne
+/// finit pas par .json).
+fn temp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    path.with_file_name(format!("{name}.{}-{n}.tmp-write", std::process::id()))
+}
+
+fn write_durable_unlocked(path: &Path, rel: &str, bytes: &[u8]) -> Res<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| fail(format!("{rel} : {e}")))?;
     }
-    let temp = path.with_extension("tmp-write");
+    let temp = temp_path(path);
     let written = retry_locked(|| {
         let mut file = fs::File::create(&temp)?;
         file.write_all(bytes)?;
@@ -292,14 +466,13 @@ fn set_myscript_keys(application_key: String, hmac_key: String) -> Res<()> {
     let file = preference_file()
         .map(|p| p.with_file_name("myscript.json"))
         .ok_or_else(|| fail("emplacement de configuration introuvable"))?;
-    if let Some(parent) = file.parent() {
-        fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
-    }
     let body = serde_json::json!({
         "applicationKey": application_key,
         "hmacKey": hmac_key,
     });
-    fs::write(&file, body.to_string()).map_err(|e| fail(e.to_string()))
+    // Meme ecriture atomique que les pages : une coupure ne laisse jamais un
+    // fichier de cles a moitie ecrit (cles ignorees en silence ensuite).
+    write_durable(&file, "myscript.json", body.to_string().as_bytes())
 }
 
 /* ------------------------------------------------------------------ */
@@ -399,6 +572,8 @@ fn remove_path(state: State<Root>, rel: String) -> Res<()> {
 
 /// Renommage, retente si OneDrive tient le fichier : une renumerotation de
 /// pages interrompue a mi-chemin laisserait un trou dans l'intercalaire.
+/// Jamais par-dessus un fichier ou un dossier existant (R2) : une page
+/// arrivee entre-temps sous ce numero (OneDrive) serait ecrasee sans trace.
 #[tauri::command(async)]
 fn rename_path(state: State<'_, Root>, from: String, to: String) -> Res<()> {
     let root = root_of(&state)?;
@@ -407,7 +582,64 @@ fn rename_path(state: State<'_, Root>, from: String, to: String) -> Res<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
     }
-    retry_locked(|| fs::rename(&src, &dst)).map_err(|e| fail(format!("{} vers {} : {}", from, to, e)))
+    retry_locked(|| rename_no_replace(&src, &dst)).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            fail(format!("{to} existe deja : rien n'a ete ecrase"))
+        } else {
+            fail(format!("{} vers {} : {}", from, to, e))
+        }
+    })
+}
+
+/// Meme fichier a la casse pres (Windows, macOS) : « Cours » vers « cours ».
+fn same_entry(src: &Path, dst: &Path) -> bool {
+    match (fs::canonicalize(src), fs::canonicalize(dst)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Renomme sans jamais remplacer la destination. Windows : MoveFileExW
+/// sans MOVEFILE_REPLACE_EXISTING (le systeme refuse, rien n'est perdu).
+#[cfg(windows)]
+fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    if dst.exists() && !same_entry(src, dst) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "destination deja presente"));
+    }
+    let a = HSTRING::from(src.as_os_str());
+    let b = HSTRING::from(dst.as_os_str());
+    unsafe { MoveFileExW(&a, &b, MOVEFILE_WRITE_THROUGH) }.map_err(|e| {
+        // HRESULT_FROM_WIN32 : le code Windows est dans les 16 bits du bas.
+        let code = (e.code().0 as u32) & 0xFFFF;
+        let err = io::Error::from_raw_os_error(code as i32);
+        if code == 80 || code == 183 {
+            io::Error::new(io::ErrorKind::AlreadyExists, err.to_string())
+        } else {
+            err
+        }
+    })
+}
+
+/// Unix : un fichier passe par un lien dur (refuse si la destination
+/// existe, atomique), puis l'ancien nom est retire. Un dossier : verifie
+/// puis renomme (renameat2 NOREPLACE n'existe pas partout).
+#[cfg(not(windows))]
+fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(dst).is_ok() && !same_entry(src, dst) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "destination deja presente"));
+    }
+    let meta = fs::symlink_metadata(src)?;
+    if meta.is_file() && !same_entry(src, dst) {
+        match fs::hard_link(src, dst) {
+            Ok(()) => return fs::remove_file(src),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            // Systeme de fichiers sans liens durs : on retombe sur le renommage verifie.
+            Err(_) => {}
+        }
+    }
+    fs::rename(src, dst)
 }
 
 /// Montre un fichier dans l'explorateur Windows, selectionne. Sert a la
@@ -465,10 +697,8 @@ fn preference_file() -> Option<PathBuf> {
 
 fn save_root_preference(path: &Path) {
     if let Some(file) = preference_file() {
-        if let Some(parent) = file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(file, path.to_string_lossy().as_bytes());
+        // Ecriture atomique : un root.txt tronque renverrait au dossier par defaut.
+        let _ = write_durable(&file, "root.txt", path.to_string_lossy().as_bytes());
     }
 }
 
@@ -534,8 +764,11 @@ pub fn run() {
             list_dirs,
             list_files,
             list_files_meta,
+            stat_path,
             read_text,
+            read_text_meta,
             write_text,
+            write_text_if,
             read_binary,
             write_binary,
             save_export,
@@ -578,8 +811,82 @@ mod tests {
         write_durable(&path, "Maths/Cours/0001.page.json", b"{}").unwrap();
         write_durable(&path, "Maths/Cours/0001.page.json", b"{\"a\":1}").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
-        assert!(!path.with_extension("tmp-write").exists());
+        let left: Vec<_> = fs::read_dir(path.parent().unwrap()).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp-write"))
+            .collect();
+        assert!(left.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fichiers_temporaires_uniques() {
+        let p = PathBuf::from("/base/0001.page.json");
+        let a = temp_path(&p);
+        let b = temp_path(&p);
+        assert_ne!(a, b);
+        assert!(a.to_string_lossy().ends_with(".tmp-write"));
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with("0001.page.json."));
+    }
+
+    #[test]
+    fn ecritures_paralleles_du_meme_fichier() {
+        let dir = std::env::temp_dir().join(format!("cahiers-par-{}", std::process::id()));
+        let path = dir.join("0001.page.json");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    let body = format!("{{\"n\":{i}}}").repeat(2000);
+                    write_durable(&p, "0001.page.json", body.as_bytes()).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        // Un seul des contenus, entier : jamais un melange de deux ecritures.
+        let first = &text[..7];
+        assert_eq!(text, first.repeat(2000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renommage_sans_ecraser() {
+        let dir = std::env::temp_dir().join(format!("cahiers-ren-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("0001.page.json");
+        let b = dir.join("0002.page.json");
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let e = rename_no_replace(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&b).unwrap(), "b");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "a");
+        let c = dir.join("0003.page.json");
+        rename_no_replace(&a, &c).unwrap();
+        assert!(!a.exists());
+        assert_eq!(fs::read_to_string(&c).unwrap(), "a");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn condition_d_ecriture() {
+        let m = FileMeta { name: "x".into(), mtime: 1000.5, size: 10 };
+        assert!(matches(None, None));
+        assert!(!matches(Some(&m), None));
+        assert!(!matches(None, Some(&Expect { mtime: 1000.5, size: 10 })));
+        assert!(matches(Some(&m), Some(&Expect { mtime: 1000.5, size: 10 })));
+        assert!(!matches(Some(&m), Some(&Expect { mtime: 1000.5, size: 11 })));
+        assert!(!matches(Some(&m), Some(&Expect { mtime: 1001.0, size: 10 })));
+    }
+
+    #[test]
+    fn nom_de_machine() {
+        assert!(host_name().map(|n| !n.is_empty()).unwrap_or(true));
+        assert_eq!(clean_host("  PC-MAX\n"), Some("PC-MAX".to_string()));
+        assert_eq!(clean_host(" \n"), None);
     }
 
     #[test]
