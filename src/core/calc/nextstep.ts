@@ -43,10 +43,28 @@ function compute(line: string, prev: string): StepSuggestion | null {
   // Ligne qui commence par « = » : la suite du calcul de la ligne du dessus,
   // son dernier membre (texte de la page, formules relues en clair).
   const head = line.slice(0, at);
+  // `prev` : les lignes du dessus (la plus proche en dernier).
+  const above = prev.split("\n").filter((x) => x.trim());
+  const last = above[above.length - 1] ?? "";
   const lhs = head.trim() ? lhsBefore(head)
-    : prev.includes("=") ? prev.split(REL).pop()!.replace(/[\s;,.\u202f]+$/, "").trim() || null : null;
+    : last.includes("=") ? last.split(REL).pop()!.replace(/[\s;,.\u202f]+$/, "").trim() || null : null;
   if (!lhs) return null;
-  const forms = equivalents(lhs);
+  // « donc α = » : une inconnue seule, sa valeur tiree d'un calcul plus haut.
+  const lone = normalizeInput(lhs.trim());
+  if (/^[A-Za-zα-ωΑ-Ω][A-Za-z0-9]{0,2}$/.test(lone) && above.length) {
+    const v = valueOf(lone, above);
+    if (v) {
+      const rest = restAfter(v, compact(typed));
+      if (rest) return { insert: ((!typed ? " " : "") + rest).replace(/[\\$*[\]`]/g, (c) => `\\${c}`), replace: 0 };
+    }
+  }
+  // Dernier membre avec des inconnues (\u00ab \u03b1/(p - p1) + \u03b2/(p - p2) \u00bb) : leurs
+  // valeurs, tirees d'un membre precedent, remplacees.
+  const members = (head.trim() ? head : last).split(REL).map((x) => x.replace(/[\s;,.\u202f]+$/, "").trim()).filter(Boolean);
+  members[members.length - 1] = lhs;
+  let chain: string | null = null;
+  try { chain = chainValues(members); } catch { chain = null; }
+  const forms = chain ? [chain] : equivalents(lhs);
   if (!forms.length) return null;
   const want = compact(typed);
   for (const f of forms) {
@@ -54,6 +72,197 @@ function compute(line: string, prev: string): StepSuggestion | null {
     if (rest === null || !rest) continue;
     const lead = !typed ? " " : "";
     return { insert: (lead + rest).replace(/[\\$*[\]`]/g, (c) => `\\${c}`), replace: 0 };
+  }
+  return null;
+}
+
+/* ---------------- inconnues d'un membre : identification ---------------- */
+
+type Cx = { re: number; im: number };
+const cx = (v: any): Cx => (typeof v === "number" ? { re: v, im: 0 } : { re: Number(v?.re), im: Number(v?.im) });
+const cmul = (a: Cx, b: Cx): Cx => ({ re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re });
+const cdiv = (a: Cx, b: Cx): Cx => { const d = b.re * b.re + b.im * b.im; return { re: (a.re * b.re + a.im * b.im) / d, im: (a.im * b.re - a.re * b.im) / d }; };
+const cpoly = (c: number[], z: Cx): Cx => c.reduceRight<Cx>((acc, k) => { const p = cmul(acc, z); return { re: p.re + k, im: p.im }; }, { re: 0, im: 0 });
+
+/** Reel ecrit exactement si possible : entier, fraction, fraction de racine (« 5sqrt(7)/56 »). */
+function exactReal(x: number): string {
+  const frac = (y: number): { p: number; q: number } | null => {
+    for (let q = 1; q <= 1000; q++) { const p = Math.round(y * q); if (Math.abs(y - p / q) < 1e-9 * Math.max(1, Math.abs(y))) return { p, q }; }
+    return null;
+  };
+  const f = frac(x);
+  if (f) return f.q === 1 ? String(f.p) : `${f.p}/${f.q}`;
+  for (const m of [2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23]) {
+    const g = frac(x / Math.sqrt(m));
+    if (g) return `${g.p === 1 ? "" : g.p === -1 ? "-" : g.p}sqrt(${m})${g.q === 1 ? "" : `/${g.q}`}`;
+  }
+  return frNumber(x);
+}
+
+function complexText(z: Cx): string {
+  const re = Math.abs(z.re) < 1e-12 ? 0 : z.re, im = Math.abs(z.im) < 1e-12 ? 0 : z.im;
+  if (!im) return exactReal(re);
+  const imAbs = exactReal(Math.abs(im));
+  const imT = imAbs === "1" ? "i" : `${imAbs} i`;
+  if (!re) return im < 0 ? `-${imT}` : imT;
+  return `(${exactReal(re)} ${im < 0 ? "-" : "+"} ${imT})`;
+}
+
+/** x = p/q × √r (r = 1 : rationnel), ou null. */
+function exactParts(x: number): { p: number; q: number; r: number } | null {
+  for (const r of [1, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23]) {
+    const y = x / Math.sqrt(r);
+    for (let q = 1; q <= 1000; q++) {
+      const p = Math.round(y * q);
+      if (Math.abs(y - p / q) < 1e-9 * Math.max(1, Math.abs(y))) return { p, q, r };
+    }
+  }
+  return null;
+}
+
+/**
+ * Coefficient (complexe) sur un denominateur, en une seule fraction :
+ * « (-7 + 5sqrt(7) i)/(56(p + 1/2 - i sqrt(7)/2)) », « 1/(2p) ».
+ */
+function coefOver(k: Cx, d: string): string {
+  const c = coefParts(k);
+  if (!c) return `${complexText(k)}/${d}`;
+  return `${c.num}/${c.q === 1 ? d : `(${c.q}${d})`}`;
+}
+
+/** Valeur seule : « (-7 + 5i sqrt(7))/56 », « -1/4 », « i/2 ». */
+function valueText(k: Cx): string {
+  const c = coefParts(k);
+  if (!c) return complexText(k);
+  return c.q === 1 ? c.num : `${c.num}/${c.q}`;
+}
+
+/** Numerateur exact (entiers, racines, i) et denominateur commun d'un complexe. */
+function coefParts(k: Cx): { num: string; q: number } | null {
+  const re = Math.abs(k.re) < 1e-12 ? 0 : k.re, im = Math.abs(k.im) < 1e-12 ? 0 : k.im;
+  const a = re ? exactParts(re) : { p: 0, q: 1, r: 1 }, b = im ? exactParts(im) : { p: 0, q: 1, r: 1 };
+  if (!a || !b) return null;
+  const q = (a.q * b.q) / gcd(a.q, b.q);
+  const A = a.p * (q / a.q), B = b.p * (q / b.q);
+  const rt = (n: number, r: number) => (r === 1 ? String(n) : `${n === 1 ? "" : n === -1 ? "-" : n}sqrt(${r})`);
+  // Partie imaginaire « 5i sqrt(7) », « 2i », « i » : le i avant la racine (la conversion le relit).
+  const imT = (n: number, r: number) => `${n === 1 ? "" : n === -1 ? "-" : n}i${r === 1 ? "" : ` sqrt(${r})`}`;
+  let num: string;
+  if (A && B) num = `(${rt(A, a.r)} ${B < 0 ? "-" : "+"} ${imT(Math.abs(B), b.r)})`;
+  else if (B) num = imT(B, b.r);
+  else num = rt(A, a.r);
+  return { num, q };
+}
+
+/** Termes d'une somme, avec leur signe. */
+function termsOf(n: any, sign = 1, out: { sign: number; node: any }[] = []): { sign: number; node: any }[] {
+  n = strip(n);
+  if (n.type === "OperatorNode" && (n.op === "+" || n.op === "-") && n.args.length === 2) {
+    termsOf(n.args[0], sign, out);
+    return termsOf(n.args[1], n.op === "-" ? -sign : sign, out);
+  }
+  if (n.type === "OperatorNode" && n.op === "-" && n.args.length === 1) return termsOf(n.args[0], -sign, out);
+  out.push({ sign, node: n });
+  return out;
+}
+
+/**
+ * Chaine « F(p) = … = α/(p - p1) + β/(p - p2) » : les inconnues du dernier
+ * membre tirees d'un membre precedent en une seule lettre, puis remplacees.
+ * Reel : identification (solve.ts). Poles complexes (ou si l'identification
+ * echoue) : chaque terme k/(a x + b) prend k = a × residu de F en -b/a.
+ */
+function chainValues(members: string[]): string | null {
+  return chainSolve(members)?.text ?? null;
+}
+
+/** Comme chainValues, avec la valeur de chaque inconnue (« α » -> « 1/2 »). */
+function chainSolve(members: string[]): { text: string; values: Map<string, string> } | null {
+  if (members.length < 2) return null;
+  const m = M();
+  const parseM = (s: string) => toProducts(m.parse(normalizeInput(s.replace(/\s+/g, " "))));
+  const last = members[members.length - 1];
+  const lastNode = parseM(last);
+  const syms = symbolsOf(lastNode);
+  if (syms.length < 2) return null;
+  let x = "", F: MathNode | null = null, Ftext = "";
+  for (let j = members.length - 2; j >= 0 && !F; j--) {
+    try {
+      const n = parseM(members[j]);
+      const s = symbolsOf(n);
+      if (s.length === 1 && syms.includes(s[0])) { x = s[0]; F = n; Ftext = members[j]; }
+    } catch { /* membre illisible (texte) */ }
+  }
+  if (!F) return null;
+  const K = syms.filter((k) => k !== x);
+  const terms = termsOf(lastNode);
+  const denText = (d: any) => { const t = print(strip(d)); return /^[\p{L}\d]+$/u.test(t) ? t : `(${t})`; };
+  // 1. Identification reelle.
+  const r = solveEquation(`${Ftext} = ${last}`);
+  if (r.ok && r.values && r.values.length === K.length) {
+    const val = new Map(r.values.map((v) => [v.name, v.text]));
+    let out = "";
+    const values = val;
+    for (const t of terms) {
+      const n = t.node;
+      if (!(n.type === "OperatorNode" && n.op === "/")) return null;
+      const numSub = n.args[0].transform((q: any) => (q.type === "SymbolNode" && val.has(q.name) ? m.parse(`(${val.get(q.name)})`) : q));
+      let nc: number[];
+      try { nc = polynomialCoefficients(numSub.toString(), x, 4).map((c) => t.sign * c); } catch { return null; }
+      if (nc.every((c) => Math.abs(c) < 1e-12)) continue;
+      let q = 1;
+      for (const c of nc) { const mm = /\/(\d+)$/.exec(coefText(Math.abs(c))); if (mm) q = (q * Number(mm[1])) / gcd(q, Number(mm[1])); }
+      let ints = nc.map((c) => Math.round(c * q));
+      const neg = ints[ints.length - 1] < 0;
+      if (neg) ints = ints.map((c) => -c);
+      const numT = polyText(ints, x);
+      const numW = /[+-]/.test(numT.replace(/^-/, "")) ? `(${numT})` : numT;
+      const d = denText(n.args[1]);
+      out += `${out ? (neg ? " - " : " + ") : neg ? "-" : ""}${numW}/${q === 1 ? d : `(${q}${d})`}`;
+    }
+    return out ? { text: out, values } : null;
+  }
+  // 2. Residus (poles simples, complexes compris).
+  let num: number[], den: number[];
+  try { ({ num, den } = rationalParts(F, x)); } catch { return null; }
+  const dDen = den.slice(1).map((c, i) => c * (i + 1));
+  let out = "";
+  const values = new Map<string, string>();
+  for (const t of terms) {
+    const n = t.node;
+    if (!(n.type === "OperatorNode" && n.op === "/" && strip(n.args[0]).type === "SymbolNode" && K.includes(strip(n.args[0]).name))) return null;
+    const dc = n.args[1].compile();
+    const d0 = cx(dc.evaluate({ [x]: 0 })), d1 = cx(dc.evaluate({ [x]: 1 })), d2 = cx(dc.evaluate({ [x]: 2 }));
+    const a = { re: d1.re - d0.re, im: d1.im - d0.im };
+    // Denominateur du premier degre en x.
+    if (Math.abs(d2.re - (2 * a.re + d0.re)) > 1e-9 || Math.abs(d2.im - (2 * a.im + d0.im)) > 1e-9) return null;
+    const root = cdiv({ re: -d0.re, im: -d0.im }, a);
+    const dp = cpoly(dDen, root);
+    if (Math.hypot(dp.re, dp.im) < 1e-12 || Math.hypot(cpoly(den, root).re, cpoly(den, root).im) > 1e-7) return null;
+    let k = cmul(a, cdiv(cpoly(num, root), dp));
+    // k = coefficient de 1/den ; le terme ecrit « signe × inconnue / den » : inconnue = signe × k.
+    values.set(strip(n.args[0]).name, valueText(t.sign < 0 ? { re: -k.re, im: -k.im } : k));
+    out += `${out ? " + " : ""}${coefOver(k, denText(n.args[1]))}`;
+  }
+  return out ? { text: out, values } : null;
+}
+
+/**
+ * « donc α = » : la valeur de α, tiree de la chaine la plus proche au-dessus
+ * dont le dernier membre la contient (elements simples, coefficients).
+ */
+function valueOf(name: string, lines: string[]): string | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const members = lines[i].split(REL).map((x) => x.replace(/[\s;,.\u202f]+$/, "").trim()).filter(Boolean);
+    if (members.length < 2) continue;
+    let syms: string[];
+    try { syms = symbolsOf(M().parse(normalizeInput(members[members.length - 1].replace(/\s+/g, " ")))); } catch { continue; }
+    if (!syms.includes(name)) continue;
+    try {
+      const sol = chainSolve(members);
+      const v = sol?.values.get(name);
+      if (v) return v;
+    } catch { /* chaine illisible */ }
   }
   return null;
 }

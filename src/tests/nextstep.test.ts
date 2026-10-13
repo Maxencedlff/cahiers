@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { equivalents, nextStepSuggest } from "../core/calc/nextstep";
 import { greekWordAtEnd } from "../core/text/automath";
+import { texToPlain } from "../core/text/doc";
 
 const sug = (l: string) => nextStepSuggest(l)?.insert ?? null;
 
@@ -63,6 +64,31 @@ describe("lettres grecques tapees en toutes lettres", () => {
     expect(greekWordAtEnd("on a nu")).toBe("on a ν");
     expect(greekWordAtEnd("xi")).toBe("ξ");
     expect(greekWordAtEnd("numero")).toBeNull();
+  });
+});
+
+describe("inconnues du dernier membre : valeurs remplacees", () => {
+  it("elements simples reels : identification", () => {
+    expect(nextStepSuggest("=", "2/(p(p+1)(p+2)) = a/p + b/(p+1) + c/(p+2)")?.insert).toBe(" 1/p - 2/(p + 1) + 1/(p + 2)");
+    expect(nextStepSuggest("2/(p(p+1)(p+2)) = a/p + b/(p+1) + c/(p+2) =")?.insert).toBe(" 1/p - 2/(p + 1) + 1/(p + 2)");
+  });
+  it("poles complexes : residus, coefficients exacts avec racines", () => {
+    const prev = texToPlain("\\frac{2}{p\\left(p+2\\right)\\left(p^2+p+2\\right)}=\\frac{1}{2p}-\\frac{1}{4\\left(p+2\\right)}-\\frac{p+3}{4\\left(p^2+p+2\\right)}=\\frac{\\alpha}{p+\\frac12-\\frac{i\\sqrt{7}}{2}}+\\frac{\\beta}{p+\\frac12+i\\,\\frac{\\sqrt{7}}{2}}");
+    expect(nextStepSuggest("=", prev)?.insert)
+      .toBe(" (-7 + 5i sqrt(7))/(56(p + 1/2 - i sqrt(7)/2)) + (-7 - 5i sqrt(7))/(56(p + 1/2 + i sqrt(7)/2))");
+    expect(nextStepSuggest("=", "1/(p^2+1) = a/(p - i) + b/(p + i)")?.insert).toBe(" -i/(2(p - i)) + i/(2(p + i))");
+  });
+  it("« donc α = » : la valeur trouvee dans un calcul plus haut", () => {
+    const chain = texToPlain("\\frac{2}{p\\left(p+2\\right)\\left(p^2+p+2\\right)}=\\frac{1}{2p}-\\frac{1}{4\\left(p+2\\right)}-\\frac{p+3}{4\\left(p^2+p+2\\right)}=\\frac{\\alpha}{p+\\frac12-\\frac{i\\sqrt{7}}{2}}+\\frac{\\beta}{p+\\frac12+i\\,\\frac{\\sqrt{7}}{2}}");
+    const above = ["Conclusion :", chain, "= alpha + beta (p+1/2-i sqrt(7)/2)/(p+1/2+i sqrt(7)/2)"].join("\n");
+    expect(nextStepSuggest("donc α =", above)?.insert).toBe(" (-7 + 5i sqrt(7))/56");
+    expect(nextStepSuggest("donc β = ", above)?.insert).toBe("(-7 - 5i sqrt(7))/56");
+    // Signe du terme pris en compte : « - b/(p+1) » donne b = 2.
+    expect(nextStepSuggest("donc b =", "2/(p(p+1)(p+2)) = a/p - b/(p+1) + c/(p+2)")?.insert).toBe(" 2");
+  });
+  it("copier en clair : « 1/(2p) », « i sqrt(7) »", () => {
+    expect(texToPlain("\\frac{1}{2p}")).toBe("1/(2p)");
+    expect(texToPlain("\\frac{i\\sqrt{7}}{2}")).toBe("i sqrt(7)/2");
   });
 });
 

@@ -605,8 +605,10 @@ export function texToPlain(tex: string): string {
   // aussi, sinon « 2/p(p-1) » se relirait (2/p)(p-1). Un appel de fonction seul reste nu.
   const productParens = (x: string) => /[\w)}]\s*\(/.test(x)
     && !/^\\?(?:sqrt|sin|cos|tan|exp|ln|log|sh|ch|th|arcsin|arccos|arctan)\s*\([^()]*\)$/.test(x.trim());
+  // Nombre colle a une lettre (« 2p ») : un produit, entre parentheses (« 1/(2p) »).
   const wrapDen = (x: string) =>
-    (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) || productParens(x) ? `(${x.trim()})` : x.trim());
+    (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) || productParens(x) || /^\d+(?:[.,]\d+)?\s*\\?[A-Za-z]/.test(x.trim())
+      ? `(${x.trim()})` : x.trim());
   // Indice compose : entre parentheses, comme on le tape ("u_(n+1)").
   const sub = (x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `(${x.trim()})` : x.trim());
   // \dfrac, \tfrac : des fractions comme les autres (« \dfrac1p » -> « 1/p »).
@@ -620,7 +622,8 @@ export function texToPlain(tex: string): string {
       .replace(/\\(?:mathrm|text|operatorname|mathbf|mathit|mathbb|vec|overline)\{([^{}]*)\}/g, "$1")
       .replace(/(\\frac\{[^{}]*\})\s*([0-9A-Za-z])/g, "$1{$2}")
       .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (_a, n: string, d: string) => `${wrapNum(n)}/${wrapDen(d)}`)
-      .replace(/\\sqrt\{([^{}]*)\}/g, "sqrt($1)")
+      // « i\sqrt{7} » -> « i sqrt(7) », jamais « isqrt(7) ».
+      .replace(/\\sqrt\{([^{}]*)\}/g, (_a, x: string, off: number, all: string) => `${/[A-Za-z0-9)]/.test(all[off - 1] ?? "") ? " " : ""}sqrt(${x})`)
       // Bornes d'une integrale, d'une somme : le "_" reste ("int_0^1").
       .replace(/\\(int|sum|prod|lim)_\{([^{}]*)\}/g, (_a, op: string, b: string) => `\\${op}\u0001${sub(b)}`)
       .replace(/\\(int|sum|prod|lim)_/g, "\\$1\u0001")
@@ -633,7 +636,11 @@ export function texToPlain(tex: string): string {
   }
   return s
     .replace(/\\[,;:! ]/g, " ")
-    .replace(/\\([A-Za-z]+)/g, (_a, name: string) => TEX_WORDS[name] ?? name)
+    // Mot colle a une lettre ou un chiffre (« 2\alpha », « i\pi ») : separe par un espace.
+    .replace(/\\([A-Za-z]+)/g, (_a, name: string, off: number, all: string) => {
+      const w = TEX_WORDS[name] ?? name;
+      return /^[A-Za-z]/.test(w) && /[A-Za-z0-9]/.test(all[off - 1] ?? "") ? ` ${w}` : w;
+    })
     .replace(/_(?=\()/g, "\u0001")
     .replace(/[_{}]/g, "")
     .replace(/\u0001/g, "_")

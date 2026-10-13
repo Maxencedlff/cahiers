@@ -369,7 +369,7 @@ export class TextDoc {
     if ((eol < 0 ? rest : rest.slice(0, eol)).replace(/[\s\u200b]/g, "")) return;
     if (eol < 0 && after.cloneContents().querySelector(".eq, .doc-img")) return;
     const line = this.lineAt(node as Text, r.startOffset);
-    const s = this.suggester(line.full, line.full.trim().startsWith("=") ? this.prevLinePlain(r) : "");
+    const s = this.suggester(line.full, line.full.includes("=") ? this.prevLinePlain(r) : "");
     if (!s) return;
     const rect = caretRect(r, this.root);
     const host = this.root.parentElement;
@@ -396,17 +396,22 @@ export class TextDoc {
     this.ghostAt = { node: node as Text, offset: r.startOffset, insert: s.insert, replace: s.replace };
   }
 
-  /** Derniere ligne non vide avant celle du curseur, formules en clair (texToPlain). */
+  /**
+   * Lignes non vides avant celle du curseur (20 au plus, la plus proche en
+   * dernier), formules en clair (texToPlain) : suite d'un calcul « = … »,
+   * valeur d'une inconnue trouvee plus haut (« donc α = »).
+   */
   private prevLinePlain(r: Range): string {
     const before = document.createRange();
     before.setStart(this.root, 0);
     before.setEnd(r.startContainer, r.startOffset);
     const lines = docLines(normalizeTokens(this.readNodes(before.cloneContents())));
-    for (let i = lines.length - 2; i >= 0; i--) {
+    const out: string[] = [];
+    for (let i = lines.length - 2; i >= 0 && out.length < 20; i--) {
       const text = lines[i].tokens.map((t) => (t.kind === "text" ? t.text : t.kind === "math" ? texToPlain(t.latex) : "")).join("");
-      if (text.trim()) return text;
+      if (text.trim()) out.unshift(text);
     }
-    return "";
+    return out.join("\n");
   }
 
   /**
