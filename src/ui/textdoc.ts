@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveComplete, liveFormula, latexToSource, liveSplit, mathTail, mathWordsAtEnd, planLine,
+  balanceParens, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -2723,7 +2723,10 @@ export class TextDoc {
     this.root.contentEditable = "true";
 
     let eq: HTMLElement | null = null;
-    if (origin?.latex && value === origin.value) {
+    // Rouverte sans changement mais mal formee (« / » laisse en barre,
+    // parenthese manquante, ancienne page) : la valider la repare.
+    const repair = !!origin?.latex && !origin.src && cleanMathLive(origin.latex) !== origin.latex;
+    if (origin?.latex && value === origin.value && !repair) {
       // Rouverte sans changement : elle garde sa source tapee et reste
       // prolongeable par la frappe qui suit.
       eq = makeEq(origin.latex, origin.src);
@@ -2915,7 +2918,7 @@ export class TextDoc {
       const frag = range.cloneContents();
       if (frag.querySelector("br, .doc-img, .dl, .line")) return false;
       for (const q of Array.from(frag.querySelectorAll<HTMLElement>(".eq"))) {
-        q.replaceWith(q.dataset.src ?? latexToSource(q.dataset.latex ?? "") ?? "");
+        q.replaceWith(q.dataset.src ?? balanceParens(texToPlain(q.dataset.latex ?? "")));
       }
       const src = (frag.textContent ?? "").replace(/\u200b/g, "");
       if (src.includes("\n")) return false;
@@ -2984,7 +2987,8 @@ export class TextDoc {
       if (prev instanceof HTMLElement && prev.classList.contains("eq") && !prev.classList.contains("live")) eq = prev;
     }
     if (!eq) return false;
-    const src = eq.dataset.src ?? latexToSource(eq.dataset.latex ?? "") ?? eq.dataset.latex ?? "";
+    // Formule sans source tapee (faite a l'editeur, ou relue d'un fichier) : relue en clair.
+    const src = eq.dataset.src ?? balanceParens(texToPlain(eq.dataset.latex ?? ""));
     const raw = rawSpan(src);
     eq.replaceWith(raw);
     this.lastAuto = null;
@@ -3103,7 +3107,7 @@ export class TextDoc {
         // Formule faite a l'editeur (sans source tapee) : relue en clair, elle
         // se fond dans la formule de la ligne (« (A)/(B) » tape autour d'elle
         // devient une fraction) ; jamais redefaite en texte (`fixed`).
-        const plain = texToPlain(prev.dataset.latex);
+        const plain = balanceParens(texToPlain(prev.dataset.latex));
         if (!plain) break;
         back.push({ node: prev, kind: "eq", str: plain, a: 0, b: 0, head: "", fixed: true });
       } else if (!(prev instanceof HTMLElement && inlineWrap(prev))) {

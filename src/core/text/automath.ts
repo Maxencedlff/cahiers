@@ -420,7 +420,8 @@ class Parser {
         if (!den) { this.i = save; this.seenOp = seen; break; }
         den = this.gluedFactors(den);
         cur = {
-          tex: `\\frac{${cur.group ?? cur.tex}}{${den.group ?? den.tex}}`,
+          // « ((1+x)) » : la barre groupe deja, plus aucune parenthese autour.
+          tex: `\\frac{${bare(cur.group ?? cur.tex)}}{${bare(den.group ?? den.tex)}}`,
           ops: cur.ops + den.ops + 1, vars: cur.vars + den.vars,
         };
         continue;
@@ -1548,6 +1549,20 @@ export function cleanMathLive(latex: string): string {
   return s.replace(/\u0000(\d+)\u0000/g, (_a, i: string) => keep[Number(i)]).trim();
 }
 
+/**
+ * Parentheses fermantes manquantes ajoutees a la fin (« (1+(10/(p+2)) »
+ * tape dans l'editeur avec une « ) » en moins) : sinon la relecture de la
+ * ligne s'arrete sur ce morceau. Une fermante en trop n'est pas touchee.
+ */
+export function balanceParens(src: string): string {
+  let open = 0;
+  for (const c of src) {
+    if (c === "(") open++;
+    else if (c === ")" && open > 0) open--;
+  }
+  return open > 0 ? src + ")".repeat(open) : src;
+}
+
 /** LaTeX qui est une seule fraction \\frac{…}{…}, rien autour. */
 function wholeFrac(tex: string): boolean {
   if (!tex.startsWith("\\frac{")) return false;
@@ -1573,7 +1588,8 @@ function wholeFrac(tex: string): boolean {
  */
 function slashFractions(s: string): string {
   const read = (inner: string): string | null => {
-    const src = latexToSource(inner);
+    const raw = latexToSource(inner);
+    const src = raw && balanceParens(raw);
     if (!src || !src.includes("/")) return null;
     const tex = liveFormula(src);
     return tex && !tex.includes("placeholder") ? tex : null;
@@ -1583,6 +1599,17 @@ function slashFractions(s: string): string {
     const tex = read(inner);
     return tex ? `{${tex}}` : all;
   });
+}
+
+/** Terme de fraction sans les parentheses qui l'englobent en entier (autant de fois qu'il y en a). */
+function bare(x: string): string {
+  let t = x;
+  for (let k = 0; k < 5; k++) {
+    const inner = outerParens(t);
+    if (inner === null) break;
+    t = inner.trim();
+  }
+  return t;
 }
 
 /** Contenu entre parentheses qui l'englobent en entier : "(a+b)" -> "a+b", "(a)(b)" -> null. */

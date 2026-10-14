@@ -717,3 +717,10 @@ describe("Alt+= : « ceci est une formule »", () => {
     expect(mathTail("mot ")).toBeNull();
   });
 });
+
+describe("formule cassee de l'editeur (parenthese manquante)", () => {
+  it("relue malgre la « ) » manquante, sans double parenthese", () => {
+    expect(cleanMathLive("\\frac{\\frac{10}{p + 2}}{(1+(10/(p+2))}")).toBe("\\frac{\\frac{10}{p + 2}}{1 + \\frac{10}{p + 2}}");
+    expect(liveFormula("1/((1+x))")).toBe("\\frac{1}{1 + x}");
+  });
+});
