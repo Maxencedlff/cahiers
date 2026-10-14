@@ -311,6 +311,13 @@ function identTex(s: string): string {
   if (/^[RLC]{2,3}$/.test(s) && new Set(s).size === s.length) return [...s].join("\\,");
   // j devant une grandeur : l'imaginaire (jL -> j L).
   if (/^j[A-Z]$/.test(s)) return `j\\,${s[1]}`;
+  // Minuscule + une majuscule : un produit (pY, pX, kT), sauf les courants
+  // et tensions i, u, v (iL, uC, vS gardent l'indice).
+  if (/^[a-hk-tw-z][A-Z]$/.test(s)) return `${s[0]}\\,${s[1]}`;
+  // Puissance et loi d'Ohm : UI, RI, IU sont des produits, pas U indice I.
+  if (s === "UI" || s === "IU" || s === "RI") return `${s[0]}\\,${s[1]}`;
+  // 2piRC, 2piLC : pi colle devant des composants (pas p indice iRC).
+  if (/^pi[A-Z]{1,3}$/.test(s)) return `\\pi\\,${identTex(s.slice(2))}`;
   const m = s.match(/^([A-Za-z])([A-Za-z0-9]+)$/);
   if (!m) return s;
   return m[2].length === 1 ? `${m[1]}_${m[2]}` : `${m[1]}_{${m[2]}}`;
@@ -1294,7 +1301,8 @@ export function subscriptVars(latex: string): string {
     )
     .replace(
       /(^|[^A-Za-z_^])(?<![_^]\{)([IUV])([A-Z][A-Za-z0-9]{0,4})(?![A-Za-z_])/g,
-      (_all, pre: string, head: string, rest: string) => `${pre}${head}_{${rest}}`,
+      // UI, IU : la puissance, un produit.
+      (all, pre: string, head: string, rest: string) => (/^(?:UI|IU)$/.test(head + rest) ? all : `${pre}${head}_{${rest}}`),
     )
     // Pas devant "_" : "Cu_{c}" est C fois u_c, et C_{u}_{c} serait un
     // double indice (formule en rouge).

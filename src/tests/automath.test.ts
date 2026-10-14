@@ -668,3 +668,19 @@ describe("fractions imbriquees (H/(1+H))", () => {
     expect(cleanMathLive("\\frac{a}{b}")).toBe("\\frac{a}{b}");
   });
 });
+
+describe("produits colles : pY, UI, 2piRC", () => {
+  it("minuscule + majuscule = produit, sauf i u v (courants et tensions)", () => {
+    expect(one("Y(p) = pY + 2").tex).toBe("Y\\left(p\\right) = p\\,Y + 2");
+    expect(one("x = 2pY").tex).toBe("x = 2\\,p\\,Y");
+    expect(one("i = iL + 2").tex).toBe("i = i_L + 2");
+    expect(one("u = uC").tex).toBe("u = u_C");
+  });
+  it("UI, RI produits ; 2piRC = 2 pi R C", () => {
+    expect(one("P = UI").tex).toBe("P = U\\,I");
+    expect(one("U = RI").tex).toBe("U = R\\,I");
+    expect(one("fc = 1/(2piRC)").tex).toBe("f_c = \\frac{1}{2\\,\\pi\\,R\\,C}");
+    expect(subscriptVars("P = UI")).toBe("P = UI");
+    expect(subscriptVars("VCC")).toBe("V_{CC}");
+  });
+});
