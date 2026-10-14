@@ -10,7 +10,7 @@
  * proposee. Aucune forme : rien.
  */
 import { create, all, type MathNode } from "mathjs";
-import { normalizeInput, frNumber } from "./engine";
+import { normalizeInput, frNumber, frTexDecimal } from "./engine";
 import { findFormulas } from "../text/automath";
 import { polynomialCoefficients, polynomialRoots, solveEquation } from "./solve";
 
@@ -924,3 +924,208 @@ function restAfter(form: string, want: string): string | null {
   }
   return want ? form.slice(i) : form;
 }
+
+/* ---------------- detail d'une simplification (calculatrice, Litteral) ---------------- */
+
+/** Nombre en LaTeX a la francaise : entier, decimal court (0{,}8), sinon fraction. */
+function numTex(x: number): string {
+  if (Math.abs(x - Math.round(x)) < 1e-9) return String(Math.round(x));
+  for (let d = 1; d <= 4; d++) {
+    const s = x * 10 ** d;
+    if (Math.abs(s - Math.round(s)) < 1e-9) return x.toFixed(d).replace(".", "{,}");
+  }
+  for (let q = 2; q <= 100; q++) {
+    const p = Math.round(x * q);
+    if (Math.abs(x - p / q) < 1e-9) return `${p < 0 ? "-" : ""}\\frac{${Math.abs(p)}}{${q}}`;
+  }
+  return frNumber(x).replace(",", "{,}");
+}
+
+/** Polynome en LaTeX, du terme dominant au constant. */
+function polyTex(c: number[], v: string): string {
+  let out = "";
+  for (let k = c.length - 1; k >= 0; k--) {
+    const a = c[k];
+    if (Math.abs(a) < 1e-12) continue;
+    const mono = k === 0 ? "" : k === 1 ? v : `${v}^{${k}}`;
+    const abs = Math.abs(a);
+    const coef = mono && Math.abs(abs - 1) < 1e-12 ? "" : numTex(abs);
+    out += `${a < 0 ? (out ? " - " : "-") : out ? " + " : ""}${coef}${mono}`;
+  }
+  return out || "0";
+}
+
+const terms = (c: number[]) => c.filter((x) => Math.abs(x) > 1e-12).length;
+const trimPoly = (c: number[]) => { const o = [...c]; while (o.length > 1 && Math.abs(o[o.length - 1]) < 1e-12) o.pop(); return o; };
+
+/** Produit de facteurs en LaTeX : constante d'abord, facteurs a plusieurs termes entre parentheses. */
+function prodTex(fs: number[][], v: string): string {
+  let k = 1;
+  const parts: string[] = [];
+  for (const f of fs) {
+    if (f.length === 1) { k *= f[0]; continue; }
+    const t = polyTex(f, v);
+    parts.push(terms(f) > 1 && (fs.length > 1 || Math.abs(k - 1) > 1e-12) ? `\\left(${t}\\right)` : t);
+  }
+  if (!parts.length) return numTex(k);
+  const lead = Math.abs(k - 1) < 1e-12 ? "" : Math.abs(k + 1) < 1e-12 ? "-" : numTex(k);
+  return `${lead}${parts.join("")}`;
+}
+
+function fracTex(num: number[][], den: number[][], v: string): string {
+  const dk = den.filter((f) => f.length === 1).reduce((a, f) => a * f[0], 1);
+  if (den.every((f) => f.length === 1) && Math.abs(dk - 1) < 1e-12) return prodTex(num, v);
+  return `\\frac{${prodTex(num, v)}}{${prodTex(den, v)}}`;
+}
+
+/** Fraction rendue avec un denominateur unitaire (« (5p+9)/(5p+5) » -> « (p+1,8)/(p+1) »). */
+function monic(r: { num: number[]; den: number[] }): { num: number[]; den: number[] } {
+  const lc = r.den[r.den.length - 1];
+  if (!lc || Math.abs(lc - 1) < 1e-12) return { num: trimPoly(r.num), den: trimPoly(r.den) };
+  return { num: trimPoly(r.num.map((x) => x / lc)), den: trimPoly(r.den.map((x) => x / lc)) };
+}
+
+/**
+ * Polynome en facteurs du premier degre a racines rationnelles
+ * (« p^2 + p » -> [p, p + 1]), constante en tete ; tel quel sinon.
+ */
+function factorList(c: number[]): number[][] {
+  if (c.length < 3) return [c];
+  const roots = polynomialRoots(c);
+  if (!roots) return [c];
+  const out: number[][] = [];
+  for (const r of roots) {
+    if (typeof r.value !== "number") return [c];
+    const x = r.value;
+    let q = 1;
+    while (q <= 12 && Math.abs(x * q - Math.round(x * q)) > 1e-9) q++;
+    if (q > 12) return [c];
+    for (let k = 0; k < (r.multiplicity ?? 1); k++) out.push(q === 1 ? [-Math.round(x), 1] : [-Math.round(x * q), q]);
+  }
+  // Ordre de la copie : p, puis (p + 1), (p + 2)... (racine la plus petite en valeur absolue d'abord).
+  out.sort((f, g) => Math.abs(f[0] / f[1]) - Math.abs(g[0] / g[1]) || f[0] / f[1] - g[0] / g[1]);
+  const prod = out.reduce((a, f) => polyMul(a, f), [1]);
+  const k = c[c.length - 1] / prod[prod.length - 1];
+  return Math.abs(k - 1) < 1e-12 ? out : [[k], ...out];
+}
+
+/** a = k b (memes polynomes a un facteur pres) : k, sinon null. */
+function ratioOf(a: number[], b: number[]): number | null {
+  if (a.length !== b.length || a.length < 2) return null;
+  const k = a[a.length - 1] / b[b.length - 1];
+  return a.every((x, i) => Math.abs(x - k * b[i]) < 1e-9 * Math.max(1, Math.abs(x))) ? k : null;
+}
+
+/** Quotient exact a / b, ou null s'il reste quelque chose. */
+function polyDivExact(a: number[], b: number[]): number[] | null {
+  const r = [...a];
+  const q = new Array(Math.max(1, a.length - b.length + 1)).fill(0);
+  for (let i = a.length - b.length; i >= 0; i--) {
+    const c = r[i + b.length - 1] / b[b.length - 1];
+    q[i] = c;
+    for (let j = 0; j < b.length; j++) r[i + j] -= c * b[j];
+  }
+  return r.every((x) => Math.abs(x) < 1e-9) ? trimPoly(q) : null;
+}
+
+/**
+ * Detail d'une simplification en une lettre, redige comme sur une copie :
+ * meme denominateur, multiplier par l'inverse, simplifier par le facteur
+ * commun, coefficients entiers. Lignes au format du texte de la page
+ * (phrases et $formules$). null : pas de fraction a detailler.
+ */
+export function simplifySteps(src: string): string[] | null {
+  const m = M();
+  let node: MathNode;
+  try { node = toProducts(m.parse(normalizeInput(src.replace(/\s+/g, " ")))); } catch { return null; }
+  const syms = symbolsOf(node);
+  if (syms.length !== 1) return null;
+  const v = syms[0];
+  const top = strip(node);
+  const hasDiv = (n: MathNode) => n.filter((x: any) => x.type === "OperatorNode" && x.op === "/").length > 0;
+  if (!hasDiv(top)) return null;
+  const T = (n: MathNode) => frTexDecimal(n.toTex({ parenthesis: "auto", implicit: "hide" } as any));
+  const lines: string[] = [`On part de $${T(node)}$.`];
+  try {
+    // Une partie mise en une seule fraction ; une somme avec des fractions est detaillee.
+    const reduce = (n: MathNode, where: string): { num: number[]; den: number[] } => {
+      const r = monic(rationalParts(n, v));
+      const s = strip(n);
+      if (r.den.length > 1 && s.type === "OperatorNode" && (s.op === "+" || s.op === "-") && hasDiv(s)) {
+        const parts = termsOf(s).map((t) => ({ sign: t.sign, ...monic(rationalParts(t.node, v)) }));
+        const ks = parts.map((t) => polyDivExact(r.den, t.den));
+        const mid = ks.every((k) => k) ? parts.map((t, i) => {
+          const n2 = trimPoly(polyMul(t.num, ks[i]!));
+          return `${i ? (t.sign < 0 ? " - " : " + ") : t.sign < 0 ? "-" : ""}\\frac{${prodTex(factorList(n2), v)}}{${prodTex(factorList(r.den), v)}}`;
+        }).join("") : null;
+        lines.push(`${where ? `${where}on` : "On"} met tout au même dénominateur : $${T(n)} = ${mid ? `${mid} = ` : ""}${fracTex([r.num], factorList(r.den), v)}$.`);
+      }
+      return r;
+    };
+    let numF: number[][], denF: number[][];
+    if (top.type === "OperatorNode" && top.op === "/") {
+      const a = reduce(top.args[0], "En haut, ");
+      const b = reduce(top.args[1], "En bas, ");
+      numF = [a.num, b.den].filter((f) => !(f.length === 1 && Math.abs(f[0] - 1) < 1e-12));
+      denF = [a.den, b.num].filter((f) => !(f.length === 1 && Math.abs(f[0] - 1) < 1e-12));
+      if (a.den.length > 1 || b.den.length > 1) {
+        lines.push(`Diviser par une fraction, c'est multiplier par son inverse : $${fracTex([a.num], [a.den], v)} \\times ${fracTex([b.den], [b.num], v)} = ${fracTex(numF, denF, v)}$.`);
+      }
+    } else {
+      const r = reduce(top, "");
+      numF = [r.num];
+      denF = [r.den];
+      if (!(top.type === "OperatorNode" && (top.op === "+" || top.op === "-"))) {
+        lines.push(`On écrit tout en une seule fraction : $${fracTex(numF, denF, v)}$.`);
+      }
+    }
+    // Facteurs identiques en haut et en bas.
+    const gone: number[][] = [];
+    for (let i = 0; i < numF.length; i++) {
+      const j = denF.findIndex((d) => ratioOf(numF[i], d) !== null);
+      if (j < 0) continue;
+      const k = ratioOf(numF[i], denF[j])!;
+      gone.push(denF[j]);
+      numF[i] = [k];
+      denF.splice(j, 1);
+    }
+    // Racines communes une fois tout developpe (« (p^2 - 1)/(p + 1) »).
+    let N = trimPoly(numF.reduce((a, f) => polyMul(a, f), [1]));
+    let D = trimPoly(denF.reduce((a, f) => polyMul(a, f), [1]));
+    for (let guard = 0; guard < 8 && D.length > 1 && N.length > 1; guard++) {
+      const roots = polynomialRoots(D);
+      const r = roots?.find((x) => typeof x.value === "number" && Math.abs(evalPoly(N, x.value as number)) < 1e-9);
+      if (!r) break;
+      const x = r.value as number;
+      N = divideRoot(N, x);
+      D = divideRoot(D, x);
+      gone.push([-x, 1]);
+    }
+    if (gone.length) {
+      const by = gone.map((f) => (terms(f) > 1 ? `\\left(${polyTex(f, v)}\\right)` : polyTex(f, v))).join("");
+      lines.push(`On simplifie par $${by}$ : $${fracTex([N], factorList(D), v)}$.`);
+    }
+    // Denominateur unitaire puis coefficients entiers.
+    if (D.length > 1) {
+      const lc = D[D.length - 1];
+      N = N.map((x) => x / lc);
+      D = D.map((x) => x / lc);
+    }
+    const all = [...N, ...D];
+    if (all.some((x) => Math.abs(x - Math.round(x)) > 1e-9)) {
+      for (let q = 2; q <= 100; q++) {
+        if (all.every((x) => Math.abs(x * q - Math.round(x * q)) < 1e-9)) {
+          N = N.map((x) => Math.round(x * q));
+          D = D.map((x) => Math.round(x * q));
+          lines.push(`On multiplie en haut et en bas par $${q}$ pour n'avoir que des coefficients entiers : $${fracTex([N], [D], v)}$.`);
+          break;
+        }
+      }
+    }
+    lines.push(`Donc $${T(node)} = ${fracTex([N], factorList(D), v)}$.`);
+  } catch {
+    return null;
+  }
+  return lines.length > 2 ? lines : null;
+}
+

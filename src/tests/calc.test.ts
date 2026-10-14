@@ -326,3 +326,16 @@ describe("Littéral : LaTeX colle avec point de multiplication, fraction reduite
     expect(normalizeInput("3.5")).toBe("3.5");
   });
 });
+
+describe("detail d'une simplification (Littéral)", () => {
+  it("fraction de fractions : meme denominateur, inverse, simplification, entiers", async () => {
+    const { simplifySteps } = await import("../core/calc/nextstep");
+    const s = simplifySteps("(4/(p+1))/(1+(4/(p+1))*0,2)")!;
+    expect(s.some((l) => l.includes("même dénominateur"))).toBe(true);
+    expect(s.some((l) => l.includes("inverse"))).toBe(true);
+    expect(s.some((l) => l.startsWith("On simplifie par"))).toBe(true);
+    expect(s[s.length - 1]).toContain("\\frac{20}{5p + 9}");
+    expect(simplifySteps("2x + x")).toBeNull();
+    expect(simplifySteps("1/p + 1/(p+1)")![1]).toContain("p\\left(p + 1\\right)");
+  });
+});

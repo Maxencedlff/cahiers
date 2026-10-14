@@ -5,6 +5,7 @@ import { CalcEngine, greekNames, normalizeInput, format, frNumber, engFormat, ty
 import { derivative, nthDerivative, simplifyExpr, substitute, type DerivStep } from "../../core/calc/derive";
 import { antiderivative, definiteIntegral } from "../../core/calc/integrate";
 import { solveEquation, solveSystem, type Root } from "../../core/calc/solve";
+import { simplifySteps } from "../../core/calc/nextstep";
 import { applyMatrixOp, multiply, addMatrices, readMatrix, toLatex, type MatrixOutcome } from "../../core/calc/matrix";
 import {
   samplePlot, valueTable, rootsInWindow, extremaInWindow, stripY, plotWindow, readRange,
@@ -427,6 +428,32 @@ export class Calculator {
   }
 
   /** Bouton « Envoyer dans la page » d'un resultat, si l'hote le permet. */
+  /**
+   * « Afficher le détail » (replie) et « Envoyer le détail dans la page » :
+   * lignes au format du texte (phrases + $formules$), comme sur une copie.
+   */
+  private detailNodes(lines: string[]): HTMLElement[] {
+    let shown = false;
+    const box = el("div", { class: "steps solve-steps", style: { display: "none" } },
+      ...lines.map((t) => el("div", { class: "step" }, ...docLineNodes(t))));
+    const btn = el("button", {
+      onclick: () => {
+        shown = !shown;
+        box.style.display = shown ? "block" : "none";
+        btn.textContent = shown ? "Masquer le détail" : "Afficher le détail";
+      },
+    }, "Afficher le détail");
+    const sendDetail = this.host.onSendDetail;
+    const put = sendDetail ? el("button", {
+      class: "calc-send", title: "Pose la rédaction au curseur de la page, formules comprises",
+      onclick: () => {
+        if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
+        sendDetail(lines);
+      },
+    }, "Envoyer le détail dans la page") : null;
+    return [el("div", { class: "row" }, btn, put), box];
+  }
+
   private sendButton(kind: string, expr: string, result: string, latex: string): HTMLElement | null {
     const send = this.host.onSend;
     if (!send) return null;
@@ -1167,27 +1194,7 @@ export class Calculator {
       const r = solveEquation(eq.value, unk.value.trim() ? greekNames(unk.value.trim()) : undefined);
       if (!r.ok) { out.append(el("div", { class: "calc-read err" }, r.message ?? "Échec")); return; }
       const detail = () => {
-        if (!r.steps?.length) return;
-        let shown = false;
-        const lines = r.steps;
-        const box = el("div", { class: "steps solve-steps", style: { display: "none" } },
-          ...lines.map((t) => el("div", { class: "step" }, ...docLineNodes(t))));
-        const btn = el("button", {
-          onclick: () => {
-            shown = !shown;
-            box.style.display = shown ? "block" : "none";
-            btn.textContent = shown ? "Masquer le détail" : "Afficher le détail";
-          },
-        }, "Afficher le détail");
-        const sendDetail = this.host.onSendDetail;
-        const put = sendDetail ? el("button", {
-          class: "calc-send", title: "Pose la rédaction au curseur de la page, formules comprises",
-          onclick: () => {
-            if (!this.host.canInsert()) { toast("Ouvre une page d'abord", "warn"); return; }
-            sendDetail(lines);
-          },
-        }, "Envoyer le détail dans la page") : null;
-        out.append(el("div", { class: "row" }, btn, put), box);
+        if (r.steps?.length) out.append(...this.detailNodes(r.steps));
       };
       // Identification : plusieurs inconnues trouvees ensemble.
       if (r.values?.length) {
@@ -1393,6 +1400,9 @@ export class Calculator {
             showResult("Simplifié", r.resultLatex, r.ok ? undefined : r.message, r.ok
               ? { kind: "simplification", result: r.result ?? "", line: `${inTex()} = ${r.resultLatex}` }
               : undefined);
+            // Fraction en une lettre : la redaction etape par etape, si on la veut.
+            const steps = r.ok ? simplifySteps(expr.value) : null;
+            if (steps) out.append(...this.detailNodes(steps));
           },
         }, "Simplifier"),
         el("button", { onclick: doPrimitive }, "Primitive"),
@@ -1446,7 +1456,8 @@ function greekLatex(name: string): string {
 /** Ligne du detail (format du texte de la page) : phrases, gras, formules KaTeX. */
 function docLineNodes(md: string): Node[] {
   return parseDoc(md).flatMap((t): Node[] => {
-    if (t.kind === "math") return [renderTex(t.latex)];
+    // Fractions a taille normale, comme dans la page (pas en corps de ligne).
+    if (t.kind === "math") return [renderTex(`\\displaystyle ${t.latex}`)];
     if (t.kind !== "text") return [];
     const n = document.createTextNode(t.text);
     return [t.bold ? el("b", {}, n) : n];

@@ -3899,9 +3899,10 @@ export class TextDoc {
       if (k === "b" || k === "g") { e.preventDefault(); document.execCommand("bold"); this.emit(); return; }
       if (k === "i") { e.preventDefault(); document.execCommand("italic"); this.emit(); return; }
     }
-    // Fleches : elles passent la formule d'un bloc, ancres invisibles
-    // comprises (Maj : la selection la prend entiere) ; un clic ou Entree
-    // sur la formule selectionnee l'ouvre, jamais une fleche.
+    // Fleches : → juste avant une formule y entre par le debut, ← juste
+    // apres par la fin (on la parcourt au clavier, sans clic) ; au bout de
+    // l'editeur, la meme fleche ressort de l'autre cote. Maj : la selection
+    // prend la formule entiere, ancres invisibles comprises.
     if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !e.ctrlKey && !e.altKey && !e.metaKey) {
       const sel = document.getSelection();
       if (!sel?.rangeCount || !sel.focusNode || (!e.shiftKey && !sel.isCollapsed)) return;
@@ -3912,6 +3913,10 @@ export class TextDoc {
       const eq = neighbour(at, fwd);
       if (!(eq instanceof HTMLElement && eq.classList.contains("eq") && this.root.contains(eq))) return;
       e.preventDefault();
+      if (!e.shiftKey && !eq.classList.contains("live") && !eq.closest(".raw") && eq.dataset.latex !== undefined) {
+        this.editEq(eq, fwd ? "start" : "end");
+        return;
+      }
       const [n, o] = pastNode(eq, fwd);
       if (e.shiftKey) sel.extend(n, o);
       else sel.collapse(n, o);
