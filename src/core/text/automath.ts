@@ -834,6 +834,15 @@ class Parser {
       if (!inner || close?.t !== "op" || close.s !== want) { this.i = save; return null; }
       this.i++;
       if (t.s === "|") return { tex: `\\left|${inner.tex}\\right|`, ops: inner.ops, vars: inner.vars };
+      // Parentheses autour d'une fraction seule, en tete ou apres un signe
+      // ("1 + (10/(p+2))") : la barre groupe deja, elles partent. Gardees
+      // devant une puissance ((a/b)^2) et apres un nom (f(1/p), sin(a/b)).
+      let k = save - 1;
+      while (this.toks[k]?.t === "sp") k--;
+      const before = this.toks[k], after = this.toks[this.i];
+      const lead = !before || (before.t === "op" && /^(?:[+\-*=<>,(≤≥≠≈→⇒]|<=|>=|!=|~=|->|=>)$/.test(before.s));
+      const tail = !(after?.t === "op" && /^[\^_!'²³]$/.test(after.s));
+      if (lead && tail && wholeFrac(inner.tex)) return { tex: inner.tex, group: inner.tex, ops: inner.ops, vars: inner.vars };
       return { tex: `\\left(${inner.tex}\\right)`, group: inner.tex, ops: inner.ops, vars: inner.vars };
     }
     return null;
@@ -1454,6 +1463,9 @@ export function cleanMathLive(latex: string): string {
     .replace(/\^\{\\doubleprime\}/g, "''").replace(/\^\{\\prime\}/g, "'")
     .replace(/\\doubleprime/g, "''").replace(/\\prime(?![A-Za-z])/g, "'")
     .replace(/\\placeholder(?:\[[^\]]*\])?\{\}/g, "");
+  // "/" laisse en barre par MathLive (tape apres une parenthese fermante :
+  // "(1+(10/(p+2)))" au denominateur) : relu comme dans le texte, en fraction.
+  s = slashFractions(s);
   // Parentheses tapees autour de tout le contenu d'une racine, d'une borne
   // ou d'un terme de fraction : \sqrt{(x)}, \sum_{(k=0)}, \frac{1}{(2x)}.
   s = unwrapGroups(s);
@@ -1474,6 +1486,43 @@ export function cleanMathLive(latex: string): string {
     .replace(new RegExp(`(\\\\(?:${REL_CMDS})(?![A-Za-z])|[=<>])${SP}+(?=([A-Za-z])?)`, "g"),
       (_a, rel: string, letter?: string) => (letter && rel.startsWith("\\") ? `${rel} ` : rel));
   return s.replace(/\u0000(\d+)\u0000/g, (_a, i: string) => keep[Number(i)]).trim();
+}
+
+/** LaTeX qui est une seule fraction \\frac{…}{…}, rien autour. */
+function wholeFrac(tex: string): boolean {
+  if (!tex.startsWith("\\frac{")) return false;
+  let i = 5;
+  for (let g = 0; g < 2; g++) {
+    if (tex[i] !== "{") return false;
+    let depth = 0;
+    for (; i < tex.length; i++) {
+      if (tex[i] === "{") depth++;
+      else if (tex[i] === "}" && --depth === 0) break;
+    }
+    if (depth !== 0) return false;
+    i++;
+  }
+  return i === tex.length;
+}
+
+/**
+ * Groupes {…} sans accolade dedans (ou la formule entiere si elle n'en a
+ * pas) ou reste une barre "/" : relus par la grammaire du texte
+ * (latexToSource puis liveFormula) ; gardes tels quels s'ils ne se lisent
+ * pas en entier.
+ */
+function slashFractions(s: string): string {
+  const read = (inner: string): string | null => {
+    const src = latexToSource(inner);
+    if (!src || !src.includes("/")) return null;
+    const tex = liveFormula(src);
+    return tex && !tex.includes("placeholder") ? tex : null;
+  };
+  if (!/[{}]/.test(s)) return (s.includes("/") && read(s)) || s;
+  return s.replace(/\{([^{}]*\/[^{}]*)\}/g, (all, inner: string) => {
+    const tex = read(inner);
+    return tex ? `{${tex}}` : all;
+  });
 }
 
 /** Contenu entre parentheses qui l'englobent en entier : "(a+b)" -> "a+b", "(a)(b)" -> null. */

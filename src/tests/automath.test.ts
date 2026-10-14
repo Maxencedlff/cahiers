@@ -650,3 +650,21 @@ describe("denominateur tape colle : + et - y restent", () => {
   });
 });
 
+
+describe("fractions imbriquees (H/(1+H))", () => {
+  it("parentheses autour d'une fraction seule : retirees apres un signe, gardees devant une puissance ou apres un nom", () => {
+    expect(liveFormula("10/(p+2)/(1+(10/(p+2)))")).toBe("\\frac{\\frac{10}{p + 2}}{1 + \\frac{10}{p + 2}}");
+    expect(liveFormula("1 + (a/b)")).toBe("1 + \\frac{a}{b}");
+    expect(liveFormula("(a/b)^2")).toContain("\\left(\\frac{a}{b}\\right)^{2}");
+    expect(liveFormula("f(1/p)")).toContain("\\left(\\frac{1}{p}\\right)");
+    expect(liveFormula("sin(a/b)")).toContain("\\left(\\frac{a}{b}\\right)");
+    expect(liveFormula("(a+b)/c")).toBe("\\frac{a + b}{c}");
+  });
+
+  it("editeur de formule : un « / » reste en barre par MathLive devient une fraction a la validation", () => {
+    expect(cleanMathLive("\\frac{\\frac{10}{p+2}}{(1+(10/(p+2)))}")).toBe("\\frac{\\frac{10}{p+2}}{1 + \\frac{10}{p + 2}}");
+    expect(cleanMathLive("v=d/t")).toBe("v=\\frac{d}{t}");
+    expect(cleanMathLive("\\text{km/h}")).toBe("\\text{km/h}");
+    expect(cleanMathLive("\\frac{a}{b}")).toBe("\\frac{a}{b}");
+  });
+});
