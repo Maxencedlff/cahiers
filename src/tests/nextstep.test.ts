@@ -107,3 +107,11 @@ describe("suite d'un calcul sur la ligne du dessous", () => {
     expect(nextStepSuggest("=", "")).toBeNull();
   });
 });
+
+describe("fraction en p avec un parametre (boucle fermee)", () => {
+  it("K/(p(p+3)) / (1 + K/(p(p+3))) : bloc simplifie puis developpe", () => {
+    expect(equivalents("(K/(p(p+3)))/(1+K/(p(p+3)))")).toEqual(["K/(p(p + 3) + K)", "K/(p^2 + 3p + K)"]);
+    expect(equivalents("K/(p+a) / (1 + K/(p+a))")[0]).toBe("K/(p + a + K)");
+    expect(nextStepSuggest("= K/(p(p+3)) / (1+K/(p(p+3))) =")?.insert.trim()).toBe("K/(p(p + 3) + K)");
+  });
+});

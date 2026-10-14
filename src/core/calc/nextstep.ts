@@ -388,6 +388,10 @@ function equivalentsRaw(src: string): string[] {
     for (const f of oneVariable(node, vars[0])) add(f);
     return out;
   }
+  // Fraction en une lettre principale avec des parametres (K, a, R) :
+  // reduite et simplifiee par les facteurs communs (« K/(p(p+3)) / (1 +
+  // K/(p(p+3))) » -> « K/(p^2 + 3p + K) »).
+  if (!opaque && vars.length > 1) for (const f of rationalWithParams(node, vars)) add(f);
   // Plusieurs lettres, ou des fonctions : seulement une vraie simplification.
   add(factored(node, true));
   if (!opaque) add(collectBy(node, vars));
@@ -1127,5 +1131,180 @@ export function simplifySteps(src: string): string[] | null {
     return null;
   }
   return lines.length > 2 ? lines : null;
+}
+
+/* ---------------- fraction en p avec des parametres (K, a...) ---------------- */
+
+/** Coefficient : polynome en parametres, monome (« K^2*a ») -> nombre. */
+type PCoef = Map<string, number>;
+
+function pcoefAdd(a: PCoef, b: PCoef, k = 1): PCoef {
+  const o = new Map(a);
+  for (const [m, x] of b) {
+    const y = (o.get(m) ?? 0) + k * x;
+    if (Math.abs(y) < 1e-12) o.delete(m); else o.set(m, y);
+  }
+  return o;
+}
+
+/** Somme developpee (sortie de rationalize) en polynome de `v` a coefficients en parametres. */
+function paramPoly(node: any, v: string): PCoef[] | null {
+  const out: PCoef[] = [];
+  for (const t of termsOf(node)) {
+    let c = t.sign, pv = 0;
+    const others = new Map<string, number>();
+    const factors: any[] = [];
+    const flat = (n: any) => {
+      n = strip(n);
+      if (n.type === "OperatorNode" && n.op === "*" && n.args.length === 2) { flat(n.args[0]); flat(n.args[1]); } else factors.push(n);
+    };
+    flat(t.node);
+    for (const f of factors) {
+      if (f.type === "ConstantNode" && typeof f.value === "number") { c *= f.value; continue; }
+      let base = f, e = 1;
+      if (f.type === "OperatorNode" && f.op === "^" && strip(f.args[1]).type === "ConstantNode") { base = strip(f.args[0]); e = strip(f.args[1]).value; }
+      if (base.type !== "SymbolNode" || !Number.isInteger(e) || e < 0) return null;
+      if (base.name === v) pv += e; else others.set(base.name, (others.get(base.name) ?? 0) + e);
+    }
+    const key = [...others].sort(([x], [y]) => (x < y ? -1 : 1)).map(([n, e]) => (e === 1 ? n : `${n}^${e}`)).join("*");
+    while (out.length <= pv) out.push(new Map());
+    out[pv] = pcoefAdd(out[pv], new Map([[key, c]]));
+  }
+  while (out.length > 1 && !out[out.length - 1].size) out.pop();
+  return out;
+}
+
+/** Valeur numerique d'un coefficient pour des parametres donnes. */
+function pcoefAt(c: PCoef, vals: Record<string, number>): number {
+  let s = 0;
+  for (const [m, x] of c) {
+    let t = x;
+    if (m) for (const part of m.split("*")) { const [n, e] = part.split("^"); t *= vals[n] ** (e ? Number(e) : 1); }
+    s += t;
+  }
+  return s;
+}
+
+/** Division exacte par (v - r), r nombre (Horner sur les coefficients en parametres). */
+function pdivRoot(c: PCoef[], r: number): PCoef[] {
+  const q: PCoef[] = new Array(c.length - 1).fill(null).map(() => new Map());
+  let acc: PCoef = new Map();
+  for (let i = c.length - 1; i >= 1; i--) {
+    acc = pcoefAdd(c[i], acc, 1);
+    q[i - 1] = acc;
+    acc = new Map([...acc].map(([m, x]) => [m, x * r]));
+  }
+  return q;
+}
+
+/** Coefficient ecrit comme on le tape : « K », « 3 », « (K + 2) », « 2K a ». */
+function pcoefText(c: PCoef, alone: boolean): string {
+  const mono = (m: string, x: number) => {
+    const vars = m ? m.split("*").map((p) => p.replace("^", "^")).join(" ") : "";
+    const abs = Math.abs(x);
+    const num = vars && Math.abs(abs - 1) < 1e-12 ? "" : coefText(abs);
+    return { neg: x < 0, text: `${num}${vars}` };
+  };
+  const parts = [...c].sort(([a], [b]) => (a === "" ? 1 : b === "" ? -1 : a < b ? -1 : 1)).map(([m, x]) => mono(m, x));
+  const s = parts.map((p, i) => `${p.neg ? (i ? " - " : "-") : i ? " + " : ""}${p.text}`).join("");
+  return parts.length > 1 && !alone ? `(${s})` : s;
+}
+
+function paramPolyText(c: PCoef[], v: string): string {
+  let out = "";
+  for (let k = c.length - 1; k >= 0; k--) {
+    const co = c[k];
+    if (!co.size) continue;
+    const mono = k === 0 ? "" : k === 1 ? v : `${v}^${k}`;
+    const single = co.size === 1;
+    const [m0, x0] = [...co][0];
+    let term: string;
+    if (!mono) term = pcoefText(co, true);
+    else if (single && m0 === "" && Math.abs(Math.abs(x0) - 1) < 1e-12) term = `${x0 < 0 ? "-" : ""}${mono}`;
+    else if (single) term = `${pcoefText(co, true)}${m0 === "" ? "" : " "}${mono}`;
+    else term = `${pcoefText(co, false)}${mono}`;
+    const neg = term.startsWith("-");
+    out += out ? (neg ? ` - ${term.slice(1)}` : ` + ${term}`) : term;
+  }
+  return out || "0";
+}
+
+/**
+ * Fraction en une lettre principale (p, s, x, t, z ou la premiere) avec
+ * d'autres lettres en parametres : numerateur et denominateur developpes,
+ * puis simplifies par les racines communes qui ne dependent pas des
+ * parametres (essayees pour deux jeux de valeurs). null si rien de sur.
+ */
+function rationalWithParams(node: MathNode, vars: string[]): string[] {
+  if (!node.filter((x: any) => x.type === "OperatorNode" && x.op === "/").length) return [];
+  const v = ["p", "s", "x", "t", "z", "w"].find((x) => vars.includes(x)) ?? vars[0];
+  const out: string[] = [];
+  // Denominateur qui revient (« K/(p+a) / (1 + K/(p+a)) ») : traite comme un
+  // bloc, comme sur la copie : K/(X + K), puis X remis.
+  const counts = new Map<string, { n: number; node: any }>();
+  node.traverse((n: any) => {
+    if (n.type !== "OperatorNode" || n.op !== "/") return;
+    const d = strip(n.args[1]);
+    if (d.type === "SymbolNode" || d.type === "ConstantNode") return;
+    const k = compact(print(d));
+    const c = counts.get(k);
+    counts.set(k, { n: (c?.n ?? 0) + 1, node: d });
+  });
+  const rep = [...counts].filter(([, c]) => c.n >= 2).sort(([a], [b]) => b.length - a.length)[0];
+  if (rep) {
+    const [key, { node: d }] = rep;
+    const sub = node.transform((n: any) => (n.type !== "ConstantNode" && compact(print(strip(n))) === key ? new (M().SymbolNode)("zzu") : n));
+    const otherVars = symbolsOf(sub).filter((x) => x !== "zzu");
+    const t = rationalCore(sub, "zzu", otherVars);
+    if (t) {
+      const xt = print(d);
+      // Somme au premier niveau (« p + a ») : entre parentheses seulement si elle est multipliee.
+      const sum = /[+-]/.test(xt.replace(/\([^()]*\)/g, "").replace(/^-/, ""));
+      out.push(t.replace(/zzu/g, (_a, off: number, str: string) => {
+        const mult = /[A-Za-z0-9)τ]\s*$/.test(str.slice(0, off)) || /^\s*[A-Za-z(^]/.test(str.slice(off + 3));
+        return sum && mult ? `(${xt})` : xt;
+      }).replace(/([A-Za-z0-9τ]) \(/g, "$1("));
+    }
+  }
+  // Developpe en p, s'il reste court.
+  const e = rationalCore(node, v, vars.filter((x) => x !== v));
+  if (e && (e.match(/[+-]/g) ?? []).length <= 4) out.push(e);
+  return out;
+}
+
+function rationalCore(node: MathNode, v: string, params: string[]): string | null {
+  const m = M();
+  let r: any;
+  try { r = m.rationalize(node, {}, true); } catch { return null; }
+  if (!r.denominator) return null;
+  let N = paramPoly(r.numerator, v), D = paramPoly(r.denominator, v);
+  if (!N || !D || D.length < 2) return null;
+  const sets = [0, 1].map((k) => Object.fromEntries(params.map((n, i) => [n, k ? 2.913 + 0.471 * i : 1.737 + 0.913 * i])));
+  const at = (c: PCoef[], set: Record<string, number>) => c.map((x) => pcoefAt(x, set));
+  for (let guard = 0; guard < 12 && D.length > 1 && N.length > 1; guard++) {
+    const roots = polynomialRoots(at(D, sets[0]));
+    const common = roots?.find((x) => {
+      if (typeof x.value !== "number") return false;
+      const z = x.value;
+      return sets.every((set) => Math.abs(evalPoly(at(N!, set), z)) < 1e-7 && Math.abs(evalPoly(at(D!, set), z)) < 1e-7);
+    });
+    if (!common) break;
+    let z = common.value as number;
+    if (Math.abs(z - Math.round(z)) < 1e-7) z = Math.round(z);
+    N = pdivRoot(N, z);
+    D = pdivRoot(D, z);
+  }
+  // Coefficient dominant du denominateur numerique : ramene a 1 si c'est un nombre.
+  const lead = D[D.length - 1];
+  if (lead.size === 1 && lead.has("")) {
+    const k = lead.get("")!;
+    if (Math.abs(k - 1) > 1e-12) {
+      const sc = (c: PCoef[]) => c.map((x) => new Map([...x].map(([mm, y]) => [mm, y / k])) as PCoef);
+      N = sc(N); D = sc(D);
+    }
+  }
+  const nt = paramPolyText(N, v), dt = paramPolyText(D, v);
+  const wrap = (t: string) => (/[+\-]/.test(t.replace(/^-/, "")) || / /.test(t) ? `(${t})` : t);
+  return `${wrap(nt)}/${wrap(dt)}`;
 }
 
