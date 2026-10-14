@@ -290,7 +290,9 @@ export function tokenRuns(tokens: readonly DocToken[], assets: Pick<Assets, "inl
   const out: DxRun[] = [];
   for (const t of tokens) {
     if (t.kind === "text") {
-      out.push({ kind: "text", text: t.text, ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}), ...(t.code ? { code: true } : {}), ...colorOf(t.color ?? base) });
+      // Taille choisie (14 = normal de l'appli = 11 pt de Word), en demi-points.
+      out.push({ kind: "text", text: t.text, ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}), ...(t.code ? { code: true } : {}), ...colorOf(t.color ?? base),
+        ...(t.size ? { size: Math.round(t.size * (11 / 14) * 2) } : {}) });
     } else if (t.kind === "math") {
       out.push({ kind: "math", latex: t.latex, ...colorOf(t.color ?? base) });
     } else if (t.kind === "image") {

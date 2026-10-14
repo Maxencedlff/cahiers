@@ -234,3 +234,17 @@ describe("coller du LaTeX ($…$, $$…$$, \\(…\\), \\[…\\])", () => {
     expect(parseDoc(serializeDoc(t))).toEqual(t);
   });
 });
+
+describe("tailles de texte facon Word", () => {
+  it("aller-retour : taille seule, taille + couleur, normal jamais ecrit", () => {
+    const src = "Petit [titre]{.s20} et [important]{.theoreme .s16} puis normal";
+    const t = parseDoc(src);
+    expect(t.find((x) => x.kind === "text" && x.text === "titre")).toMatchObject({ size: 20 });
+    expect(t.find((x) => x.kind === "text" && x.text === "important")).toMatchObject({ size: 16, color: "theoreme" });
+    expect(serializeDoc(t)).toBe(src);
+    expect(serializeDoc([{ kind: "text", text: "a", size: 14 }])).toBe("a");
+  });
+  it("taille inconnue : du texte, rien n'est perdu", () => {
+    expect(serializeDoc(parseDoc("[x]{.s13}"))).toBe("\\[x\\]{.s13}");
+  });
+});

@@ -8,6 +8,8 @@
  *   dedans, seuls \ et ` sont echappes),
  *   ![](img:<id>) = photo posee dans le texte (bloc image de meme id),
  *   [texte en couleur]{.theoreme} = une des 5 couleurs de la palette,
+ *   [texte]{.s18} = taille en points facon Word (FONT_SIZES, 14 = normal,
+ *   jamais ecrite), [texte]{.theoreme .s18} = les deux,
  *   [libellé](cahiers:<pageId>#<blockId> "Maths/Cours/0012") = lien vers
  *   une page (core/links.ts : cible par id de page, chemin lisible en repli),
  *   en debut de ligne (D11) : "# ", "## ", "### " = titres, "- " = puce,
@@ -38,8 +40,8 @@ export interface LineFormat {
  * un `br`), il met en forme toute la ligne jusqu'au `br` suivant.
  */
 export type DocToken =
-  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean; color?: ColorKey }
-  | { kind: "math"; latex: string; color?: ColorKey }
+  | { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean; color?: ColorKey; size?: number }
+  | { kind: "math"; latex: string; color?: ColorKey; size?: number }
   | { kind: "image"; id: string }
   /**
    * Lien vers une page (core/links.ts) : `href` = « cahiers:<pageId>… »,
@@ -201,6 +203,17 @@ function colorOfToken(t: DocToken): ColorKey | undefined {
   return t.kind === "text" || t.kind === "math" ? t.color : undefined;
 }
 
+/**
+ * Tailles de texte proposees, en points comme dans Word ; 14 = texte
+ * normal de la page (corps 18 px), jamais ecrite dans le fichier.
+ */
+export const FONT_SIZES = [9, 10, 11, 12, 14, 16, 18, 20, 22] as const;
+export const NORMAL_SIZE = 14;
+
+function sizeOfToken(t: DocToken): number | undefined {
+  return t.kind === "text" || t.kind === "math" ? t.size : undefined;
+}
+
 export function serializeDoc(tokens: DocToken[]): string {
   const lines = docLines(normalizeTokens(tokens));
   const nums = listNumbers(lines.map((l) => l.format));
@@ -213,15 +226,17 @@ export function serializeDoc(tokens: DocToken[]): string {
   }).join("\n");
 }
 
-/** Une ligne sans sa mise en forme : les suites de meme couleur forment un groupe [..]{.couleur}. */
+/** Une ligne sans sa mise en forme : les suites de meme couleur et taille forment un groupe [..]{.couleur .s16}. */
 function serializeLine(list: DocToken[]): string {
   let out = "";
   for (let i = 0; i < list.length;) {
     const color = colorOfToken(list[i]);
+    const size = sizeOfToken(list[i]);
     let j = i;
-    while (j < list.length && colorOfToken(list[j]) === color) j++;
+    while (j < list.length && colorOfToken(list[j]) === color && sizeOfToken(list[j]) === size) j++;
     const body = serializePlain(list.slice(i, j));
-    out += color ? `[${body}]{.${color}}` : body;
+    const attrs = [color ? `.${color}` : "", size ? `.s${size}` : ""].filter(Boolean).join(" ");
+    out += attrs ? `[${body}]{${attrs}}` : body;
     i = j;
   }
   return out;
@@ -296,7 +311,9 @@ function parseFrom(src: string, lineStart: boolean): DocToken[] {
       if (group) {
         flush();
         for (const t of parseFrom(src.slice(i + 1, group.innerEnd), false)) {
-          out.push(t.kind === "text" || t.kind === "math" ? { ...t, color: group.color } : t);
+          out.push(t.kind === "text" || t.kind === "math"
+            ? { ...t, ...(group.color ? { color: group.color } : {}), ...(group.size ? { size: group.size } : {}) }
+            : t);
         }
         i = group.end - 1;
         continue;
@@ -374,7 +391,7 @@ function linkAt(src: string, start: number): { token: DocToken; end: number } | 
  * les caracteres echappes a l'interieur sont sautes. null si ce [ n'ouvre
  * pas de groupe (un crochet ancien, tape avant les couleurs).
  */
-function colorGroup(src: string, start: number): { innerEnd: number; end: number; color: ColorKey } | null {
+function colorGroup(src: string, start: number): { innerEnd: number; end: number; color?: ColorKey; size?: number } | null {
   for (let j = start + 1; j < src.length; j++) {
     const c = src[j];
     if (c === "\\") { j++; continue; }
@@ -385,8 +402,16 @@ function colorGroup(src: string, start: number): { innerEnd: number; end: number
       continue;
     }
     if (c === "]") {
-      const m = /^\]\{\.([a-z]+)\}/.exec(src.slice(j));
-      if (m && COLOR_KEYS.has(m[1])) return { innerEnd: j, end: j + m[0].length, color: m[1] as ColorKey };
+      const m = /^\]\{(\.[a-z0-9]+(?: \.[a-z0-9]+)?)\}/.exec(src.slice(j));
+      if (m) {
+        let color: ColorKey | undefined, size: number | undefined, bad = false;
+        for (const cls of m[1].split(" ").map((x) => x.slice(1))) {
+          if (COLOR_KEYS.has(cls) && !color) color = cls as ColorKey;
+          else if (/^s\d{1,2}$/.test(cls) && (FONT_SIZES as readonly number[]).includes(Number(cls.slice(1))) && !size) size = Number(cls.slice(1));
+          else bad = true;
+        }
+        if (!bad && (color || size)) return { innerEnd: j, end: j + m[0].length, ...(color ? { color } : {}), ...(size ? { size } : {}) };
+      }
     }
   }
   return null;
@@ -400,7 +425,7 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
       if (!t.text) continue;
       const prev = out[out.length - 1];
       if (prev?.kind === "text" && !!prev.bold === !!t.bold && !!prev.italic === !!t.italic
-          && !!prev.code === !!t.code && prev.color === t.color) {
+          && !!prev.code === !!t.code && prev.color === t.color && prev.size === (t.size === NORMAL_SIZE ? undefined : t.size)) {
         out[out.length - 1] = { ...prev, text: prev.text + t.text };
         continue;
       }
@@ -408,12 +433,13 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
         kind: "text", text: t.text,
         ...(t.bold ? { bold: true } : {}), ...(t.italic ? { italic: true } : {}),
         ...(t.code ? { code: true } : {}), ...(t.color ? { color: t.color } : {}),
+        ...(t.size && t.size !== NORMAL_SIZE ? { size: t.size } : {}),
       });
       continue;
     }
     if (t.kind === "math") {
       if (!t.latex.trim()) continue;
-      out.push({ kind: "math", latex: t.latex, ...(t.color ? { color: t.color } : {}) });
+      out.push({ kind: "math", latex: t.latex, ...(t.color ? { color: t.color } : {}), ...(t.size && t.size !== NORMAL_SIZE ? { size: t.size } : {}) });
       continue;
     }
     if (t.kind === "line") { out.push({ kind: "line", ...lineFormatOf(t) }); continue; }

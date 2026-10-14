@@ -14,7 +14,8 @@ import { REVIEW_COLORS, focusQuery, type ReviewItem } from "../core/review";
 import type { Bounds } from "../core/ink/stroke";
 import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
 import { buildFormulaPanel, MATH_TEMPLATES } from "./mathbar";
-import { insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setSpellcheck, setTypingColor } from "./textdoc";
+import { currentTypingSize, insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setSpellcheck, setTypingColor, setTypingSize } from "./textdoc";
+import { FONT_SIZES, NORMAL_SIZE } from "../core/text/doc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE, NEUTRAL_INK, labelOf } from "../core/palette";
 import type { ColorKey, InkColor, ToolKind } from "../core/types";
@@ -242,6 +243,7 @@ export class App {
     private machineKeys: { applicationKey: string; hmacKey: string } | null = null,
     private saveKeys: ((a: string, h: string) => Promise<void>) | null = null,
   ) {
+    document.addEventListener("cahiers-typing-size", () => this.paintSizeButton());
     this.repo = new Repo(fs);
     this.settings = loadSettings();
     this.positions = new Positions(localStore());
@@ -399,6 +401,8 @@ export class App {
             this.calcSlot?.side.classList.toggle("closed", !visible || !this.calculator?.isDocked);
             // Bandeau du bas : la fin de la page doit pouvoir remonter au-dessus.
             this.calcSlot?.work.classList.toggle("calc-under", visible && !!this.calculator?.root.classList.contains("sheet"));
+            // Le volet des formules se recale a cote de la calculatrice.
+            if (document.querySelector(".math-pop")) requestAnimationFrame(() => this.paintMath());
             const b = this.tabbar.querySelector(".calc-btn");
             b?.classList.toggle("on", visible);
             b?.setAttribute("aria-pressed", String(visible));
@@ -1186,6 +1190,7 @@ export class App {
           this.iconButton("flag", "Pas compris", keysOf("flag"), () => view?.addFlag(), {
             cls: "flag-btn", keep: true, side: "bottom", tip: "Pas compris : repère sur la page",
           }),
+          this.sizeButton(),
           this.iconButton("sigma", "Formules", keysOf("maths"), () => this.toggleMaths(), {
             cls: `maths-btn${mathOpen ? " on" : ""}`, keep: true, side: "bottom", pressed: mathOpen,
           }),
@@ -1262,6 +1267,32 @@ export class App {
    * Bouton icone du chrome : nom dans l'aria-label (lecteur d'ecran, tests),
    * infobulle nom + raccourci a la souris (tooltip.ts), 44 px au doigt.
    */
+  /**
+   * Taille du texte, comme la liste de Word : le nombre en cours, un menu
+   * de tailles (FONT_SIZES). La selection la prend, sinon la frappe qui suit.
+   */
+  private sizeButton(): HTMLButtonElement {
+    const b = el("button", {
+      class: "icon-btn size-btn", "aria-label": "Taille du texte", "data-tip": "Taille du texte",
+      "data-keys": "Ctrl+Maj+> / Ctrl+<", "data-tip-side": "bottom",
+      onclick: () => {
+        const cur = currentTypingSize();
+        contextMenu(b, FONT_SIZES.map((z) => ({
+          label: z === NORMAL_SIZE ? `${z} (normal)` : String(z),
+          checked: z === cur,
+          run: () => { setTypingSize(z); this.paintSizeButton(); },
+        })), { label: "Taille du texte" });
+      },
+    }, String(currentTypingSize()));
+    keepFocus(b);
+    return b;
+  }
+
+  private paintSizeButton(): void {
+    const b = this.tabbar.querySelector<HTMLElement>(".size-btn");
+    if (b) b.textContent = String(currentTypingSize());
+  }
+
   private iconButton(
     name: IconName, label: string, keys: string, run: (e: MouseEvent) => void,
     o: { cls?: string; side?: "right" | "bottom" | "top"; tip?: string; keep?: boolean; pressed?: boolean } = {},
@@ -2103,7 +2134,10 @@ export class App {
     const W = window.innerWidth, H = window.innerHeight;
     const w = pop.offsetWidth, h = pop.offsetHeight;
     const a = (btn ?? this.tabbar).getBoundingClientRect();
-    let x = Math.max(8, Math.min(a.right - w, W - w - 8));
+    // Jamais sur la calculatrice en panneau : le volet reste dans la zone de la page.
+    const zone = this.main.querySelector(".stage")?.getBoundingClientRect();
+    const right = zone && zone.width > w + 16 ? zone.right : W;
+    let x = Math.max(8, Math.min(a.right - w, right - w - 8));
     let y = this.tabbar.getBoundingClientRect().bottom + 6;
     // La ligne en cours ne doit pas passer sous le volet.
     const caret = caretRect();

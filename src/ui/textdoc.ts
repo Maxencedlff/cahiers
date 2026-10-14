@@ -5,7 +5,7 @@ import { askText, el, toast } from "./dom";
 import { inkCssColor } from "../core/theme";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardLines, docClipboardText, frenchSpaceAtEnd, pastedMath, docLines, listNumbers, markerStyle, MAX_LIST_LEVEL, normalizeTokens, parseDoc, serializeDoc,
+  docClipboardLines, docClipboardText, frenchSpaceAtEnd, pastedMath, docLines, listNumbers, markerStyle, FONT_SIZES, MAX_LIST_LEVEL, NORMAL_SIZE, normalizeTokens, parseDoc, serializeDoc,
   texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
@@ -213,6 +213,27 @@ function isImageFile(f: File): boolean {
  */
 let typingColor: ColorKey | null = null;
 
+/**
+ * Taille du texte tape ensuite, en points facon Word (doc.ts FONT_SIZES ;
+ * NORMAL_SIZE = texte normal). Suit le curseur : un clic ailleurs prend la
+ * taille de cet endroit.
+ */
+let typingSize: number = NORMAL_SIZE;
+
+/** Taille choisie (barre du haut, Ctrl+Maj+> <) : la selection la prend, sinon la frappe qui suit. */
+export function setTypingSize(size: number): void {
+  typingSize = size;
+  const sel = document.getSelection();
+  if (lastDoc && sel?.rangeCount && sel.isCollapsed) {
+    const r = sel.getRangeAt(0);
+    lastDoc.keepSize = { node: r.startContainer, offset: r.startOffset };
+  }
+  lastDoc?.sizeSelection(size);
+}
+
+/** Taille a l'endroit du curseur (ou de la frappe a venir), pour l'afficher. */
+export function currentTypingSize(): number { return typingSize; }
+
 /** Formules reperees et mises en forme a chaque retour a la ligne. */
 let autoMath = true;
 export function setAutoMath(on: boolean): void { autoMath = on; }
@@ -319,13 +340,25 @@ export class TextDoc {
    * defait, comme dans Word. Oubliee a la touche suivante.
    */
   private lastLine: { undo: () => boolean } | null = null;
+  /** Taille choisie sans selection, a cet endroit : la frappe suivante la garde. */
+  keepSize: { node: Node; offset: number } | null = null;
 
   /** Ecouteur pose sur `document` : retire par dispose(), sinon chaque page vue reste en memoire. */
   private onSelectionChange = (): void => {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return;
     const r = sel.getRangeAt(0);
-    if (this.root.contains(r.startContainer)) { this.savedRange = r.cloneRange(); lastDoc = this; }
+    if (this.root.contains(r.startContainer)) {
+      this.savedRange = r.cloneRange();
+      lastDoc = this;
+      // Taille de frappe = celle de l'endroit ou l'on se place (comme Word) ;
+      // un choix sans selection vaut jusqu'au prochain deplacement.
+      const k = this.keepSize;
+      const same = !!k && k.node === r.startContainer && k.offset === r.startOffset;
+      if (sel.isCollapsed && !same) typingSize = sizeAt(r.startContainer, this.root);
+      if (!same) this.keepSize = null;
+      document.dispatchEvent(new CustomEvent("cahiers-typing-size"));
+    }
     this.paintColorTag();
     this.markSelectedEqs(sel.isCollapsed ? null : r);
     // Curseur deplace : la suggestion grisee ne vaut plus.
@@ -588,7 +621,7 @@ export class TextDoc {
       if (!sel?.rangeCount) return;
       const range = sel.getRangeAt(0);
       if (!this.root.contains(range.startContainer)) return;
-      if (colorAt(range.startContainer, this.root) === typingColor) return;
+      if (colorAt(range.startContainer, this.root) === typingColor && sizeAt(range.startContainer, this.root) === typingSize) return;
       e.preventDefault();
       insertColored(range, e.data);
       this.emit();
@@ -736,7 +769,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (!(node instanceof Text) || !this.root.contains(node) || colorAt(node, this.root) === typingColor) return;
+    if (!(node instanceof Text) || !this.root.contains(node) || (colorAt(node, this.root) === typingColor && sizeAt(node, this.root) === typingSize)) return;
     if (node.parentElement?.closest("code, .eq")) return;
     const off = r.startOffset;
     if (off < data.length || node.data.slice(off - data.length, off) !== data) return;
@@ -982,7 +1015,8 @@ export class TextDoc {
       }
       if (t.kind === "math") {
         const eq = makeEq(t.latex);
-        into.appendChild(t.color ? colorSpan(t.color, eq) : eq);
+        const colored = t.color ? colorSpan(t.color, eq) : eq;
+        into.appendChild(t.size ? sizeSpan(t.size, colored) : colored);
         into.appendChild(anchor());
       } else if (t.kind === "image") {
         into.appendChild(this.makeImage(t.id));
@@ -996,6 +1030,7 @@ export class TextDoc {
         if (t.italic) node = el("i", {}, node);
         if (t.bold) node = el("b", {}, node);
         if (t.color) node = colorSpan(t.color, node);
+        if (t.size) node = sizeSpan(t.size, node);
         into.appendChild(node);
       }
       if (!block) lastOut = frag.lastChild;
@@ -1021,7 +1056,7 @@ export class TextDoc {
         if (child === placeholder && child.nodeName === "BR") continue;
         if (child.nodeType === Node.TEXT_NODE) {
           const text = (child.textContent ?? "").replace(/\u00a0/g, " ").replace(/\u200b/g, "");
-          out.push({ kind: "text", text, bold, italic, color, ...(code ? { code } : {}) });
+          out.push({ kind: "text", text, bold, italic, color, ...(code ? { code } : {}), ...sizeProp(child, root) });
           continue;
         }
         if (child instanceof MathfieldElement) {
@@ -1044,7 +1079,7 @@ export class TextDoc {
           continue;
         }
         if (child.classList.contains("eq")) {
-          out.push({ kind: "math", latex: child.dataset.latex ?? "", color });
+          out.push({ kind: "math", latex: child.dataset.latex ?? "", color, ...sizeProp(child, root) });
           continue;
         }
         if (child.classList.contains("tc")) {
@@ -1157,7 +1192,8 @@ export class TextDoc {
     if (!sel?.rangeCount) return;
     const range = sel.getRangeAt(0);
     if (!this.root.contains(range.startContainer)) return;
-    if (colorAt(range.startContainer, this.root) === typingColor && document.execCommand("insertText", false, text)) return;
+    if (colorAt(range.startContainer, this.root) === typingColor && sizeAt(range.startContainer, this.root) === typingSize
+      && document.execCommand("insertText", false, text)) return;
     insertColored(range, text);
   }
 
@@ -1262,6 +1298,24 @@ export class TextDoc {
     // Les anciennes couleurs de la selection s'effacent devant la nouvelle.
     frag.querySelectorAll(".tc").forEach((c) => c.replaceWith(...Array.from(c.childNodes)));
     const span = colorSpan(color, frag);
+    range.insertNode(span);
+    sel.removeAllRanges();
+    const r = document.createRange();
+    r.selectNodeContents(span);
+    sel.addRange(r);
+    this.emit();
+  }
+
+  /** Taille du texte selectionne (points facon Word), s'il y en a. */
+  sizeSelection(size: number): void {
+    if (this.field) return;
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    if (!this.root.contains(range.commonAncestorContainer)) return;
+    const frag = range.extractContents();
+    frag.querySelectorAll(".tz").forEach((c) => c.replaceWith(...Array.from(c.childNodes)));
+    const span = sizeSpan(size, frag);
     range.insertNode(span);
     sel.removeAllRanges();
     const r = document.createRange();
@@ -3747,6 +3801,16 @@ export class TextDoc {
 
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
+    // Ctrl+Maj+> / Ctrl+< : taille suivante ou precedente (comme Word).
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === ">" || e.key === "<")) {
+      e.preventDefault();
+      const list = FONT_SIZES as readonly number[];
+      const i = list.indexOf(typingSize);
+      const next = list[Math.max(0, Math.min(list.length - 1, (i < 0 ? list.indexOf(NORMAL_SIZE) : i) + (e.key === ">" ? 1 : -1)))];
+      setTypingSize(next);
+      document.dispatchEvent(new CustomEvent("cahiers-typing-size"));
+      return;
+    }
     // Retour arriere, fleches... : la mise en forme a la pause attendue ne
     // vaut plus (elle avalait la lettre restante : « x^2 e » apres un ⌫).
     if (this.idleTimer && (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey)
@@ -4022,6 +4086,31 @@ function colorSpan(color: ColorKey | null, ...children: Node[]): HTMLElement {
   return span;
 }
 
+/**
+ * Segment de taille (points facon Word) : taille absolue a l'echelle de la
+ * feuille, un segment « normal » dans un plus grand remet le corps 18.
+ */
+function sizeSpan(size: number, ...children: Node[]): HTMLElement {
+  const span = el("span", { class: "tz", dataset: { z: String(size) } }, ...children);
+  span.style.fontSize = `calc(${((18 * size) / NORMAL_SIZE).toFixed(3)}px * var(--k, 1))`;
+  return span;
+}
+
+/** Taille du texte a cet endroit (segment le plus proche), NORMAL_SIZE sinon. */
+function sizeAt(node: Node, root: Node): number {
+  let n: Node | null = node;
+  while (n && n !== root) {
+    if (n instanceof HTMLElement && n.classList.contains("tz")) return Number(n.dataset.z) || NORMAL_SIZE;
+    n = n.parentNode;
+  }
+  return NORMAL_SIZE;
+}
+
+function sizeProp(node: Node, root: Node): { size?: number } {
+  const z = sizeAt(node, root);
+  return z === NORMAL_SIZE ? {} : { size: z };
+}
+
 /** Couleur du texte a cet endroit (segment le plus proche), null = noir. */
 function colorAt(node: Node, root: HTMLElement): ColorKey | null {
   let n: Node | null = node;
@@ -4220,7 +4309,8 @@ function rawSpan(text: string): HTMLElement {
 function insertColored(range: Range, text: string): void {
   range.deleteContents();
   const node = document.createTextNode(text);
-  range.insertNode(colorSpan(typingColor, node));
+  const colored = colorSpan(typingColor, node);
+  range.insertNode(sizeAt(range.startContainer, range.startContainer.parentElement?.closest(".text-doc") ?? document.body) === typingSize ? colored : sizeSpan(typingSize, colored));
   document.getSelection()?.collapse(node, text.length);
 }
 
@@ -4245,7 +4335,7 @@ function styleAt(node: Node, root: HTMLElement): { bold: boolean; italic: boolea
  * dans une ligne en couleur) : la relecture des formules passe au travers.
  */
 function inlineWrap(el: HTMLElement): boolean {
-  return el.matches("span.tc, b, i, strong, em, span:not([class])");
+  return el.matches("span.tc, span.tz, b, i, strong, em, span:not([class])");
 }
 
 /** Noeud precedent sur la ligne, en entrant et sortant des mises en forme (inlineWrap). */
