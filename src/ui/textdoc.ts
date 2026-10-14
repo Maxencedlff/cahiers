@@ -99,6 +99,12 @@ export interface DocImages {
   /** Photo calee a gauche (true) ou rendue a sa ligne (false). */
   sided?: (id: string, side: boolean) => void;
   /**
+   * Deplacement explicite d'une photo (monter, descendre, glisser, decaler,
+   * aligner, caler a gauche) : `run` le fait ; la page mesure les photos
+   * avant et apres pour que l'encre posee dessus suive (followPhotos).
+   */
+  moving?: (run: () => void) => void;
+  /**
    * Image collee (capture Win+Maj+S) ou deposee depuis l'Explorateur :
    * enregistree telle quelle, sans recadrage. Rend l'id du bloc cree, ou
    * null (page en lecture seule, fichier illisible). L'OCR suit en fond.
@@ -1564,17 +1570,17 @@ export class TextDoc {
     const side = this.images?.sided && !fig.dataset.live
       ? button("◧", fig.classList.contains("side")
         ? "Remettre seule sur sa ligne (C)"
-        : "Mettre à côté : la photo ou le texte qui suit passe à droite (C)", () => this.toggleSide(fig))
+        : "Mettre à côté : la photo ou le texte qui suit passe à droite (C)", () => this.asMove(() => this.toggleSide(fig)))
       : null;
     const cur = placeOf(fig).align ?? "left";
     const align = !fig.dataset.live && !fig.classList.contains("side")
       ? button(cur === "center" ? "⇔" : cur === "right" ? "⇥" : "⇤",
         `Alignée ${cur === "center" ? "au centre" : cur === "right" ? "à droite" : "à gauche"} : appuyer pour changer (← → décalent, Ctrl+X puis Ctrl+V : autre page)`,
-        () => this.cycleAlign(fig))
+        () => this.asMove(() => this.cycleAlign(fig)))
       : null;
     fig.append(el("span", { class: "doc-img-bar" },
-      button("↑", "Monter d'une ligne", () => this.moveImage(fig, -1)),
-      button("↓", "Descendre d'une ligne", () => this.moveImage(fig, 1)),
+      button("↑", "Monter d'une ligne", () => this.asMove(() => this.moveImage(fig, -1))),
+      button("↓", "Descendre d'une ligne", () => this.asMove(() => this.moveImage(fig, 1))),
       align,
       side,
       recrop,
@@ -1654,12 +1660,13 @@ export class TextDoc {
       if (shift) {
         if (u.type === "pointerup") {
           const k = Number(getComputedStyle(this.root).getPropertyValue("--k")) || 1;
-          this.nudge(fig, (u.clientX - x0) / k);
+          this.asMove(() => this.nudge(fig, (u.clientX - x0) / k));
         }
         return;
       }
       if (u.type !== "pointerup" || !target) return;
-      this.placeImage(fig, target);
+      const at = target;
+      this.asMove(() => this.placeImage(fig, at));
     };
     window.addEventListener("pointermove", move, true);
     window.addEventListener("pointerup", up, true);
@@ -1719,6 +1726,11 @@ export class TextDoc {
 
   /** Pose la photo a un endroit du texte. */
   private placeImage(fig: HTMLElement, at: Range): void {
+    // Saut qui finissait la ligne de la photo : il part avec elle (la plage
+    // `at` suit la suppression, elle est vivante).
+    const units = lineUnits(this.root);
+    const end = photoLineEnd(units, units.findIndex((u) => u.node === fig));
+    end?.();
     const after = fig.nextSibling;
     at.collapse(true);
     at.insertNode(fig);
@@ -1737,9 +1749,19 @@ export class TextDoc {
    * une photo ; une photo voisine compte pour une ligne.
    */
   private moveImage(fig: HTMLElement, dir: -1 | 1): void {
-    const units = lineUnits(this.root);
-    const i = units.findIndex((u) => u.node === fig);
+    let units = lineUnits(this.root);
+    let i = units.findIndex((u) => u.node === fig);
     if (i < 0) return;
+    // Le saut qui suit la photo finit sa ligne (invisible) : il part avec
+    // elle, sinon une ligne vide restait a sa place (et ↓ ne passait pas
+    // la ligne d'en dessous).
+    const end = photoLineEnd(units, i);
+    if (dir < 0 ? i === 0 : i + (end ? 2 : 1) >= units.length) return;
+    if (end) {
+      end();
+      units = lineUnits(this.root);
+      i = units.findIndex((u) => u.node === fig);
+    }
     const isBreak = (u: LineUnit) => u.kind === "br" || u.kind === "img" || (u.kind === "ch" && u.ch === "\n");
     const r = document.createRange();
     if (dir < 0) {
@@ -1834,6 +1856,12 @@ export class TextDoc {
       fig.style.setProperty("--h", String(h));
     }
     this.images?.resized(fig.dataset.id ?? "", w, h);
+  }
+
+  /** Deplacement explicite d'une photo : la page fait suivre l'encre posee dessus (DocImages.moving). */
+  private asMove(run: () => void): void {
+    const moving = this.images?.moving;
+    if (moving) moving(run); else run();
   }
 
   private afterMove(fig: HTMLElement): void {
@@ -3553,12 +3581,12 @@ export class TextDoc {
         && !fig.dataset.live && !fig.classList.contains("side")) {
         e.preventDefault();
         const step = e.shiftKey ? NUDGE_FINE : NUDGE;
-        this.nudge(fig, e.key === "ArrowLeft" ? -step : step);
+        this.asMove(() => this.nudge(fig, e.key === "ArrowLeft" ? -step : step));
         return;
       }
       if (e.key.toLowerCase() === "c" && !e.ctrlKey && !e.altKey && !e.metaKey && !fig.dataset.live) {
         e.preventDefault();
-        this.toggleSide(fig);
+        this.asMove(() => this.toggleSide(fig));
         return;
       }
       this.selectImage(null);
@@ -3820,6 +3848,18 @@ function lineUnits(root: HTMLElement): LineUnit[] {
   };
   walk(root);
   return out;
+}
+
+/**
+ * Saut qui finit la ligne de la photo `i` (« \n » ou <br> juste apres
+ * elle, invisible) : rend de quoi l'oter, ou null. Jamais un titre ni une
+ * puce (aussi « br » dans lineUnits).
+ */
+function photoLineEnd(units: LineUnit[], i: number): (() => void) | null {
+  const u = i >= 0 ? units[i + 1] : undefined;
+  if (u?.kind === "ch" && u.ch === "\n") return () => u.node.deleteData(u.off, 1);
+  if (u?.kind === "br" && u.node.nodeName === "BR") return () => (u.node as ChildNode).remove();
+  return null;
 }
 
 function setAfter(r: Range, u: LineUnit): void {

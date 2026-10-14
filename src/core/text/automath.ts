@@ -146,6 +146,11 @@ const UNITS: Record<string, string> = {
   uF: "\\mu\\mathrm{F}", uA: "\\mu\\mathrm{A}", uH: "\\mu\\mathrm{H}", uV: "\\mu\\mathrm{V}",
   us: "\\mu\\mathrm{s}", "µH": "\\mu\\mathrm{H}", "µV": "\\mu\\mathrm{V}", nH: "\\mathrm{nH}",
   ns: "\\mathrm{ns}", GHz: "\\mathrm{GHz}", mF: "\\mathrm{mF}",
+  // Thermique, volumes, magnetisme, energie stockee, puissance apparente.
+  // Pas de T (periode) ni de S seul : trop souvent des variables.
+  K: "\\mathrm{K}", mK: "\\mathrm{mK}", L: "\\mathrm{L}", mL: "\\mathrm{mL}",
+  Wb: "\\mathrm{Wb}", mT: "\\mathrm{mT}", "µT": "\\mu\\mathrm{T}", mS: "\\mathrm{mS}",
+  Ah: "\\mathrm{Ah}", mAh: "\\mathrm{mAh}", VA: "\\mathrm{VA}", kVA: "\\mathrm{kVA}",
 };
 
 /** Mot qui est une unite ("Hz", "dB", "Mo") : jamais une variable seule. */

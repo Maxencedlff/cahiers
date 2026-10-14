@@ -220,6 +220,14 @@ describe("multiples d'unites tapes au clavier", () => {
     expect(one("C = 10 uF").tex).toBe("C = 10\\,\\mu\\mathrm{F}");
     expect(one("T = 5 us").tex).toBe("T = 5\\,\\mu\\mathrm{s}");
   });
+  it("kelvin, Ah, kVA derriere un nombre ; K et L seuls restent des grandeurs", () => {
+    expect(one("T = 300 K donc").tex).toBe("T = 300\\,\\mathrm{K}");
+    expect(one("Q = 2 Ah").tex).toBe("Q = 2\\,\\mathrm{Ah}");
+    expect(one("S = 5 kVA").tex).toBe("S = 5\\,\\mathrm{kVA}");
+    expect(one("K = 2").tex).toBe("K = 2");
+    expect(one("L = 10 mH et").tex).toBe("L = 10\\,\\mathrm{mH}");
+    expect(one("H(p) = K/(1+tau p)").tex).toBe("H\\left(p\\right) = \\frac{K}{1 + \\tau\\,p}");
+  });
 });
 
 describe("barre oblique : unites et sigles", () => {

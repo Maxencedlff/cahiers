@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { isTap, isWantedDot, TAP_MS, TOUCH_TAP_MS, DOT_WINDOW_MS } from "../core/ink/pointer";
 import { isScribble, reversals, scribbleTargets, straighten } from "../core/ink/gestures";
 import { Fling, VelocityTracker, MAX_MS } from "../core/kinetic";
-import { pickAt, selBarTop } from "../core/ink/selection";
+import { followPhotos, pickAt, selBarTop } from "../core/ink/selection";
 import { recoStrokes, planIncremental, dirtyStrokes } from "../core/ink/bands";
 import type { Block, InkBlock, InkPoint, Stroke } from "../core/types";
 
@@ -253,5 +253,39 @@ describe("defilement avec inertie", () => {
   it("un appui sans elan ne lance rien", () => {
     expect(Fling.worth(0.05, 0.1)).toBe(false);
     expect(Fling.worth(0, 1)).toBe(true);
+  });
+});
+
+describe("l'encre posee sur une photo suit la photo deplacee (followPhotos)", () => {
+  const st = (id: string, x: number, y: number): Stroke => ({
+    id, color: "normal", width: 2, tool: "pen",
+    points: [{ x, y, p: 0.5, t: 0 }, { x: x + 10, y: y + 10, p: 0.5, t: 10 }],
+  });
+  const photoA = { x: 150, y: 100, w: 200, h: 100 };
+  const photoB = { x: 150, y: 300, w: 200, h: 100 };
+
+  it("la photo descend : son encre descend, le reste ne bouge pas", () => {
+    const ink: InkBlock = { id: "i", type: "ink", strokes: [st("on", 200, 150), st("off", 200, 250)], recognized: null, mode: "raw" };
+    const blocks: Block[] = [ink];
+    const n = followPhotos(blocks, [{ from: photoA, to: { ...photoA, y: 140 } }]);
+    expect(n).toBe(1);
+    const on = ink.strokes.find((s) => s.id === "on")!, off = ink.strokes.find((s) => s.id === "off")!;
+    expect(on.points[0].y).toBeCloseTo(190, 1);
+    expect(off.points[0].y).toBe(250);
+  });
+
+  it("deux photos echangees : chaque encre suit la sienne, une seule fois", () => {
+    const ink: InkBlock = { id: "i", type: "ink", strokes: [st("a", 200, 150), st("b", 200, 350)], recognized: null, mode: "raw" };
+    const n = followPhotos([ink], [{ from: photoA, to: photoB }, { from: photoB, to: photoA }]);
+    expect(n).toBe(2);
+    expect(ink.strokes.find((s) => s.id === "a")!.points[0].y).toBeCloseTo(350, 1);
+    expect(ink.strokes.find((s) => s.id === "b")!.points[0].y).toBeCloseTo(150, 1);
+  });
+
+  it("taille changee (image decodee, poignees) ou photo immobile : rien ne bouge", () => {
+    const ink: InkBlock = { id: "i", type: "ink", strokes: [st("a", 200, 150)], recognized: null, mode: "raw" };
+    expect(followPhotos([ink], [{ from: photoA, to: { ...photoA, y: 160, h: 140 } }])).toBe(0);
+    expect(followPhotos([ink], [{ from: photoA, to: photoA }])).toBe(0);
+    expect(ink.strokes[0].points[0].y).toBe(150);
   });
 });

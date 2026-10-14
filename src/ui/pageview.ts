@@ -35,7 +35,7 @@ import { labelOf, NEUTRAL_INK, PALETTE } from "../core/palette";
 import { inkCssColor } from "../core/theme";
 import {
   PASTE_STEP, clampMove, clampSpace, copySelection, pasteClip, recolorStrokes, replaceStrokes,
-  pickAt, selBarTop, selectInLasso, selectionBounds, shiftBelow, strokesBelow, strokesById, transformBlocks,
+  followPhotos, pickAt, selBarTop, selectInLasso, selectionBounds, shiftBelow, strokesBelow, strokesById, transformBlocks,
   type BarBox, type InkClip, type Pt as InkPt, type Transform,
 } from "../core/ink/selection";
 import { TextDoc } from "./textdoc";
@@ -1350,6 +1350,7 @@ export class PageView {
         };
       },
       openLive: (id) => this.openLive(loaded, id),
+      moving: (run) => this.movePhotos(loaded, run),
     }, this.host.links && { ...this.host.links, pageId: () => page.id });
     const readOnly = isFutureVersion(page) || this.readOnly || !!copy;
     const sheet = el("div", { class: `sheet${readOnly ? " readonly" : ""}` }, canvas, doc.root, overlay);
@@ -1816,6 +1817,39 @@ export class PageView {
     this.syncPhotoInk(loaded);
     // Page de PDF en fond : rendue a la taille du canvas (pas pendant l'export, qui l'attend lui-meme).
     if (!this.exporting) this.pdfLayer.sync(loaded, this.viewMode === "scroll" ? this.root : null);
+  }
+
+  /** Place des photos du texte, en unites de page, par id. */
+  private photoRects(loaded: LoadedPage): Map<string, Bounds> {
+    const out = new Map<string, Bounds>();
+    const sheet = loaded.sheet.getBoundingClientRect();
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    for (const fig of Array.from(loaded.doc.root.querySelectorAll<HTMLElement>(".doc-img"))) {
+      const id = fig.dataset.id;
+      const r = fig.getBoundingClientRect();
+      if (!id || r.width < 2 || r.height < 2) continue;
+      out.set(id, { x: (r.left - sheet.left) / k, y: (r.top - sheet.top) / k, w: r.width / k, h: r.height / k });
+    }
+    return out;
+  }
+
+  /**
+   * Deplacement explicite d'une photo (DocImages.moving) : l'encre posee
+   * sur chaque photo qui a bouge la suit (followPhotos). Le texte ne pousse
+   * pas l'encre en plus (noPush) : seule la photo compte.
+   */
+  private movePhotos(loaded: LoadedPage, run: () => void): void {
+    if (loaded.readOnly) { run(); return; }
+    const before = this.photoRects(loaded);
+    loaded.noPush = true;
+    try { run(); } finally { loaded.noPush = false; }
+    const after = this.photoRects(loaded);
+    const moves = [...before].filter(([id]) => after.has(id)).map(([id, from]) => ({ from, to: after.get(id)! }));
+    if (!followPhotos(loaded.page.blocks, moves)) return;
+    this.fitSheet(loaded);
+    this.paintStrokes(loaded);
+    this.paintOverlay(loaded);
+    this.queueSave(loaded);
   }
 
   /**

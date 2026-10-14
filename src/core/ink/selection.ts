@@ -375,6 +375,42 @@ export function shiftBelow(blocks: Block[], y: number, dy: number): number {
   return ids.size || flags ? d : 0;
 }
 
+/**
+ * Photos deplacees explicitement (monter, descendre, glisser, decaler,
+ * aligner) : l'encre posee dessus suit. Un trait appartient a la photo dont
+ * l'ancienne place contient le centre de sa boite (la premiere qui le
+ * contient) ; il est decale du deplacement de la photo. Les photos dont la
+ * taille a change ne bougent pas leur encre (image pas encore decodee,
+ * redimensionnement). Rend le nombre de traits deplaces.
+ */
+export function followPhotos(blocks: Block[], moves: readonly { from: Bounds; to: Bounds }[]): number {
+  const same = (a: number, b: number) => Math.abs(a - b) < 1;
+  const real = moves.filter((m) => same(m.from.w, m.to.w) && same(m.from.h, m.to.h)
+    && (Math.abs(m.to.x - m.from.x) >= 0.5 || Math.abs(m.to.y - m.from.y) >= 0.5));
+  if (!real.length) return 0;
+  const claim = new Map<string, number>();
+  for (const b of blocks) {
+    if (b.type === "pdf") continue;
+    for (const s of strokesOf(b)) {
+      if (!s.points.length || claim.has(s.id)) continue;
+      const r = cachedBounds(s);
+      const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      // Toutes les photos, meme immobiles : un trait d'une photo restee en place ne part pas avec une autre.
+      const i = moves.findIndex((m) => cx >= m.from.x && cx <= m.from.x + m.from.w && cy >= m.from.y && cy <= m.from.y + m.from.h);
+      if (i >= 0) claim.set(s.id, i);
+    }
+  }
+  let n = 0;
+  moves.forEach((m, i) => {
+    if (!real.includes(m)) return;
+    const ids = new Set([...claim].filter(([, j]) => j === i).map(([id]) => id));
+    if (!ids.size) return;
+    transformBlocks(blocks, ids, translation(m.to.x - m.from.x, m.to.y - m.from.y));
+    n += ids.size;
+  });
+  return n;
+}
+
 /* ---------------- gomme precise ---------------- */
 
 /** Morceau plus court que ca (unites de page) : poussiere, jete. */
