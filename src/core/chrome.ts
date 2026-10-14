@@ -37,12 +37,15 @@ export type CalcPlacement = "panel" | "float" | "sheet";
  * Ou poser la calculatrice : panneau a droite qui pousse la page sans la
  * couvrir (inspecteur) ; fenetre flottante si l'utilisateur l'a detachee
  * ou si la page n'aurait plus sa largeur lisible ; au telephone, en bas
- * sur toute la largeur.
+ * sur toute la largeur. Tablette en portrait (plus haute que large, pas de
+ * place pour le panneau) : en bas aussi, la page reste lisible au-dessus
+ * au lieu d'etre couverte en son milieu.
  */
-export function calcPlacement(o: { width: number; stage: number; detached: boolean }): CalcPlacement {
+export function calcPlacement(o: { width: number; stage: number; detached: boolean; height?: number }): CalcPlacement {
   if (o.width < PHONE_MAX) return "sheet";
   if (o.detached) return "float";
-  return o.stage - CALC_PANEL_W >= CALC_MIN_STAGE ? "panel" : "float";
+  if (o.stage - CALC_PANEL_W >= CALC_MIN_STAGE) return "panel";
+  return o.height !== undefined && o.height > o.width ? "sheet" : "float";
 }
 
 /* ---------------- palette d'outils ---------------- */

@@ -397,6 +397,8 @@ export class App {
             saveSettings(this.settings);
             // Flottante, elle ne reserve pas de panneau.
             this.calcSlot?.side.classList.toggle("closed", !visible || !this.calculator?.isDocked);
+            // Bandeau du bas : la fin de la page doit pouvoir remonter au-dessus.
+            this.calcSlot?.work.classList.toggle("calc-under", visible && !!this.calculator?.root.classList.contains("sheet"));
             const b = this.tabbar.querySelector(".calc-btn");
             b?.classList.toggle("on", visible);
             b?.setAttribute("aria-pressed", String(visible));
@@ -443,13 +445,14 @@ export class App {
    * Pose la calculatrice sur l'ecran cahier (core/chrome.ts, calcPlacement) :
    * panneau a droite qui pousse la page (inspecteur), fenetre flottante si
    * on l'a detachee ou si la page n'aurait plus sa largeur, bandeau du bas
-   * au telephone. Hors cahier, elle reste ou elle est.
+   * au telephone et en tablette portrait. Hors cahier, elle reste ou elle est.
    */
   private placeCalculator(calc: Calculator): void {
     const slot = this.calcSlot;
     if (this.screen !== "notebook" || !slot || !slot.side.isConnected) return;
     const where = calcPlacement({
-      width: window.innerWidth, stage: slot.work.clientWidth || window.innerWidth, detached: this.settings.calcDetached,
+      width: window.innerWidth, height: window.innerHeight,
+      stage: slot.work.clientWidth || window.innerWidth, detached: this.settings.calcDetached,
     });
     if (where === "panel") {
       if (!calc.isIn(slot.side)) calc.dock(slot.side);
@@ -460,6 +463,7 @@ export class App {
       if (calc.isVisible) calc.show();
     }
     calc.root.classList.toggle("sheet", where === "sheet");
+    slot.work.classList.toggle("calc-under", where === "sheet" && calc.isVisible);
     // Flottante, elle ne recouvre jamais la barre du haut.
     calc.setMinTop(where === "float" ? this.tabbar.getBoundingClientRect().bottom + 8 : 8);
     calc.setDetachable(where !== "sheet", where === "float" && this.settings.calcDetached);

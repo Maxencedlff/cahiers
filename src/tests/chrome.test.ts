@@ -96,6 +96,10 @@ describe("disposition : barre laterale, calculatrice, palette", () => {
     expect(calcPlacement({ width: 1366, stage: 1118, detached: true })).toBe("float");
     expect(calcPlacement({ width: 768, stage: 768, detached: false })).toBe("float");
     expect(calcPlacement({ width: 390, stage: 390, detached: false })).toBe("sheet");
+    // Tablette en portrait : bandeau du bas ; en paysage etroit : flottante.
+    expect(calcPlacement({ width: 720, height: 1280, stage: 720, detached: false })).toBe("sheet");
+    expect(calcPlacement({ width: 900, height: 600, stage: 900, detached: false })).toBe("float");
+    expect(calcPlacement({ width: 720, height: 1280, stage: 720, detached: true })).toBe("float");
     expect(CALC_PANEL_W).toBe(360);
   });
 

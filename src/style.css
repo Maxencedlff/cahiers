@@ -1121,6 +1121,8 @@ kbd { color: var(--text-2); }
 .calc.docked .calc-body { max-height: none; flex: 1; min-height: 0; }
 /* Telephone : en bas, sur toute la largeur. */
 .calc.sheet { left: 0 !important; right: 0; top: auto !important; bottom: 0; width: auto; max-height: 78vh; border-radius: 14px 14px 0 0; }
+/* Bandeau ouvert : de quoi faire remonter le bas de la page au-dessus. */
+.calc-under .pages { padding-bottom: 80vh; }
 
 /* Choix segmente (reglages, partage). */
 .seg { display: flex; gap: 0; flex: 1 1 100%; padding: 2px; border-radius: 9px; background: var(--surface-3); }
