@@ -2874,7 +2874,12 @@ export class TextDoc {
     if (key === "/") this.pendingSlash = true;
     // Une relation ou l'Espace derriere le denominateur d'une fraction
     // tapee au "/" en sort ; « + » et « - » restent en bas.
-    if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) mf.executeCommand("moveAfterParent");
+    if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) {
+      mf.executeCommand("moveAfterParent");
+      // L'Espace sert a sortir du denominateur, pas a mettre un blanc (\;) dans la formule.
+      if (key === " ") return true;
+    }
+    if (key === ")") closeParenOutward(mf);
     // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
     if (key === "Enter" && !shift) {
       // Formule rouverte au milieu d'une ligne : Entree la valide seulement,
@@ -4525,15 +4530,35 @@ function endOfSlashDen(mf: MathfieldElement, slashFracs: WeakSet<object>): boole
   const den = p.branch("below") ?? [];
   const items = den.slice(1);
   if (!items.length || den[den.length - 1] !== a) return false;
-  if (items.every((x) => x.type === "mord" || x.type === "leftright" || x.type === "surd" || x.type === "genfrac")) return true;
-  // "(a+b)" tape (parentheses separees, smartFence coupe) : un seul groupe.
+  // Plusieurs termes (« p+2 », comme dans le texte) : on sort des que les
+  // parentheses tapees dans le denominateur sont toutes fermees.
+  return openParens(items) === 0;
+}
+
+/** Parentheses ouvertes et pas encore fermees dans une suite d'atomes (smartFence coupe). */
+function openParens(items: readonly { type?: string }[]): number {
   let depth = 0;
-  for (let i = 0; i < items.length; i++) {
-    if (items[i].type === "mopen") depth++;
-    else if (items[i].type === "mclose") depth--;
-    if (depth <= 0 && i < items.length - 1) return false;
+  for (const x of items) {
+    if (x.type === "mopen") depth++;
+    else if (x.type === "mclose" && depth > 0) depth--;
   }
-  return items[0].type === "mopen" && depth === 0;
+  return depth;
+}
+
+/**
+ * « ) » tape au bout du denominateur (ou numerateur) d'une fraction qui n'a
+ * pas de « ( » ouverte : elle ferme une parenthese du dehors
+ * (« 1/(1+1/x) ») ; le curseur remonte d'abord hors de la fraction.
+ */
+function closeParenOutward(mf: MathfieldElement): void {
+  for (let guard = 0; guard < 6; guard++) {
+    const a = caretAtom(mf);
+    const p = a?.parent;
+    if (!a || !p || p.type !== "genfrac" || (a.parentBranch !== "below" && a.parentBranch !== "above")) return;
+    const branch = p.branch(a.parentBranch) ?? [];
+    if (branch[branch.length - 1] !== a || openParens(branch.slice(1)) > 0) return;
+    mf.executeCommand("moveAfterParent");
+  }
 }
 
 /** Point juste de l'autre cote de `node` (vers l'avant ou l'arriere), dans un texte s'il y en a un. */

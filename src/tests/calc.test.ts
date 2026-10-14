@@ -339,3 +339,15 @@ describe("detail d'une simplification (Littéral)", () => {
     expect(simplifySteps("1/p + 1/(p+1)")![1]).toContain("p\\left(p + 1\\right)");
   });
 });
+
+describe("detail avec un parametre (boucle fermee)", () => {
+  it("K/(p(p+3)) / (1 + K/(p(p+3))) : meme denominateur, inverse, simplification, developpe", async () => {
+    const { simplifySteps } = await import("../core/calc/nextstep");
+    const s = simplifySteps("K/(p(p+3)) / (1+K/(p(p+3)))")!;
+    expect(s.some((l) => l.startsWith("En bas, on met tout au même dénominateur"))).toBe(true);
+    expect(s.some((l) => l.startsWith("On simplifie par"))).toBe(true);
+    expect(s[s.length - 1]).toContain("\\frac{K}{p^{2} + 3\\,p + K}");
+    expect(s.join(" ")).not.toContain("mathrm");
+  });
+});
+

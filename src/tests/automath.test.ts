@@ -725,3 +725,12 @@ describe("formule cassee de l'editeur (parenthese manquante)", () => {
     expect(liveFormula("1/((1+x))")).toBe("\\frac{1}{1 + x}");
   });
 });
+
+describe("dates dans le texte", () => {
+  it("jour/mois/annee reste du texte, une fraction seule reste une fraction", () => {
+    expect(findFormulas("le 3/10/2026")).toEqual([]);
+    expect(findFormulas("le 12/10/2026 ok")).toEqual([]);
+    expect(findFormulas("TD du 03/10/2026 : a = 2").map((f) => f.latex)).toEqual(["a = 2"]);
+    expect(findFormulas("on a 3/10 ici").map((f) => f.latex)).toEqual(["\\frac{3}{10}"]);
+  });
+});

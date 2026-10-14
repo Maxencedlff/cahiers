@@ -1082,6 +1082,14 @@ export function findFormulas(line: string, mode: ScanMode = "final"): FoundFormu
   while (k < toks.length) {
     const t = toks[k];
     if (t.t === "sp" || (t.t === "other" && t.s !== "[" && t.s !== "]")) { k++; continue; }
+    // Date « 3/10/2026 », « 12/10/26 » : du texte en entier, jamais une
+    // fraction ni le milieu d'une formule (« 10/2026 »).
+    const date = t.t === "num" && /^\d{1,2}\/\d{1,2}\/\d{2,4}(?![\d/])/.exec(line.slice(t.a));
+    if (date) {
+      const end = t.a + date[0].length;
+      while (k < toks.length && toks[k].a < end) k++;
+      continue;
+    }
     // Trait d'union colle a un mot ("lithium-ion") : pas un moins.
     const prev = toks[k - 1];
     if (t.t === "op" && (t.s === "-" || t.s === "−") && prev && (prev.t === "id" || prev.t === "num")) { k++; continue; }
@@ -1235,11 +1243,14 @@ export function forceFormula(src: string): string | null {
   if (k >= toks.length) return null;
   const p = new Parser(toks, k);
   const node = p.relation();
-  if (!node) return null;
   let j = p.pos;
   while (toks[j]?.t === "sp") j++;
-  if (j < toks.length) return null;
-  return node.tex.replace(/\s+/g, " ").trim();
+  if (node && j >= toks.length) return node.tex.replace(/\s+/g, " ").trim();
+  // Produit sans signe en tete (« R C p », « K p(p + 3) ») : la grammaire ne
+  // le lit qu'apres une relation ; on la lui donne, puis on la retire.
+  const after = liveFormula(`Zqw = ${s}`);
+  const m = after && /^Z_\{qw\} = ([\s\S]+)$/.exec(after);
+  return m && !m[1].includes("placeholder") ? m[1] : null;
 }
 
 /**

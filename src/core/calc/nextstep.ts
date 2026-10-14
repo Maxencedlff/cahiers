@@ -11,7 +11,7 @@
  */
 import { create, all, type MathNode } from "mathjs";
 import { normalizeInput, frNumber, frTexDecimal } from "./engine";
-import { findFormulas } from "../text/automath";
+import { findFormulas, forceFormula } from "../text/automath";
 import { polynomialCoefficients, polynomialRoots, solveEquation } from "./solve";
 
 type Math = ReturnType<typeof create>;
@@ -1043,6 +1043,7 @@ export function simplifySteps(src: string): string[] | null {
   let node: MathNode;
   try { node = toProducts(m.parse(normalizeInput(src.replace(/\s+/g, " ")))); } catch { return null; }
   const syms = symbolsOf(node);
+  if (syms.length > 1) return paramSteps(node);
   if (syms.length !== 1) return null;
   const v = syms[0];
   const top = strip(node);
@@ -1306,5 +1307,102 @@ function rationalCore(node: MathNode, v: string, params: string[]): string | nul
   const nt = paramPolyText(N, v), dt = paramPolyText(D, v);
   const wrap = (t: string) => (/[+\-]/.test(t.replace(/^-/, "")) || / /.test(t) ? `(${t})` : t);
   return `${wrap(nt)}/${wrap(dt)}`;
+}
+
+/* ---------------- detail avec des parametres (K, a...) ---------------- */
+
+/** Terme en fraction : facteurs du haut et du bas (« K/(p(p+3)) » -> [K] / [p, p + 3]). */
+function fracFactors(n: any): { num: any[]; den: any[] } {
+  n = strip(n);
+  if (n.type === "OperatorNode" && n.op === "/") {
+    const a = fracFactors(n.args[0]), b = fracFactors(n.args[1]);
+    return { num: [...a.num, ...b.den], den: [...a.den, ...b.num] };
+  }
+  if (n.type === "OperatorNode" && n.op === "*" && n.args.length === 2) {
+    const a = fracFactors(n.args[0]), b = fracFactors(n.args[1]);
+    return { num: [...a.num, ...b.num], den: [...a.den, ...b.den] };
+  }
+  return { num: [n], den: [] };
+}
+
+/**
+ * Detail redige pour une fraction de fractions a plusieurs lettres (boucle
+ * fermee « K/(p(p+3)) / (1 + K/(p(p+3))) ») : meme denominateur en haut et
+ * en bas, multiplier par l'inverse, simplifier par les facteurs identiques,
+ * puis la forme developpee. Travaille sur l'ecriture (facteurs compares a
+ * l'identique), pas sur des polynomes. null si l'expression n'a pas cette forme.
+ */
+function paramSteps(node: MathNode): string[] | null {
+  const m = M();
+  const top = strip(node);
+  if (!(top.type === "OperatorNode" && top.op === "/")) return null;
+  const key = (f: any) => compact(print(strip(f)));
+  const isOne = (f: any) => { const x = strip(f); return x.type === "ConstantNode" && x.value === 1; };
+  const txt = (f: any) => {
+    const t = print(strip(f));
+    const x = strip(f);
+    return x.type === "OperatorNode" && (x.op === "+" || x.op === "-") ? `(${t})` : t;
+  };
+  // Produit ecrit comme on le tape : « K p(p + 3) », « K(p + a) ».
+  const prod = (fs: any[]) => {
+    const k = fs.filter((f) => !isOne(f)).map(txt);
+    return k.length ? k.reduce((acc, t) => (acc ? `${acc}${t.startsWith("(") ? "" : " "}${t}` : t), "") : "1";
+  };
+  // LaTeX par la grammaire de la page (lettres en italique, produits sans point).
+  const tex = (src: string) => forceFormula(src) ?? frTexDecimal(m.parse(normalizeInput(src)).toTex({ parenthesis: "auto", implicit: "hide" } as any));
+  const fracSrc = (num: any[], den: any[]) => {
+    const d = den.filter((f) => !isOne(f));
+    return d.length ? `(${prod(num)})/(${prod(d)})` : prod(num);
+  };
+  const T = (n: MathNode) => tex(print(n));
+  const lines: string[] = [`On part de $${T(node)}$.`];
+  // Une moitie en une seule fraction ; une somme de fractions est detaillee.
+  const reduce = (x: any, where: string): { num: any[]; den: any[] } | null => {
+    const s = strip(x);
+    if (!(s.type === "OperatorNode" && (s.op === "+" || s.op === "-"))) return fracFactors(s);
+    const terms = termsOf(s).map((t) => ({ sign: t.sign, ...fracFactors(t.node) }));
+    if (!terms.some((t) => t.den.length)) return { num: [s], den: [] };
+    // Denominateur commun : les facteurs distincts des denominateurs.
+    const common: any[] = [];
+    for (const t of terms) for (const f of t.den) if (!common.some((c) => key(c) === key(f))) common.push(f);
+    const parts = terms.map((t) => {
+      const missing = common.filter((c) => !t.den.some((f) => key(f) === key(c)));
+      return { sign: t.sign, num: [...t.num, ...missing] };
+    });
+    const sumSrc = parts.map((p, i) => `${i ? (p.sign < 0 ? " - " : " + ") : p.sign < 0 ? "-" : ""}${prod(p.num)}`).join("");
+    const mid = parts.map((p, i) => `${i ? (p.sign < 0 ? " - " : " + ") : p.sign < 0 ? "-" : ""}\\frac{${tex(prod(p.num))}}{${tex(prod(common))}}`).join("");
+    lines.push(`${where}on met tout au même dénominateur : $${T(strip(x))} = ${mid} = \\frac{${tex(sumSrc)}}{${tex(prod(common))}}$.`);
+    return { num: [m.parse(normalizeInput(sumSrc))], den: common };
+  };
+  try {
+    const a = reduce(top.args[0], "En haut, ");
+    const b = reduce(top.args[1], "En bas, ");
+    if (!a || !b) return null;
+    let num = [...a.num, ...b.den], den = [...a.den, ...b.num];
+    if (a.den.length || b.den.length) {
+      lines.push(`Diviser par une fraction, c'est multiplier par son inverse : $${tex(fracSrc(a.num, a.den))} \\times ${tex(fracSrc(b.den, b.num))} = ${tex(fracSrc(num, den))}$.`);
+    }
+    const gone: any[] = [];
+    for (let i = 0; i < num.length; i++) {
+      const j = den.findIndex((d) => key(d) === key(num[i]) && !isOne(d));
+      if (j < 0 || isOne(num[i])) continue;
+      gone.push(num[i]);
+      num = num.filter((_f, k) => k !== i);
+      den = den.filter((_f, k) => k !== j);
+      i--;
+    }
+    if (!gone.length && lines.length < 3) return null;
+    const res = fracSrc(num, den);
+    if (gone.length) lines.push(`On simplifie par $${tex(prod(gone))}$ : $${tex(res)}$.`);
+    // Forme developpee, si elle est plus simple a lire.
+    const syms = symbolsOf(node);
+    const resTex = tex(res);
+    const parens = (t: string) => (t.match(/\\left\(/g) ?? []).length;
+    const dev = rationalWithParams(node, syms).map(tex).find((f) => parens(f) < parens(resTex));
+    lines.push(`Donc $${T(node)} = ${resTex}${dev ? ` = ${dev}` : ""}$.`);
+  } catch {
+    return null;
+  }
+  return lines;
 }
 
