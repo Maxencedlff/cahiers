@@ -85,6 +85,8 @@ export interface MenuItem {
   sub?: MenuEntry[];
   /** Carre de couleur (matiere) a la place de l'icone. */
   swatch?: string;
+  /** Rendu montre a la place du libelle (formule) ; `label` reste le nom lu. */
+  content?: Node;
 }
 /** Ligne, separateur ou titre de section. */
 export type MenuEntry = MenuItem | "sep" | { title: string };
@@ -138,11 +140,12 @@ export function contextMenu(
       ...(e.checked != null ? { "aria-checked": String(e.checked) } : {}),
       ...(e.sub ? { "aria-haspopup": "menu" } : {}),
       disabled: e.disabled ? true : null,
+      ...(e.content ? { "aria-label": e.label } : {}),
       tabindex: "-1",
     },
     el("span", { class: "ctx-icon" }, e.checked ? icon("check", 16) : e.icon ? icon(e.icon, 17)
       : e.swatch ? el("i", { class: "nb-sq", style: { background: e.swatch } }) : null),
-    el("span", { class: "ctx-label" }, e.label),
+    el("span", { class: "ctx-label" }, e.content ?? e.label),
     e.keys ? el("kbd", { class: "ctx-keys" }, e.keys) : null,
     e.sub ? el("span", { class: "ctx-chev" }, icon("chevronRight", 15)) : null);
     // Le focus reste dans la page : on continue de taper apres un choix.
@@ -567,8 +570,32 @@ export function chooseDialog(
   });
 }
 
-/** Choix dans une liste, au doigt. Le libelle peut etre un rendu (formule). */
-export function pick(title: string, options: { value: string; label: string | Node }[]): Promise<string | null> {
+/**
+ * Choix dans une liste, au doigt. Le libelle peut etre un rendu (formule) ;
+ * `name` le dit alors en mots. Avec `at` (point de l'appui ou element) :
+ * petit menu pose la, sans voile ni bouton « Annuler » (un appui a cote ou
+ * Echap le ferme) ; sinon fenetre.
+ */
+export function pick(
+  title: string, options: { value: string; label: string | Node; name?: string }[],
+  at?: { x: number; y: number } | HTMLElement,
+): Promise<string | null> {
+  if (at) {
+    return new Promise((resolve) => {
+      let done = false;
+      const settle = (v: string | null) => { if (!done) { done = true; resolve(v); } };
+      contextMenu(at, [
+        { title },
+        ...options.map((o): MenuItem => typeof o.label === "string"
+          ? { label: o.label, run: () => settle(o.value) }
+          : { label: o.name ?? o.value, content: o.label, run: () => settle(o.value) }),
+      ], {
+        label: title,
+        // Un choix ferme le menu juste avant de courir : on attend sa reponse.
+        onClose: () => queueMicrotask(() => settle(null)),
+      });
+    });
+  }
   return new Promise((resolve) => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(null); } };
     const close = (v: string | null) => {

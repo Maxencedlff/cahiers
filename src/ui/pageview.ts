@@ -2778,7 +2778,7 @@ export class PageView {
       if (e.pointerType === "pen" && !isTap(Math.hypot(e.clientX - d.x, e.clientY - d.y), e.timeStamp - d.t)) return;
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || e.timeStamp - d.t > 500) return;
       const p = hit(e);
-      if (p) void this.correctWord(loaded, p.index);
+      if (p) void this.correctWord(loaded, p.index, { x: e.clientX, y: e.clientY });
     });
     loaded.sheet.addEventListener("contextmenu", (e) => {
       // Bouton lateral du stylet : c'est une gomme, pas un menu.
@@ -2786,12 +2786,12 @@ export class PageView {
       const p = hit(e);
       if (!p) return;
       e.preventDefault();
-      void this.correctWord(loaded, p.index);
+      void this.correctWord(loaded, p.index, { x: e.clientX, y: e.clientY });
     });
   }
 
   /** Correction en un geste sur un mot tape (section 4). */
-  private async correctWord(loaded: LoadedPage, index: number): Promise<void> {
+  private async correctWord(loaded: LoadedPage, index: number, at: { x: number; y: number }): Promise<void> {
     const ink = this.mainInk(loaded.page);
     const word = ink.words?.[index];
     if (!word) return;
@@ -2799,7 +2799,7 @@ export class PageView {
     options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? `Autres lectures de « ${word.label} »` : `Corriger « ${word.label} »`,
-      options,
+      options, at,
     );
     if (choice === null) return;
     let next = choice;
@@ -3427,7 +3427,7 @@ export class PageView {
         if (block.latex) {
           box.title = block.latex;
           box.style.cursor = "pointer";
-          box.addEventListener("click", () => void this.correctMath(loaded, block));
+          box.addEventListener("click", () => void this.correctMath(loaded, block, box));
         }
         return place(box, block.rect);
       }
@@ -3520,7 +3520,7 @@ export class PageView {
         if (block.recognized) {
           box.title = block.recognized;
           box.style.cursor = "pointer";
-          box.addEventListener("click", () => void this.correctText(loaded, block));
+          box.addEventListener("click", () => void this.correctText(loaded, block, box));
         }
         return place(box, block.rect);
       }
@@ -3535,19 +3535,19 @@ export class PageView {
    * avalee. La reconnaissance ne sera jamais parfaite, la correction doit
    * couter un geste, pas une reecriture.
    */
-  private async correctMath(loaded: LoadedPage, block: MathBlock): Promise<void> {
+  private async correctMath(loaded: LoadedPage, block: MathBlock, at: HTMLElement): Promise<void> {
     // Lectures du moteur d'abord, puis les confusions classiques de
     // l'ecriture a la main (dx/dz, a/alpha...), chacune rendue en formule.
     const latex = block.latex ?? "";
     const values = [...new Set([...(block.candidates ?? []), ...confusionCandidates(latex)])]
       .filter((c) => c && c !== latex)
       .slice(0, 6);
-    const options: { value: string; label: string | Node }[] =
-      values.map((c) => ({ value: c, label: renderTex(c) }));
+    const options: { value: string; label: string | Node; name?: string }[] =
+      values.map((c) => ({ value: c, label: renderTex(c), name: c }));
     options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? "Autres lectures possibles" : "Corriger la formule",
-      options,
+      options, at,
     );
     if (choice === null) return;
     if (choice === EDIT_SENTINEL) { await this.editLatex(loaded, block); return; }
@@ -3676,12 +3676,12 @@ export class PageView {
    * francais d'un cours technique fait trebucher le moteur sur les accents,
    * les apostrophes et les termes anglais.
    */
-  private async correctText(loaded: LoadedPage, block: InkBlock): Promise<void> {
+  private async correctText(loaded: LoadedPage, block: InkBlock, at: HTMLElement): Promise<void> {
     const options = (block.candidates ?? []).map((c) => ({ value: c, label: c }));
     options.push({ value: EDIT_SENTINEL, label: "Corriger à la main…" });
     const choice = await pick(
       options.length > 1 ? "Autres lectures possibles" : "Corriger le texte",
-      options,
+      options, at,
     );
     if (choice === null) return;
     if (choice === EDIT_SENTINEL) {
