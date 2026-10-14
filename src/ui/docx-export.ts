@@ -15,7 +15,7 @@ import { GRAPH_RATIO, graphWidth } from "../core/liveblock";
 import { texToPlain } from "../core/text/doc";
 import { TEXT_LEFT, TEXT_RIGHT } from "../core/textlayout";
 import type { Bounds } from "../core/ink/stroke";
-import type { Block, CalcBlock, GraphBlock, ImageBlock, Page, Stroke } from "../core/types";
+import type { Block, CalcBlock, GraphBlock, ImageBlock, SchemaBlock, Page, Stroke } from "../core/types";
 import type { ReviewItem, ReviewResult } from "../core/review";
 import type { Repo } from "../core/storage/repo";
 import { buildDocx, EMU_PER_MM, type DxImage, type DxPara, type DxRun } from "../core/export/docx";
@@ -287,6 +287,37 @@ async function graphImage(b: GraphBlock): Promise<DxImage | null> {
   }
 }
 
+/** Schema : SVG autonome (etiquettes en texte) rendu en PNG densite 3, a sa largeur dans la page. */
+async function schemaImage(b: SchemaBlock): Promise<DxImage | null> {
+  try {
+    const { schemaSvgString, schemaWidth } = await import("./schema-view");
+    const W = schemaWidth(b);
+    const { svg, w, h } = schemaSvgString(b);
+    const H = Math.round((W * h) / Math.max(1, w));
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      const c = el("canvas");
+      c.width = W * DENSITY;
+      c.height = H * DENSITY;
+      const ctx = c.getContext("2d");
+      if (!ctx) return null;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      const data = await canvasPng(c);
+      c.width = c.height = 0;
+      return { data, type: "png", ...fitBox(W, H), descr: "schéma" };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Repli d'une formule que le convertisseur OMML refuse : rendu MathML natif
  * du WebView2 (Cambria Math) dans une image SVG, copie en PNG densite 3.
@@ -352,6 +383,10 @@ async function pageParas(repo: Repo, notebook: string, divider: string, src: Doc
       } else {
         inline.set(b.id, [{ kind: "text", text: "[photo introuvable]", italic: true }]);
       }
+    } else if (b.type === "schema") {
+      const img = await schemaImage(b);
+      inline.set(b.id, img ? [{ kind: "image", image: img }] : [{ kind: "text", text: "[schéma]", italic: true }]);
+      if (img) heights.set(b.id, img.cy / EMU_PER_UNIT);
     } else if (b.type === "calc" || b.type === "graph") {
       live ??= await import("../core/calc/live");
       inline.set(b.id, await liveRuns(b, live));

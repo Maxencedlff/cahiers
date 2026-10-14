@@ -50,7 +50,7 @@ interface FormulaHit {
 
 const BLOCK_LABEL: Record<Block["type"], string> = {
   text: "texte", ink: "écriture", math: "formule", image: "photo", pdf: "PDF",
-  calc: "calcul", graph: "courbe", link: "lien", flag: "repère",
+  calc: "calcul", graph: "courbe", link: "lien", flag: "repère", schema: "schéma",
 };
 
 let current: { close: (restore?: boolean) => void } | null = null;

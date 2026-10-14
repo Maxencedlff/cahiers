@@ -846,7 +846,7 @@ export class App {
       editLive: (block, update) => void this.loadCalculator().then((calc) => {
         this.placeCalculator(calc);
         if (block.type === "calc") calc.editCalc(calcSpecOf(block), (c: CalcSpec) => update(c));
-        else calc.editGraph(graphSpecOf(block), (g: GraphSpec) => update(g));
+        else if (block.type === "graph") calc.editGraph(graphSpecOf(block), (g: GraphSpec) => update(g));
       }),
     }, tab.notebook, tab.divider);
     await view.setNotice(this.noticeFor(tab.notebook));
@@ -2233,6 +2233,7 @@ export class App {
       { label: "Nouvelle page à la fin", icon: "plus", keys: keysOf("newPage"), run: () => void view.newPage().then(() => this.refreshSidebarSoon(0)) },
       { label: "Photo du tableau…", icon: "camera", keys: keyLabel(PHOTO_IMPORT_KEYS), run: () => void this.importImage() },
       { label: "Importer un PDF…", icon: "fileUp", keys: keysOf("importPdf"), run: () => void this.importPdf() },
+      { label: "Schéma (électrique, blocs)", icon: "pen", keys: keysOf("schema"), run: () => view.insertSchema() },
       "sep",
       {
         label: "Fond de page", icon: "grid", sub: PAPERS.map((p) => ({
@@ -2935,6 +2936,7 @@ export class App {
       case "exportWord": if (notebook) void this.exportWord(view, "current"); return true;
       case "exportWordAll": if (notebook) void this.exportWord(view, "all"); return true;
       case "importPdf": if (notebook) void this.importPdf(); return true;
+      case "schema": if (notebook) view?.insertSchema(); return true;
       case "closeTab": { const t = this.focusedTab(); if (t) void this.closeTab(t.id); return true; }
       case "nextTab": this.cycleTab(1); return true;
       case "prevTab": this.cycleTab(-1); return true;

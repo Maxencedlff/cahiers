@@ -1,4 +1,4 @@
-import type { Block, BlockAngle, CalcBlock, GraphBlock } from "./types";
+import type { Block, BlockAngle, CalcBlock, GraphBlock, SchemaBlock } from "./types";
 import { docImageIds } from "./text/doc";
 
 /**
@@ -8,7 +8,7 @@ import { docImageIds } from "./text/doc";
  * recalcule et redessine sur place.
  */
 
-export type LiveBlock = CalcBlock | GraphBlock;
+export type LiveBlock = CalcBlock | GraphBlock | SchemaBlock;
 
 /** Largeur par defaut d'une courbe dans le texte, en unites de page. */
 export const GRAPH_WIDTH = 560;
@@ -17,7 +17,7 @@ export const GRAPH_MIN_WIDTH = 240;
 export const GRAPH_RATIO = 0.5;
 
 export function isLiveBlock(b: Block): b is LiveBlock {
-  return b.type === "calc" || b.type === "graph";
+  return b.type === "calc" || b.type === "graph" || b.type === "schema";
 }
 
 /**
@@ -26,7 +26,7 @@ export function isLiveBlock(b: Block): b is LiveBlock {
  * pas (le texte a son propre Ctrl+Z).
  */
 export function isInTextBlock(b: Block): boolean {
-  return (b.type === "text" || b.type === "image" || b.type === "calc" || b.type === "graph") && !b.rect;
+  return (b.type === "text" || b.type === "image" || b.type === "calc" || b.type === "graph" || b.type === "schema") && !b.rect;
 }
 
 /**
@@ -41,7 +41,7 @@ export function orphanLiveIds(blocks: readonly Block[], textContent: string): st
 
 /** Nom court d'un bloc vivant, pour les messages. */
 export function liveLabel(b: LiveBlock): string {
-  return b.type === "calc" ? "Calcul" : "Courbe";
+  return b.type === "calc" ? "Calcul" : b.type === "graph" ? "Courbe" : "Schéma";
 }
 
 /** Ce que la calculatrice renvoie a « Mettre à jour » ou « Envoyer ». */

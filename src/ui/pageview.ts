@@ -8,11 +8,13 @@ import { cachedBounds, padBounds, strokeBounds, unionBounds } from "../core/ink/
 import { growForStroke, sheetHeight, shrinkToInk } from "../core/ink/sheet";
 import type {
   Block, ImageBlock, InkBlock, InkColor, MathBlock, Page, Stroke, TextBlock,
+  SchemaBlock,
 } from "../core/types";
 import {
   GRAPH_RATIO, applyCalcSpec, applyGraphSpec, graphWidth, isLiveBlock, liveLabel, orphanLiveIds,
   type CalcSpec, type GraphSpec, type LiveBlock,
 } from "../core/liveblock";
+import { schemaWidth } from "../core/schema/model";
 import { isFutureVersion } from "../core/types";
 import { dayLabel } from "../core/nav";
 import { MAX_DEPTH, childPath, depthOf, dividerLabel } from "../core/dividers";
@@ -1346,7 +1348,7 @@ export class PageView {
         return {
           node, ready,
           label: liveLabel(b),
-          ...(b.type === "graph" ? { width: graphWidth(b, PAGE_W) } : {}),
+          ...(b.type === "graph" ? { width: graphWidth(b, PAGE_W) } : b.type === "schema" ? { width: schemaWidth(b) } : {}),
         };
       },
       openLive: (id) => this.openLive(loaded, id),
@@ -3458,7 +3460,8 @@ export class PageView {
         return place(box, block.rect ?? { x: 40, y: 40, w: PAGE_W - 80, h: 60 });
       }
       case "calc":
-      case "graph": {
+      case "graph":
+      case "schema": {
         // Pose dans le texte : c'est TextDoc qui l'affiche. Un ancien bloc
         // flottant (rect) y est range au premier affichage (adoptFloatingImages).
         if (!block.rect) return null;
@@ -3732,6 +3735,12 @@ export class PageView {
    * il suit le zoom comme le texte. mathjs est charge a la demande.
    */
   private renderLive(b: LiveBlock): { node: HTMLElement; ready: Promise<void> } {
+    // Schema : dessine depuis le schema lui-meme (pieces, fils, annotations).
+    if (b.type === "schema") {
+      const node = el("div", { class: "live-schema" });
+      const ready = import("./schema-view").then((m) => m.paintSchema(node, b)).catch(() => undefined);
+      return { node, ready };
+    }
     if (b.type === "calc") {
       const node = el("span", { class: "live-calc" }, `${b.expr} = ${b.result ?? ""}`);
       const ready = import("../core/calc/live").then(({ calcTex }) => {
@@ -3780,8 +3789,11 @@ export class PageView {
   /** Appui sur un calcul ou une courbe : la calculatrice le rouvre (section 2). */
   private openLive(loaded: LoadedPage, id: string): void {
     const found = this.holderOf(loaded, id);
-    if (!found || !this.host.editLive) return;
+    if (!found) return;
     if (found.at.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
+    // Schema : l'editeur s'ouvre par-dessus le bloc, sur la page.
+    if (found.block.type === "schema") { void this.openSchema(found.at, found.block); return; }
+    if (!this.host.editLive) return;
     this.host.editLive(found.block, (spec) => this.updateLive(loaded, id, spec));
   }
 
@@ -3801,11 +3813,43 @@ export class PageView {
   }
 
   /**
+   * Schema : l'editeur s'ouvre par-dessus le bloc. Chaque modification
+   * redessine le bloc et s'enregistre ; un schema laisse vide a la
+   * fermeture est retire de la page.
+   */
+  private async openSchema(at: LoadedPage, block: SchemaBlock): Promise<void> {
+    const fig = at.doc.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(block.id)}"]`);
+    if (!fig) return;
+    const m = await import("./schema-view");
+    m.openSchemaEditor({
+      block, anchor: fig,
+      onChange: () => { at.doc.refreshLive(block.id); this.fitSheet(at); this.queueSave(at); },
+      onClose: () => {
+        if (!block.parts.length && !block.wires.length && !(block.notes ?? []).length) at.doc.removeLive(block.id);
+        at.doc.refreshLive(block.id);
+        this.fitSheet(at);
+        this.queueSave(at);
+        at.doc.focus();
+      },
+    });
+  }
+
+  /** Nouveau schema au curseur du texte (ou sous le dernier contenu), editeur ouvert. */
+  insertSchema(): boolean {
+    const loaded = this.activePage();
+    if (!loaded) return false;
+    const block: SchemaBlock = { id: uuid(), type: "schema", parts: [], wires: [] };
+    if (!this.insertLive(block, true)) return false;
+    void this.openSchema(loaded, block);
+    return true;
+  }
+
+  /**
    * Calcul ou courbe envoye par la calculatrice : dans la page en vue, au
    * curseur du texte s'il y en a un, sinon sous le dernier contenu (texte
    * et encre). Dans le texte, il ne recouvre jamais rien.
    */
-  insertLive(block: LiveBlock): boolean {
+  insertLive(block: LiveBlock, quiet = false): boolean {
     const loaded = this.activePage();
     if (!loaded) return false;
     if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
@@ -3824,7 +3868,7 @@ export class PageView {
     }
     this.fitSheet(loaded);
     fig.scrollIntoView({ block: "nearest" });
-    toast(block.type === "graph" ? "Courbe posée dans la page : un appui la rouvre" : "Calcul posé dans la page : un appui le rouvre");
+    if (!quiet) toast(block.type === "graph" ? "Courbe posée dans la page : un appui la rouvre" : "Calcul posé dans la page : un appui le rouvre");
     return true;
   }
 

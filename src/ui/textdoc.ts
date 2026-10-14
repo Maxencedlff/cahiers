@@ -2011,6 +2011,16 @@ export class TextDoc {
   }
 
   /** Retire la photo du texte, avec « Annuler » (le fichier reste dans assets/). */
+  /** Retire un bloc vivant sans message (schema laisse vide a la fermeture de l'editeur). */
+  removeLive(id: string): void {
+    const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+    if (!fig) return;
+    const next = fig.nextSibling;
+    if (next?.nodeType === Node.TEXT_NODE && next.textContent === "\u200b") next.remove();
+    fig.remove();
+    this.emit();
+  }
+
   private removeImage(fig: HTMLElement, message?: string): void {
     this.selectImage(null);
     const parent = fig.parentNode;

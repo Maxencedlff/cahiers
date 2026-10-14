@@ -71,7 +71,8 @@ export type BlockType =
   | "calc"
   | "graph"
   | "link"
-  | "flag";
+  | "flag"
+  | "schema";
 
 interface BlockBase {
   id: string;
@@ -245,6 +246,54 @@ export interface GraphBlock extends BlockBase {
   width?: number;
 }
 
+/**
+ * Schema electrique ou schema-bloc (core/schema) : pose dans le texte comme
+ * une courbe (jeton `![](img:<id>)`), un appui l'ouvre a l'editeur. Garde
+ * le schema lui-meme (pieces, fils, annotations sur une grille), jamais une
+ * image. Coordonnees en unites de grille (core/schema/symbols.ts GRID).
+ */
+export interface SchemaBlock extends BlockBase {
+  type: "schema";
+  parts: SchemaPart[];
+  /** Fils : polylignes a angles droits, points [x0, y0, x1, y1, ...]. */
+  wires: { pts: number[] }[];
+  notes?: SchemaNote[];
+  /** Largeur dans le texte, en unites de page (comme ImageBlock.width). Absent = taille naturelle. */
+  width?: number;
+}
+
+export interface SchemaPart {
+  id: string;
+  /** Cle du symbole (core/schema/symbols.ts SymKey). */
+  sym: string;
+  /** Coin haut-gauche de la boite tournee, en unites de grille. */
+  x: number;
+  y: number;
+  rot?: 0 | 90 | 180 | 270;
+  mirror?: boolean;
+  /** Nom tape (« R1 », « Rf »), lu par la grammaire des formules a l'affichage. */
+  name?: string;
+  /** Valeur tapee (« 10k », « K/(1+tau p) » pour un bloc). */
+  value?: string;
+}
+
+/**
+ * Annotation : fleche de tension le long d'une piece (`u`, convention
+ * recepteur, `flip` l'inverse), fleche de courant sur un fil (`i`, au
+ * point x, y, vers `dir`), ou texte libre (`text`).
+ */
+export interface SchemaNote {
+  kind: "u" | "i" | "text";
+  part?: string;
+  x?: number;
+  y?: number;
+  dir?: "right" | "left" | "up" | "down";
+  flip?: boolean;
+  /** Fleche de tension : de l'autre cote de la piece que par defaut. */
+  other?: boolean;
+  label: string;
+}
+
 export interface LinkBlock extends BlockBase {
   type: "link";
   /** "Maths/Cours/0012#<blockId>" : chemin lisible au moment de la pose, repli seulement. */
@@ -280,7 +329,8 @@ export type Block =
   | CalcBlock
   | GraphBlock
   | LinkBlock
-  | FlagBlock;
+  | FlagBlock
+  | SchemaBlock;
 
 export interface Page {
   /**

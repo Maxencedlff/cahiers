@@ -212,6 +212,11 @@ export function searchableText(b: Block): string {
     case "flag":  return b.note === DEFAULT_FLAG_NOTE ? "" : b.note;
     // Texte de la page du PDF, extrait par pdf.js a l'import (core/pdf).
     case "pdf":   return typeof b.text === "string" ? b.text : "";
+    // Schema : les noms et valeurs des pieces, et les annotations (« R1 10k », « u_C »).
+    case "schema": return [
+      ...(Array.isArray(b.parts) ? b.parts : []).flatMap((p) => [p.name ?? "", p.value ?? ""]),
+      ...(b.notes ?? []).map((n) => n.label),
+    ].filter(Boolean).join(" ");
   }
 }
 
