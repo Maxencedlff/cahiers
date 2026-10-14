@@ -5129,7 +5129,9 @@ export class PageView {
         if (out.added) toast(`${label} modifiée sur l'autre PC : son encre a rejoint la tienne, rien n'est perdu.`, "info", 7000);
       } else if (out.kind === "replaced") {
         if (!p.dead) await this.reloadPage(p);
-        toast(`${label} modifiée sur l'autre PC : sa version est gardée et ton encre y est ajoutée.`, "info", 8000);
+        toast(out.textMerged
+          ? `${label} modifiée sur l'autre PC en même temps : les deux textes sont réunis, rien n'est perdu.`
+          : `${label} modifiée sur l'autre PC : sa version est gardée et ton encre y est ajoutée.`, "info", 8000);
       } else if (out.kind === "conflict") {
         copies = true;
         if (!out.page) rerender = true;

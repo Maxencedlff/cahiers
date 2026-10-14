@@ -10,7 +10,7 @@ import { joinWords } from "../ink/words";
 import { indexPage, type FlagHit, type PageIndex } from "./search";
 import { parseConflictName, renumberConflictName } from "../sync";
 import {
-  conflictCopyName, contentKey, hashText, mergedPage, planExternal, type DiskBase,
+  conflictCopyName, diskBaseOf, hashText, mergeText, mergedPage, planExternal, type DiskBase,
 } from "../writeguard";
 import {
   VERSIONS_DIR, parseVersionName, planVersionPurge, shouldSnapshot, trashToPurge, versionFileName,
@@ -118,7 +118,7 @@ export interface NotebookSummary {
 export type WriteOutcome =
   | { kind: "written"; n: number }
   | { kind: "merged"; n: number; disk: Page; added: number }
-  | { kind: "replaced"; n: number; page: Page }
+  | { kind: "replaced"; n: number; page: Page; textMerged?: boolean }
   | { kind: "conflict"; n: number; copy: string; page: Page | null };
 
 /** Version gardee d'une page (`.versions/<id>/<horodatage>.json`). */
@@ -661,7 +661,7 @@ export class Repo {
     if (!track || !this.fs.readTextStat) return migratePage(JSON.parse(await this.fs.readText(path)) as Page);
     const { content, stat } = await this.fs.readTextStat(path);
     const page = migratePage(JSON.parse(content) as Page);
-    this.bases.set(page, { stat, hash: hashText(content), key: contentKey(page) });
+    this.bases.set(page, { stat, ...diskBaseOf(page, hashText(content)) });
     return page;
   }
 
@@ -744,7 +744,7 @@ export class Repo {
       if (expect) await this.snapshotBefore(dir, page.id, path, false);
       const res = await fs.writeTextIf(path, content, expect);
       if (res.ok) {
-        this.bases.set(page, { stat: res.stat, hash: hashText(content), key: contentKey(page) });
+        this.bases.set(page, { stat: res.stat, ...diskBaseOf(page, hashText(content)) });
         return { kind: "written", n };
       }
       if (!res.stat) {
@@ -790,8 +790,20 @@ export class Repo {
       const copy = await this.writeConflictCopy(dir, divider, n, page);
       return { outcome: { kind: "conflict", n, copy, page: disk }, stat };
     }
-    const diskBase: Base = { stat, hash: hashText(raw), key: contentKey(disk) };
+    const diskBase: Base = { stat, ...diskBaseOf(disk, hashText(raw)) };
     const plan = planExternal(base, page, disk);
+    // Les deux ont tape : texte fusionne ligne par ligne s'ils n'ont pas
+    // touche aux memes lignes (mergeText), sinon copie de conflit.
+    const textMerged = plan === "conflict" ? mergeText(base, page, disk) : null;
+    if (textMerged) {
+      textMerged.page.modified = nowIso();
+      const content = serializePage(textMerged.page);
+      await this.snapshotBefore(dir, page.id, path, false);
+      const res = await fs.writeTextIf(path, content, stat);
+      if (!res.ok) return { stat: res.stat };
+      this.bases.set(textMerged.page, { stat: res.stat, ...diskBaseOf(textMerged.page, hashText(content)) });
+      return { outcome: { kind: "replaced", n, page: textMerged.page, textMerged: true }, stat };
+    }
     if (plan === "conflict") {
       const copy = await this.writeConflictCopy(dir, divider, n, page);
       this.bases.set(disk, diskBase);
@@ -804,7 +816,7 @@ export class Repo {
     const res = await fs.writeTextIf(path, content, stat);
     // Change encore entre-temps : on recommence depuis le debut.
     if (!res.ok) return { stat: res.stat };
-    const written: Base = { stat: res.stat, hash: hashText(content), key: contentKey(merged.page) };
+    const written: Base = { stat: res.stat, ...diskBaseOf(merged.page, hashText(content)) };
     if (plan === "ours") {
       // La vue reprend l'encre du disque : sa page vaut alors celle ecrite.
       this.bases.set(page, written);

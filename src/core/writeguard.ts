@@ -9,8 +9,9 @@
  * une copie de conflit `NNNN.page-<PC>.json` et la page affiche celle du
  * disque.
  */
-import type { Block, Page } from "./types";
+import type { Block, Page, TextBlock } from "./types";
 import { mergeInk } from "./sync";
+import { merge3 } from "./textmerge";
 
 /** Empreinte d'un texte (cyrb53, 53 bits) et sa longueur. */
 export function hashText(s: string): string {
@@ -63,6 +64,29 @@ export interface DiskBase {
   hash: string;
   /** contentKey de la page a ce moment. */
   key: string;
+  /** Texte tape de la page a ce moment (absent : pas de texte), pour mergeText. */
+  text?: string;
+  /** restKey de la page a ce moment. */
+  rest?: string;
+}
+
+/** Texte tape de la page (le bloc texte sans cadre, comme PageView.bodyText). */
+export function bodyOf(page: Page): TextBlock | undefined {
+  return (Array.isArray(page.blocks) ? page.blocks : [])
+    .find((b): b is TextBlock => !!b && b.type === "text" && !b.rect);
+}
+
+/** contentKey sans le texte tape : tout le reste (photos, blocs, reperes...). */
+export function restKey(page: Page): string {
+  const body = bodyOf(page);
+  if (!body) return contentKey(page);
+  return contentKey({ ...page, blocks: page.blocks.map((b) => (b === body ? { ...body, content: "" } : b)) });
+}
+
+/** Ce qu'on retient d'une version lue ou ecrite (`hash` : du fichier exact). */
+export function diskBaseOf(page: Page, hash: string): DiskBase {
+  const body = bodyOf(page);
+  return { hash, key: contentKey(page), rest: restKey(page), ...(body ? { text: body.content } : {}) };
 }
 
 /**
@@ -95,6 +119,33 @@ export function mergedPage(plan: Exclude<ExternalPlan, "conflict">, ours: Page, 
   const [keep, other] = plan === "ours" ? [ours, disk] : [disk, ours];
   const r = mergeInk(keep, other);
   const page: Page = { ...keep, blocks: r.blocks };
+  if (r.height != null) page.height = r.height;
+  return { page, added: r.added };
+}
+
+/**
+ * Les deux cotes ont change autre chose que l'encre (planExternal rend
+ * `conflict`) : si c'est surtout le texte tape, on le fusionne a trois
+ * (merge3, base = version lue). Le reste (photos, blocs...) doit n'avoir
+ * change que d'un cote au plus ; l'encre est reunie comme pour `ours`.
+ * Null : vraie collision, copie de conflit comme avant.
+ */
+export function mergeText(base: DiskBase | null, ours: Page, disk: Page): { page: Page; added: number } | null {
+  if (!base || base.text === undefined || base.rest === undefined) return null;
+  const ob = bodyOf(ours), db = bodyOf(disk);
+  if (!ob || !db || ob.id !== db.id) return null;
+  const ro = restKey(ours), rd = restKey(disk);
+  let keepOurs: boolean;
+  if (ro === rd || rd === base.rest) keepOurs = true;
+  else if (ro === base.rest) keepOurs = false;
+  else return null;
+  // Le disque ne fait qu'ajouter : rien de ce qu'on a ne disparait sans copie.
+  const text = merge3(base.text, ob.content, db.content, { theirsAddOnly: true });
+  if (text === null) return null;
+  const [keep, other] = keepOurs ? [ours, disk] : [disk, ours];
+  const r = mergeInk(keep, other);
+  const blocks = r.blocks.map((b) => (b.type === "text" && b.id === ob.id && !b.rect ? { ...b, content: text } : b));
+  const page: Page = { ...keep, blocks };
   if (r.height != null) page.height = r.height;
   return { page, added: r.added };
 }
