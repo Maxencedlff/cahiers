@@ -1277,6 +1277,9 @@ export function glueDen(s: string): string {
     if (k < 0) { out += s.slice(i); break; }
     out += s.slice(i, k + 1);
     let j = k + 1;
+    // « / 1+K/p » : un espace juste apres la barre ne coupe pas le denominateur.
+    while (j < s.length && /\s/.test(s[j])) j++;
+    out += s.slice(k + 1, j);
     const start = j;
     // Un terme : jusqu'au premier operateur ou blanc hors parentheses ; un
     // signe juste apres ^, _ ou ( en fait partie (« x^-2 »).

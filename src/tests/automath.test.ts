@@ -640,6 +640,7 @@ describe("denominateur tape colle : + et - y restent", () => {
     expect(glueDen("2/p+2")).toBe("2/(p+2)");
     // Fraction collee dans le denominateur ; parentheses qui delimitent deja.
     expect(glueDen("1/1+1/x")).toBe("1/(1+1/x)");
+    expect(glueDen("K/(p(p+3)) / 1+K/(p(p+3))")).toBe("K/(p(p+3)) / (1+K/(p(p+3)))");
     expect(glueDen("1/x+1/y")).toBe("1/(x+1/y)");
     expect(glueDen("1/(p+1)+2")).toBe("1/(p+1)+2");
     expect(glueDen("1/(p+1)(p+2)+3")).toBe("1/(p+1)(p+2)+3");
