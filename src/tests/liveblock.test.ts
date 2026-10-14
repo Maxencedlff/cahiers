@@ -87,7 +87,7 @@ describe("mise a jour sur place", () => {
 
 describe("rendu LaTeX des blocs (toLatex, jamais le texte brut)", () => {
   it("7*6 et sqrt(2) relus par le moteur", () => {
-    expect(calcTex("7*6", "42")).toBe("7\\cdot6 = 42");
+    expect(calcTex("7*6", "42")).toBe("7 \\times 6 = 42");
     expect(exprTex("sqrt(2)")).toContain("\\sqrt{2}");
     expect(exprTex("sqrt(2)")).not.toContain("sqrt(");
   });

@@ -167,7 +167,7 @@ describe("blocs calcul de la page : valeur lisible", () => {
   it("infini, complexe avec j", () => {
     expect(resultTex("Infinity")).toBe("\\infty");
     expect(calcTex("(3+4j)*(1-2j)", "11 - 2i")).toMatch(/= 11 - 2\\,j$/);
-    expect(calcTex("7*6", "42")).toBe("7\\cdot6 = 42");
+    expect(calcTex("7*6", "42")).toBe("7 \\times 6 = 42");
   });
 });
 

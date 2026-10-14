@@ -757,7 +757,19 @@ export function frTexDecimal(tex: string): string {
 
 /** Notation francaise des reciproques : arctan, pas tan⁻¹. */
 export function texArc(tex: string): string {
-  return tex.replace(/\\(sin|cos|tan)\^\{-1\}/g, "\\arc$1");
+  return niceProducts(tex.replace(/\\(sin|cos|tan)\^\{-1\}/g, "\\arc$1"));
+}
+
+/**
+ * Produits comme sur une copie, jamais le point median de mathjs : × entre
+ * un nombre et ce qui suit ou devant un nombre (« 2 × 3 », « a × 2 »),
+ * sinon un petit espace (« 2p », « R C p », « 2(p + 1) »).
+ */
+export function niceProducts(tex: string): string {
+  return tex
+    .replace(/\s*\\cdot\s*(?=\{?\s*-?\d|\\frac)/g, " \\times ")
+    .replace(/(\d\}?)\s*\\cdot\s*(?=[A-Za-z\\({])/g, "$1\\,")
+    .replace(/\s*\\cdot\s*/g, "\\,");
 }
 
 /**

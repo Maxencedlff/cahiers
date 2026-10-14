@@ -438,7 +438,11 @@ class Parser {
         this.seenOp = true;
         const rhs = this.unary();
         if (!rhs) { this.i = save; this.seenOp = seen; break; }
-        cur = { tex: `${cur.tex} \\cdot ${rhs.tex}`, ops: cur.ops + rhs.ops + 1, vars: cur.vars + rhs.vars };
+        // Comme sur une copie : × devant un nombre ou une fraction (« 2 × 3 »,
+        // « a × 2 », « 2 × 1/3 »), sinon les facteurs se suivent (« 3p »,
+        // « m a », « 2(p + 1) »). Jamais le point median.
+        const times = /^(?:\d|\\frac|-)/.test(rhs.tex.trim());
+        cur = { tex: `${cur.tex}${times ? " \\times " : "\\,"}${rhs.tex}`, ops: cur.ops + rhs.ops + 1, vars: cur.vars + rhs.vars };
         continue;
       }
       // Produit implicite : colle ("2R", "R(Vz"), ou derriere un nombre ou
@@ -1026,7 +1030,7 @@ function numericOk(src: string, tex: string): boolean {
   const s = src.replace(/\s+/g, "");
   if (/^\d+\/\d+\/\d+$/.test(s) || /^\d{2}\/\d{2}$/.test(s) || /^0\d\//.test(s)) return false;
   // Intervalle de nombres ("]0 ; 1[", "[0, +inf[") : des maths aussi.
-  return /\\frac|\^|\\cdot|=|<|>|\\leq|\\geq|\\approx|\\neq|\\ll|\\gg|\\to|Rightarrow|\\left[[\]]/.test(tex);
+  return /\\frac|\^|\\cdot|\\times|\\,|=|<|>|\\leq|\\geq|\\approx|\\neq|\\ll|\\gg|\\to|Rightarrow|\\left[[\]]/.test(tex);
 }
 
 /** Paires a barre oblique qui ne sont pas des fractions (E/S, I/O). */

@@ -59,9 +59,9 @@ describe("formules automatiques", () => {
   it("fractions et produits", () => {
     expect(one("Is = Vs/Ru").tex).toBe("I_s = \\frac{V_s}{R_u}");
     expect(one("iD = (Vz-Vbe)/(beta.Ru) - (vbatt-Vz)/R").tex)
-      .toBe("i_D = \\frac{V_z - V_{be}}{\\beta \\cdot R_u} - \\frac{v_{batt} - V_z}{R}");
+      .toBe("i_D = \\frac{V_z - V_{be}}{\\beta\\,R_u} - \\frac{v_{batt} - V_z}{R}");
     expect(one("Vbatt > Vz + R.(Vz-Vbe)/(beta Ru)").tex)
-      .toBe("V_{batt} > V_z + \\frac{R \\cdot \\left(V_z - V_{be}\\right)}{\\beta\\,R_u}");
+      .toBe("V_{batt} > V_z + \\frac{R\\,\\left(V_z - V_{be}\\right)}{\\beta\\,R_u}");
   });
 
   it("formule au milieu d'une phrase", () => {
@@ -111,13 +111,13 @@ describe("formules automatiques", () => {
   it("entrees d'AOP en exposant", () => {
     expect(one("V+ = V-").tex).toBe("V^{+} = V^{-}");
     expect(one("eps = V+ - V-").tex).toBe("\\varepsilon = V^{+} - V^{-}");
-    expect(one("V+ = Vs.R1/(R1+R2)").tex).toBe("V^{+} = \\frac{V_s \\cdot R_1}{R_1 + R_2}");
+    expect(one("V+ = Vs.R1/(R1+R2)").tex).toBe("V^{+} = \\frac{V_s\\,R_1}{R_1 + R_2}");
     expect(one("Vs = V+ ").tex).toBe("V_s = V^{+}");
     expect(one("a = b+c").tex).not.toContain("^");
   });
 
   it("pi et eps en minuscules seulement", () => {
-    expect(one("P = pi.R").tex).toBe("P = \\pi \\cdot R");
+    expect(one("P = pi.R").tex).toBe("P = \\pi\\,R");
     expect(one("P = PI").tex).toBe("P = P_I");
     expect(one("P = Pi").tex).toBe("P = P_i");
     expect(one("eps = 0").tex).toBe("\\varepsilon = 0");
@@ -184,7 +184,7 @@ describe("variables seules : quand les convertir", () => {
     for (const part of ["iD", "iD =", "iD = (Vz", "iD = (Vz -"]) {
       expect(findFormulas(part, "space"), part).toEqual([]);
     }
-    expect(one("iD = (Vz - Vbe)/(beta.Ru)").tex).toBe("i_D = \\frac{V_z - V_{be}}{\\beta \\cdot R_u}");
+    expect(one("iD = (Vz - Vbe)/(beta.Ru)").tex).toBe("i_D = \\frac{V_z - V_{be}}{\\beta\\,R_u}");
   });
   it("au mot suivant ou a l'Entree", () => {
     expect(findFormulas("Vz", "space")).toEqual([]);
@@ -344,7 +344,7 @@ describe("relecture d'une ligne deja en partie en forme", () => {
 describe("noms usuels a deux lettres : indices, pas produits", () => {
   it("frequence de coupure dans une phrase", () => {
     const f = findFormulas("Frequence de coupure fc = 1/(2.pi.R.C)");
-    expect(f.map((x) => x.latex)).toEqual(["f_c = \\frac{1}{2 \\cdot \\pi \\cdot R \\cdot C}"]);
+    expect(f.map((x) => x.latex)).toEqual(["f_c = \\frac{1}{2\\,\\pi\\,R\\,C}"]);
   });
   it("frequences, periodes, pulsations", () => {
     expect(one("fc = 1/(2 pi R C)").tex).toBe("f_c = \\frac{1}{2\\,\\pi\\,R\\,C}");
@@ -353,20 +353,20 @@ describe("noms usuels a deux lettres : indices, pas produits", () => {
     expect(one("Fe = 1/Te").tex).toBe("F_e = \\frac{1}{T_e}");
     expect(one("Te = 1/Fe").tex).toBe("T_e = \\frac{1}{F_e}");
     expect(one("Ts = 2 Te").tex).toBe("T_s = 2\\,T_e");
-    expect(one("w0 = 2.pi.f0").tex).toBe("\\omega_0 = 2 \\cdot \\pi \\cdot f_0");
-    expect(one("ω0 = 1/sqrt(L.C)").tex).toBe("\\omega_0 = \\frac{1}{\\sqrt{L \\cdot C}}");
+    expect(one("w0 = 2.pi.f0").tex).toBe("\\omega_0 = 2\\,\\pi\\,f_0");
+    expect(one("ω0 = 1/sqrt(L.C)").tex).toBe("\\omega_0 = \\frac{1}{\\sqrt{L\\,C}}");
     expect(one("ωc = 1/τ").tex).toBe("\\omega_c = \\frac{1}{\\tau}");
-    expect(one("τ = R.C").tex).toBe("\\tau = R \\cdot C");
+    expect(one("τ = R.C").tex).toBe("\\tau = R\\,C");
   });
   it("alimentations, Thevenin, transistor", () => {
     expect(one("Vcc - Vee = 30 V").tex).toBe("V_{cc} - V_{ee} = 30\\,\\mathrm{V}");
     expect(one("Vdd > Vss").tex).toBe("V_{dd} > V_{ss}");
-    expect(one("Eth = Rth.Icc").tex).toBe("E_{th} = R_{th} \\cdot I_{cc}");
+    expect(one("Eth = Rth.Icc").tex).toBe("E_{th} = R_{th}\\,I_{cc}");
     expect(one("Uab = Vab").tex).toBe("U_{ab} = V_{ab}");
-    expect(one("Ic = beta.Ib").tex).toBe("I_c = \\beta \\cdot I_b");
+    expect(one("Ic = beta.Ib").tex).toBe("I_c = \\beta\\,I_b");
     expect(one("Ie = Ic + Ib").tex).toBe("I_e = I_c + I_b");
-    expect(one("Vce = Vcc - Rc.Ic").tex).toBe("V_{ce} = V_{cc} - R_c \\cdot I_c");
-    expect(one("Vbe = Re.Ie - Rb.Ib").tex).toBe("V_{be} = R_e \\cdot I_e - R_b \\cdot I_b");
+    expect(one("Vce = Vcc - Rc.Ic").tex).toBe("V_{ce} = V_{cc} - R_c\\,I_c");
+    expect(one("Vbe = Re.Ie - Rb.Ib").tex).toBe("V_{be} = R_e\\,I_e - R_b\\,I_b");
   });
   it("impedances et gains", () => {
     expect(one("Zin = Ze").tex).toBe("Z_{in} = Z_e");
@@ -603,7 +603,7 @@ describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
     expect(one("int_0^T A e^(-pt) dt").tex).toBe("\\int_{0}^{T} A\\,e^{-p\\,t}\\,\\mathrm{d}t");
     expect(one("i = C dv/dt").tex).toBe("i = C\\,\\frac{\\mathrm{d}v}{\\mathrm{d}t}");
     expect(one("E = m c^2").tex).toBe("E = m\\,c^{2}");
-    expect(one("vs = vbatt . Ru/(R + Ru)").tex).toBe("v_s = \\frac{v_{batt} \\cdot R_u}{R + R_u}");
+    expect(one("vs = vbatt . Ru/(R + Ru)").tex).toBe("v_s = \\frac{v_{batt}\\,R_u}{R + R_u}");
     // Point colle au mot d'avant : fin de phrase.
     expect(findFormulas("on a x = 2. Ensuite y = 3").map((f) => f.latex)).toEqual(["x = 2", "y = 3"]);
     expect(one("dvs/dt = ic/C").tex).toBe("\\frac{\\mathrm{d}v_s}{\\mathrm{d}t} = \\frac{i_c}{C}");
