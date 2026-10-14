@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  cleanMathLive, findFormulas, glueDen, greekWordAtEnd, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
+  cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveComplete, liveFormula, latexToSource, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -298,7 +298,7 @@ export class TextDoc {
    * formule finit au curseur ; sinon ("I1" mis en forme a l'Espace apres
    * "traverse"), Retour arriere efface normalement et seul Ctrl+Z l'annule.
    */
-  private lastAuto: { eqs: HTMLElement[]; greek?: GreekDone | null; expectSpace: boolean; atCaret: boolean } | null = null;
+  private lastAuto: { eqs: HTMLElement[]; greek?: GreekDone | null; expectSpace: boolean; atCaret: boolean; pause?: boolean } | null = null;
   /**
    * Formule en cours de frappe derriere un "/" : le texte tape (`src`, depuis
    * le debut de la formule) se dessine en formule a chaque touche, lu par le
@@ -614,7 +614,7 @@ export class TextDoc {
         return;
       }
       const eq = (e.target as HTMLElement).closest?.(".eq");
-      if (eq instanceof HTMLElement && this.root.contains(eq)) this.editEq(eq, "end");
+      if (eq instanceof HTMLElement && this.root.contains(eq)) this.editEq(eq, { x: e.clientX, y: e.clientY });
     });
     // Lien au stylet ou au doigt : un appui le suit, sans laisser d'encre
     // (le stylet ne part pas a la page). Le doigt qui glisse fait defiler.
@@ -719,7 +719,7 @@ export class TextDoc {
         const sel = document.getSelection();
         if (this.field || this.live || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
         const made = this.convertLine("pause");
-        if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret };
+        if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret, pause: true };
         this.scheduleGhost();
       }, 900);
     }
@@ -795,7 +795,12 @@ export class TextDoc {
     if (!lv) return;
     const next = lv.eq.nextSibling;
     let t: Text;
-    if (next instanceof Text) { t = next; t.insertData(0, "\u200b" + rest); }
+    if (next instanceof Text) {
+      t = next;
+      // Deja une ancre en tete : on n'en ajoute pas une seconde (touche morte).
+      if (t.data.startsWith("\u200b")) t.insertData(1, rest);
+      else t.insertData(0, "\u200b" + rest);
+    }
     else { t = document.createTextNode("\u200b" + rest); lv.eq.after(t); }
     document.getSelection()?.collapse(t, 1 + rest.length);
   }
@@ -867,6 +872,7 @@ export class TextDoc {
     this.live = null;
     if (!lv?.eq.isConnected) return;
     const raw = rawSpan(lv.src);
+    dropAnchorAfter(lv.eq);
     lv.eq.replaceWith(raw);
     this.caretBeside(raw, true);
     this.emit();
@@ -925,6 +931,7 @@ export class TextDoc {
     this.root.replaceChildren();
     const tokens = parseDoc(content);
     this.root.append(this.buildNodes(tokens));
+    this.leadAnchors();
     // Sans <br> final, une derniere ligne vide ne s'affiche pas.
     if (tokens[tokens.length - 1]?.kind === "br") this.root.append(el("br"));
     this.renumber(tokens);
@@ -1137,9 +1144,52 @@ export class TextDoc {
   }
 
   private emit(): void {
+    this.leadAnchors();
     const tokens = this.read();
     this.renumber(tokens);
     this.onChange(serializeDoc(tokens));
+  }
+
+  /** Rien d'ecrit entre le curseur et la fin de sa ligne (ancres ignorees). */
+  private lineEndsAtCaret(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return true;
+    const r = sel.getRangeAt(0);
+    let n: Node | null = r.startContainer;
+    if (n.nodeType === Node.TEXT_NODE) {
+      const after = (n.textContent ?? "").slice(r.startOffset).split("\n");
+      if (after[0].replace(/\u200b/g, "")) return false;
+      if (after.length > 1) return true;
+    } else {
+      n = n.childNodes[r.startOffset] ?? null;
+      if (n && n.nodeName !== "BR" && (n.textContent ?? "").replace(/\u200b/g, "")) return false;
+    }
+    for (let m = n?.nextSibling ?? null; m; m = m.nextSibling) {
+      if (m.nodeName === "BR" || isLine(m)) return true;
+      if (m.nodeType === Node.TEXT_NODE && /\n/.test(m.textContent ?? "")) return !(m.textContent ?? "").split("\n")[0].replace(/\u200b/g, "");
+      if ((m.textContent ?? "").replace(/\u200b/g, "") || (m instanceof HTMLElement && m.classList.contains("eq"))) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Ancre devant toute formule qui n'a pas de texte juste avant (debut de
+   * ligne, apres un saut, une photo ou une autre formule) : sans elle, Debut,
+   * ↑/↓ et Fin n'ont pas de place avant la formule, le curseur entrait dans
+   * le KaTeX (frappe perdue) ou passait derriere. Les plages de la
+   * selection suivent l'insertion d'elles-memes.
+   */
+  private leadAnchors(): void {
+    for (const eq of Array.from(this.root.querySelectorAll<HTMLElement>(".eq"))) {
+      if (eq.parentElement?.closest(".eq")) continue;
+      const prev = eq.previousSibling;
+      const bare = !prev
+        || prev.nodeName === "BR"
+        // Saut tape (Entree = "\n" dans le texte) juste avant : debut de ligne aussi.
+        || (prev instanceof Text && prev.data.endsWith("\n"))
+        || (prev instanceof HTMLElement && (prev.classList.contains("eq") || prev.classList.contains("doc-img") || isLine(prev)));
+      if (bare) eq.before(anchor());
+    }
   }
 
   /* ---------------- curseur ---------------- */
@@ -2554,7 +2604,7 @@ export class TextDoc {
    * Rend une formule figee editable. `at` : ou poser le curseur dedans.
    * `template` : LaTeX MathLive a inserer aussitot (#? = case a remplir).
    */
-  private editEq(eq: HTMLElement, at: "start" | "end", template = ""): void {
+  private editEq(eq: HTMLElement, at: "start" | "end" | { x: number; y: number }, template = ""): void {
     if (editingDoc && editingDoc !== this) editingDoc.commit(null);
     if (this.field) this.commit(null);
     this.lastAuto = null;
@@ -2624,6 +2674,14 @@ export class TextDoc {
       this.emit();
     } else {
       mf.position = at === "start" ? 0 : mf.lastOffset;
+      // Clic : le curseur a l'endroit vise dans la formule, pas toujours a la fin.
+      if (typeof at === "object") {
+        requestAnimationFrame(() => {
+          if (this.field !== mf) return;
+          const o = mf.getOffsetFromPoint?.(at.x, at.y);
+          if (typeof o === "number" && o >= 0) mf.position = o;
+        });
+      }
     }
   }
 
@@ -2744,8 +2802,11 @@ export class TextDoc {
     if (DEN_EXIT.has(key) && endOfSlashDen(mf, this.slashFracs)) mf.executeCommand("moveAfterParent");
     // Entree : la formule se fige et on passe a la ligne, comme dans le texte.
     if (key === "Enter" && !shift) {
+      // Formule rouverte au milieu d'une ligne : Entree la valide seulement,
+      // sans couper la ligne (on venait la corriger).
+      const reopened = !!this.fieldOrigin;
       this.commit(true);
-      this.newLine();
+      if (!reopened || this.lineEndsAtCaret()) this.newLine();
       return true;
     }
     // Tab : case suivante tant qu'il en reste, sinon sortie de la formule.
@@ -2781,6 +2842,10 @@ export class TextDoc {
       range = sel?.rangeCount ? sel.getRangeAt(0) : null;
       if (!range) return;
     }
+
+    // Alt+= sur une selection, sur un bout redevenu texte, ou colle a ce
+    // qu'on vient de taper : mis en formule par la grammaire du texte.
+    if (!template && this.forceMath(range)) return;
 
     // Symbole seul (lettre grecque, fleche, relation) : rien a remplir. Il
     // se pose dans le texte et la frappe continue en texte, pas dans une
@@ -2829,6 +2894,104 @@ export class TextDoc {
       ? template.replace("#@", taken ? escapeTex(taken) : "#?")
       : escapeTex(taken);
     this.editEq(eq, "end", filled);
+  }
+
+  /**
+   * « Ceci est une formule » (Alt+=) : la selection, le bout de texte brut
+   * (`.raw`, laisse par un Ctrl+Z) touche par le curseur, ou la fin de ce
+   * qu'on vient de taper (mathTail) devient une formule. Vrai si fait ;
+   * sinon l'editeur s'ouvre comme avant. Ctrl+Z ou Retour arriere juste
+   * apres rendent le texte (lastAuto).
+   */
+  private forceMath(range: Range): boolean {
+    const done = (eq: HTMLElement) => {
+      if (eq.nextSibling?.nodeType !== Node.TEXT_NODE) eq.after(anchor());
+      this.caretBeside(eq, true);
+      this.lastAuto = { eqs: [eq], expectSpace: false, atCaret: true };
+      this.emit();
+      return true;
+    };
+    if (!range.collapsed) {
+      const frag = range.cloneContents();
+      if (frag.querySelector("br, .doc-img, .dl, .line")) return false;
+      for (const q of Array.from(frag.querySelectorAll<HTMLElement>(".eq"))) {
+        q.replaceWith(q.dataset.src ?? latexToSource(q.dataset.latex ?? "") ?? "");
+      }
+      const src = (frag.textContent ?? "").replace(/\u200b/g, "");
+      if (src.includes("\n")) return false;
+      const latex = forceFormula(src);
+      if (!latex) return false;
+      range.deleteContents();
+      const eq = makeEq(latex, src.trim());
+      range.insertNode(eq);
+      return done(eq);
+    }
+    // Bout de texte brut au curseur (dedans, ou juste avant lui).
+    let raw: HTMLElement | null = range.startContainer.parentElement?.closest<HTMLElement>(".raw") ?? null;
+    if (!raw) {
+      let prev: Node | null = range.startContainer.nodeType === Node.TEXT_NODE
+        ? ((range.startContainer.textContent ?? "").slice(0, range.startOffset).replace(/\u200b/g, "") ? null : range.startContainer.previousSibling)
+        : range.startContainer.childNodes[range.startOffset - 1] ?? null;
+      while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/\u200b/g, "")) prev = prev.previousSibling;
+      if (prev instanceof HTMLElement && prev.classList.contains("raw")) raw = prev;
+    }
+    if (raw && this.root.contains(raw)) {
+      const src = (raw.textContent ?? "").replace(/\u200b/g, "");
+      const latex = forceFormula(src);
+      if (!latex) return false;
+      const eq = makeEq(latex, src.trim());
+      raw.replaceWith(eq);
+      return done(eq);
+    }
+    // Fin de ce qu'on vient de taper, dans le noeud du curseur.
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || node.parentElement?.closest(".eq, code")) return false;
+    const before = (node.textContent ?? "").slice(0, range.startOffset).replace(/\u200b/g, " ");
+    const tail = mathTail(before);
+    if (!tail) return false;
+    const cut = document.createRange();
+    cut.setStart(node, tail.start);
+    cut.setEnd(node, range.startOffset);
+    const src = before.slice(tail.start).trim();
+    cut.deleteContents();
+    const eq = makeEq(tail.latex, src);
+    cut.insertNode(eq);
+    return done(eq);
+  }
+
+  /**
+   * « Ceci est du texte » (Alt+Maj+=) : la formule juste avant le curseur
+   * (ou selectionnee) redevient le texte tape, que plus rien ne remet en
+   * forme ; Alt+= le reconvertit. Vrai si fait.
+   */
+  toText(): boolean {
+    if (this.field || this.live) return false;
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer)) return false;
+    let eq: HTMLElement | null = null;
+    if (!r.collapsed) {
+      const inside = r.cloneContents().querySelectorAll(".eq");
+      if (inside.length === 1) {
+        eq = Array.from(this.root.querySelectorAll<HTMLElement>(".eq")).find((q) => r.intersectsNode(q)) ?? null;
+      }
+    } else {
+      let prev: Node | null = r.startContainer.nodeType === Node.TEXT_NODE
+        ? ((r.startContainer.textContent ?? "").slice(0, r.startOffset).replace(/\u200b/g, "") ? null : r.startContainer.previousSibling)
+        : r.startContainer.childNodes[r.startOffset - 1] ?? null;
+      while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/\u200b/g, "")) prev = prev.previousSibling;
+      if (prev instanceof HTMLElement && prev.classList.contains("eq") && !prev.classList.contains("live")) eq = prev;
+    }
+    if (!eq) return false;
+    const src = eq.dataset.src ?? latexToSource(eq.dataset.latex ?? "") ?? eq.dataset.latex ?? "";
+    const raw = rawSpan(src);
+    eq.replaceWith(raw);
+    this.lastAuto = null;
+    const t = raw.firstChild;
+    if (t) sel.collapse(t, (t.textContent ?? "").length);
+    this.emit();
+    return true;
   }
 
   /* ---------------- clavier ---------------- */
@@ -3136,6 +3299,19 @@ export class TextDoc {
     const last = this.lastAuto;
     this.lastAuto = null;
     if (!last) return false;
+    // Mise en forme faite a la pause, au curseur : on etait en train de
+    // taper. Retour arriere efface la derniere lettre, comme sans elle ; la
+    // formule redevient du texte normal, remis en forme a la prochaine pause.
+    const q = last.eqs[last.eqs.length - 1];
+    if (backspace && last.pause && last.atCaret && q && this.root.contains(q) && !last.greek) {
+      const src = q.dataset.src ?? "";
+      const t = document.createTextNode(src.slice(0, -1));
+      dropAnchorAfter(q);
+      q.replaceWith(t);
+      document.getSelection()?.collapse(t, t.length);
+      this.emit();
+      return true;
+    }
     let done = false;
     const g = last.greek;
     if (last.eqs.length && (!backspace || last.atCaret) && last.eqs.every((q) => this.root.contains(q))) {
@@ -3145,6 +3321,7 @@ export class TextDoc {
         if (g && i === last.eqs.length - 1 && !this.root.contains(g.node) && src.endsWith(g.char)) {
           src = src.slice(0, -1) + g.word;
         }
+        dropAnchorAfter(q);
         q.replaceWith(rawSpan(src));
       });
       done = true;
@@ -3548,6 +3725,13 @@ export class TextDoc {
 
   private onKey(e: KeyboardEvent): void {
     if (this.field) return;
+    // Retour arriere, fleches... : la mise en forme a la pause attendue ne
+    // vaut plus (elle avalait la lettre restante : « x^2 e » apres un ⌫).
+    if (this.idleTimer && (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey)
+      && !["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process"].includes(e.key)) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
     // Fraction en cours de frappe au "/" : ses touches d'abord.
     if (this.live) {
       if (!this.live.eq.isConnected) this.live = null;
@@ -3876,6 +4060,15 @@ function liftToRoot(r: Range, root: HTMLElement, dir: -1 | 1): void {
   if (dir < 0) r.setStartBefore(n);
   else r.setStartAfter(n);
   r.collapse(true);
+}
+
+/**
+ * Ancre (\u200b) qui suit une formule qu'on retire ou qu'on rend en texte :
+ * elle partirait sinon en touche morte (un ← ou un ⌫ sans effet visible).
+ */
+function dropAnchorAfter(eq: Node): void {
+  const n = eq.nextSibling;
+  if (n instanceof Text && n.data.startsWith("\u200b")) n.deleteData(0, 1);
 }
 
 function anchor(): Text {

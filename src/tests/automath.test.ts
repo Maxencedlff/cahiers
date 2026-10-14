@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  cleanMathLive, findFormulas, glueDen, greekWordAtEnd, latexToSource, liveComplete, liveFormula, liveSplit, mathWordsAtEnd, planLine,
+  cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, latexToSource, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type LinePart,
 } from "../core/text/automath";
 
@@ -638,6 +638,12 @@ describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
 describe("denominateur tape colle : + et - y restent", () => {
   it("glueDen", () => {
     expect(glueDen("2/p+2")).toBe("2/(p+2)");
+    // Fraction collee dans le denominateur ; parentheses qui delimitent deja.
+    expect(glueDen("1/1+1/x")).toBe("1/(1+1/x)");
+    expect(glueDen("1/x+1/y")).toBe("1/(x+1/y)");
+    expect(glueDen("1/(p+1)+2")).toBe("1/(p+1)+2");
+    expect(glueDen("1/(p+1)(p+2)+3")).toBe("1/(p+1)(p+2)+3");
+    expect(liveFormula(glueDen("1/1+1/x"))).toBe("\\frac{1}{1 + \\frac{1}{x}}");
     expect(glueDen("1/x^2-1")).toBe("1/(x^2-1)");
     expect(glueDen("1/2 + 1/3")).toBe("1/2 + 1/3");
     expect(glueDen("5/p(p^2+1)")).toBe("5/p(p^2+1)");
@@ -669,6 +675,16 @@ describe("fractions imbriquees (H/(1+H))", () => {
   });
 });
 
+describe("« / » en tete de ligne apres une majuscule", () => {
+  it("H/, G/, K/ ouvrent la fraction ; E/S, TCP/ non", () => {
+    expect(slashOpensFraction("H", "H")).toBe(true);
+    expect(slashOpensFraction("G", "G")).toBe(true);
+    expect(slashOpensFraction("K", "K")).toBe(true);
+    expect(slashOpensFraction("E", "les E")).toBe(false);
+    expect(slashOpensFraction("TCP", "TCP")).toBe(false);
+  });
+});
+
 describe("produits colles : pY, UI, 2piRC", () => {
   it("minuscule + majuscule = produit, sauf i u v (courants et tensions)", () => {
     expect(one("Y(p) = pY + 2").tex).toBe("Y\\left(p\\right) = p\\,Y + 2");
@@ -682,5 +698,22 @@ describe("produits colles : pY, UI, 2piRC", () => {
     expect(one("fc = 1/(2piRC)").tex).toBe("f_c = \\frac{1}{2\\,\\pi\\,R\\,C}");
     expect(subscriptVars("P = UI")).toBe("P = UI");
     expect(subscriptVars("VCC")).toBe("V_{CC}");
+  });
+});
+
+describe("Alt+= : « ceci est une formule »", () => {
+  it("forceFormula accepte une variable seule, refuse un mot", () => {
+    expect(forceFormula("x")).toBe("x");
+    expect(forceFormula("beta")).toBe("\\beta");
+    expect(forceFormula("f(x)")).toBe("f\\left(x\\right)");
+    expect(forceFormula("donc")).toBeNull();
+    expect(forceFormula("x tel")).toBeNull();
+  });
+  it("mathTail prend le plus long bout de maths colle au curseur", () => {
+    expect(mathTail("soit x")).toEqual({ start: 5, latex: "x" });
+    expect(mathTail("on pose y = a x + b")?.start).toBe(8);
+    expect(mathTail("le gain beta")?.latex).toBe("\\beta");
+    expect(mathTail("n tend vers")).toBeNull();
+    expect(mathTail("mot ")).toBeNull();
   });
 });

@@ -1183,6 +1183,50 @@ export function liveFormula(src: string): string | null {
 }
 
 /**
+ * Formule demandee (Alt+= sur ce qu'on vient de taper, ou une selection) :
+ * lue par la meme grammaire, mais sans la prudence de la detection
+ * automatique (une variable seule « x », « beta », « f(x) » est acceptee,
+ * c'est l'utilisateur qui le demande). null si le texte ne se lit pas en
+ * entier comme une formule.
+ */
+export function forceFormula(src: string): string | null {
+  const s = src.trim();
+  if (!s) return null;
+  const live = liveFormula(s);
+  if (live && !live.includes("placeholder")) return live;
+  const toks = tokenize(maskLine(glueDen(s)));
+  let k = 0;
+  while (toks[k]?.t === "sp") k++;
+  if (k >= toks.length) return null;
+  const p = new Parser(toks, k);
+  const node = p.relation();
+  if (!node) return null;
+  let j = p.pos;
+  while (toks[j]?.t === "sp") j++;
+  if (j < toks.length) return null;
+  return node.tex.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Formule a la fin de `before` (texte juste avant le curseur) pour Alt+= :
+ * le plus long bout, commencant a un debut de mot, qui se lit en formule
+ * (forceFormula) et ne contient pas de mot de phrase (« on », « et »,
+ * « donc »... ; une lettre seule comme « a » reste une variable). null si
+ * rien ne colle au curseur.
+ */
+export function mathTail(before: string): { start: number; latex: string } | null {
+  if (!before || /\s$/.test(before)) return null;
+  for (let i = 0; i < before.length; i++) {
+    if (/\s/.test(before[i]) || (i > 0 && !/\s/.test(before[i - 1]))) continue;
+    const src = before.slice(i);
+    if (src.split(/\s+/).some((w) => w.length >= 2 && stopWord(w))) continue;
+    const latex = forceFormula(src);
+    if (latex) return { start: i, latex };
+  }
+  return null;
+}
+
+/**
  * Denominateur tape sans espace autour d'un « + » ou d'un « - » : il les
  * garde (« 2/p+2 » -> « 2/(p+2) », « 1/x^2-1 » -> « 1/(x^2-1) »), comme on
  * l'ecrit a la main en tapant vite. Avec des espaces, c'est une somme
@@ -1215,10 +1259,16 @@ export function glueDen(s: string): string {
     };
     if (!term()) { i = j; continue; }
     let glued = false;
-    while (isOp(s[j]) && !/\s/.test(s[j - 1] ?? " ") && j + 1 < s.length && !/\s/.test(s[j + 1])) {
+    // Denominateur tape entre parentheses : elles le delimitent deja, ce
+    // qui suit (« 1/(p+1)+2 ») reste dehors.
+    const parened = s[start] === "(";
+    while (!parened && isOp(s[j]) && !/\s/.test(s[j - 1] ?? " ") && j + 1 < s.length && !/\s/.test(s[j + 1])) {
       j++;
       if (!term()) break;
       glued = true;
+      // Terme colle qui est lui-meme une fraction (« 1/1+1/x ») : il garde
+      // son denominateur, 1/(1+1/x) et pas (1/(1+1))/x.
+      if (s[j] === "/" && j + 1 < s.length && !/\s/.test(s[j + 1])) { j++; if (!term()) break; }
     }
     const den = s.slice(start, j);
     out += glued && !(den.startsWith("(") && den.endsWith(")") && count(den, "(") === 1) ? `(${den})` : den;
@@ -1270,7 +1320,9 @@ export function slashOpensFraction(numerator: string, before: string): boolean {
   if (/\d\s*([A-Za-zµΩ]+)$/.test(before) && isUnit(/([A-Za-zµΩ]+)$/.exec(before)![1])) return false;
   // Une lettre majuscule seule (V, F) est plutot une grandeur qu'une unite.
   if (isUnit(num) && !/^[A-Z]$/.test(num)) return false;
-  if (/^[A-Z]+$/.test(num) && !/^[VIURCLPZ]$/.test(num)) return false;
+  // Une majuscule seule (H, G, K, V) : une grandeur ; sauf E, A, N, S, O
+  // (« E/S », « A/R », « N/A », « S/O »). Deux ou plus : un sigle.
+  if (/^[A-Z]+$/.test(num) && !(num.length === 1 && !"EANSO".includes(num))) return false;
   return true;
 }
 

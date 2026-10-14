@@ -150,7 +150,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
     ...(p.shortcut === "1" ? { essential: true } : {}),
   })),
 
-  { keys: "Alt+=", label: "Nouvelle formule", group: "Formules", essential: true },
+  { keys: "Alt+=", label: "Mettre en formule ce qu'on vient de taper (ou la sélection) ; sinon nouvelle formule", group: "Formules", essential: true },
+  { keys: "Alt+Maj+=", label: "Remettre en texte la formule avant le curseur", group: "Formules" },
   ctrl("m", true, "maths", "Formules : ouvrir ou fermer le volet des symboles (Σ)", "Formules"),
   ...MATH_TEMPLATES.filter((t) => t.key).map((t): Shortcut => ({
     keys: `Alt+${t.key!.toUpperCase()}`, label: t.title, group: "Formules",

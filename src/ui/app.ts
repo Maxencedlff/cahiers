@@ -3032,7 +3032,13 @@ export class App {
     const view = this.focusedTab()?.view;
     // Alt+Maj+P : photos du tableau (Alt+P seul = modele Puissance).
     if (isPhotoImportKey(e)) { void this.importImage(); return true; }
-    // Alt+= : nouvelle formule, comme l'equation de Word.
+    // Alt+Maj+= : la formule avant le curseur redevient du texte (Alt+= la remet).
+    if ((e.key === "=" || e.key === "+" || e.code === "Equal") && e.shiftKey) {
+      if (inDoc) view?.activeDoc?.toText();
+      return true;
+    }
+    // Alt+= : sur ce qu'on vient de taper, une selection ou un bout redevenu
+    // texte : le met en formule ; sinon nouvelle formule, comme l'equation de Word.
     if ((e.key === "=" || e.code === "Equal") && !e.shiftKey) {
       if (!inDoc) view?.focusText();
       insertMathTemplate("", view?.activeDoc);
