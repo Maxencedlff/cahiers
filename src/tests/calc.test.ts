@@ -313,3 +313,16 @@ describe("affichage de l'expression lue", () => {
     expect(tex).toContain("2");
   });
 });
+
+describe("Littéral : LaTeX colle avec point de multiplication, fraction reduite", () => {
+  it("$$ frac(frac(4,p+1), 1+(frac(4,p+1)).0,2) $$ donne 20/(5p+9)", () => {
+    const r = simplifyExpr("$$ \\frac{\\frac{4}{p+1}}{1+(\\frac{4}{p+1}).0,2} $$");
+    expect(r.ok).toBe(true);
+    expect(r.result?.replace(/\s/g, "")).toBe("20/(5*p+9)");
+  });
+  it("point a la francaise : produit, jamais dans un nombre", () => {
+    expect(normalizeInput("(a+b).2")).toBe("(a+b)*2");
+    expect(normalizeInput("R.I")).toBe("R*I");
+    expect(normalizeInput("3.5")).toBe("3.5");
+  });
+});

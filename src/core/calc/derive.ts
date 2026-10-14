@@ -1,5 +1,6 @@
 import { create, all, type MathNode } from "mathjs";
 import { normalizeInput, humanError, texArc } from "./engine";
+import { equivalents } from "./nextstep";
 
 const math = create(all, { number: "number" });
 
@@ -367,10 +368,22 @@ export function simplifyExpr(expr: string, substitutions?: Record<string, number
   try {
     const src = normalizeInput(expr);
     const input = math.parse(src);
-    const out = math.simplify(src, substitutions ?? {});
+    let out = math.simplify(src, substitutions ?? {});
+    // Fraction ou polynome en une lettre : la forme qu'on ecrit a la ligne
+    // suivante (nextstep.equivalents : fractions reduites au meme
+    // denominateur, « 4/(p+1)/(1+0,8/(p+1)) » -> « 20/(5p + 9) »), plutot
+    // que l'arbre de mathjs. Seulement sans substitution.
+    const letters = new Set(input.filter((n: any) => n.type === "SymbolNode" && !(n.name in math) && n.name !== "pi" && n.name !== "e" && n.name !== "i")
+      .map((n: any) => n.name as string));
+    if ((!substitutions || !Object.keys(substitutions).length) && letters.size === 1) {
+      try {
+        const eq = equivalents(src)[0];
+        if (eq) out = math.parse(normalizeInput(eq));
+      } catch { /* on garde mathjs */ }
+    }
     return {
       ok: true,
-      result: out.toString(),
+      result: out.toString({ implicit: "show" }),
       resultLatex: texArc(out.toTex({ parenthesis: "auto" })),
       inputLatex: texArc(input.toTex({ parenthesis: "auto" })),
     };

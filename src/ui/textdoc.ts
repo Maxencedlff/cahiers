@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  balanceParens, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
+  LIVE_CARET, balanceParens, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveCaretFormula, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -782,8 +782,24 @@ export class TextDoc {
     const lv = this.live;
     if (!lv) return;
     const tex = liveFormula(lv.src);
-    const eq = tex !== null ? makeEq(tex, lv.src)
-      : el("span", { class: "eq eq-raw", contenteditable: "false", dataset: { latex: "", src: lv.src } }, lv.src);
+    // Curseur dessine dans la formule, la ou ira la frappe suivante (case
+    // vide en bleu, ou trait apres le dernier terme du denominateur) : le
+    // vrai curseur, dans le texte apres la formule, est cache pendant ce temps.
+    const withCaret = tex !== null ? liveCaretFormula(lv.src) : null;
+    const shown = withCaret
+      ?.replace("\\placeholder[caret]{}", `{\\color{${CARET_TEX_COLOR}}\\square}`)
+      .replace(LIVE_CARET, `{\\color{${CARET_TEX_COLOR}}\\rule[-0.22em]{0.07em}{1.05em}}`);
+    let eq: HTMLElement;
+    if (tex === null) {
+      eq = el("span", { class: "eq eq-raw", contenteditable: "false", dataset: { latex: "", src: lv.src } }, lv.src);
+    } else {
+      eq = makeEq(shown && katexHtml(shown) ? shown : tex, lv.src);
+      eq.dataset.latex = tex;
+      for (const c of Array.from(eq.querySelectorAll<HTMLElement>("[style*='color']"))) {
+        if (c.style.color.replace(/\s/g, "") === CARET_RGB) c.classList.add("live-caret");
+      }
+    }
+    this.root.classList.toggle("live-typing", !!eq.querySelector(".live-caret"));
     eq.classList.add("live");
     lv.eq.replaceWith(eq);
     lv.eq = eq;
@@ -844,6 +860,7 @@ export class TextDoc {
   private endLive(mode: ScanMode | null): void {
     const lv = this.live;
     this.live = null;
+    this.root.classList.remove("live-typing");
     if (!lv?.eq.isConnected) return;
     // « 2/p+2 » tape colle : le denominateur garde le « + » (glueDen), la relecture aussi.
     lv.src = glueDen(lv.src);
@@ -870,6 +887,7 @@ export class TextDoc {
   private dropLive(): void {
     const lv = this.live;
     this.live = null;
+    this.root.classList.remove("live-typing");
     if (!lv?.eq.isConnected) return;
     const raw = rawSpan(lv.src);
     dropAnchorAfter(lv.eq);
@@ -3961,6 +3979,10 @@ function ghostNodes(insert: string): Node[] {
     return [span];
   });
 }
+
+/** Couleur du curseur dessine dans une formule en cours (paintLive), en LaTeX et telle que le navigateur la rend. */
+const CARET_TEX_COLOR = "#2f6fed";
+const CARET_RGB = "rgb(47,111,237)";
 
 function katexHtml(latex: string): string | null {
   const shown = (latex || "\\placeholder{}").replace(/\\placeholder\{\}/g, "{\\color{#9aa3b2}\\square}");

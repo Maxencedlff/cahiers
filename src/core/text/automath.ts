@@ -58,6 +58,8 @@ const GREEK_CHARS: Record<string, string> = {
   "ρ": "\\rho", "σ": "\\sigma", "τ": "\\tau", "φ": "\\varphi", "ω": "\\omega",
   "Γ": "\\Gamma", "Δ": "\\Delta", "Θ": "\\Theta", "Λ": "\\Lambda", "Π": "\\Pi",
   "Σ": "\\Sigma", "Φ": "\\Phi", "Ω": "\\Omega",
+  // Repere du curseur d'une formule en cours (liveCaretFormula), jamais tape.
+  "ϖ": "\\liveCaret",
 };
 
 /** Lettre grecque en toutes lettres + chiffres : omega0, tau1. */
@@ -1181,6 +1183,38 @@ export function liveFormula(src: string): string | null {
   const f = findFormulas(s).find((x) => x.start === 0 && x.end === s.length);
   if (!f) return null;
   return f.latex.replace(/Z_\{qx\}|Zqx/g, "\\placeholder{}");
+}
+
+/** Marque du curseur dans une formule en cours de frappe (liveCaretFormula). */
+export const LIVE_CARET = "\\liveCaret";
+
+/**
+ * Formule en cours de frappe au « / » avec la place du curseur : la frappe
+ * s'ajoute toujours a la fin du texte tape, donc la ou elle arrivera dans
+ * la formule (case vide du denominateur, ou derriere son dernier terme).
+ * La derniere case vide devient `\placeholder[caret]{}` ; sinon
+ * LIVE_CARET suit le dernier terme. null : pas de place sure (on garde la
+ * formule sans curseur).
+ */
+export function liveCaretFormula(src: string): string | null {
+  const base = liveFormula(src);
+  if (base === null) return null;
+  const k = base.lastIndexOf("\\placeholder{}");
+  if (k >= 0) return `${base.slice(0, k)}\\placeholder[caret]{}${base.slice(k + "\\placeholder{}".length)}`;
+  // Repere (ϖ, une variable que personne ne tape) pose la ou ira la
+  // frappe suivante : dans le dernier terme du denominateur s'il continue
+  // (« 2/p » -> « 2/(p ϖ) », « 2/p+2 » regroupe -> « 2/(p+2 ϖ) »), sinon
+  // a la fin (apres une parenthese fermee, ou dans une ouverte).
+  const t = src.replace(/\s+$/, "");
+  const g = glueDen(t);
+  let probeSrc: string;
+  const last = /\/([^\s/()]+)$/.exec(g);
+  if (g !== t && g.endsWith(")") && !t.endsWith(")")) probeSrc = `${g.slice(0, -1)} ϖ)`;
+  else if (last && count(g, "(") === count(g, ")")) probeSrc = `${g.slice(0, last.index)}/(${last[1]} ϖ)`;
+  else probeSrc = `${t} ϖ`;
+  const probe = liveFormula(probeSrc);
+  if (!probe || !probe.includes(LIVE_CARET)) return null;
+  return probe.replace(/(?:\\[,;:!]|\\cdot|\\times|\s)*\\liveCaret/, LIVE_CARET);
 }
 
 /**

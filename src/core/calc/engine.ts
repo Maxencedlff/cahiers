@@ -326,6 +326,12 @@ export function normalizeInput(expr: string, reserved: (name: string) => boolean
   // LaTeX colle (copie depuis l'editeur de formule : « $$ \frac{\alpha}{p} $$ ») :
   // relu comme on le tape (« alpha/p »).
   if (/\\[A-Za-z]|\$/.test(expr)) expr = texToPlain(expr.replace(/\$/g, " "));
+  // Point de multiplication a la francaise (« (a+b).0,2 », « R.I ») : jamais
+  // entre deux chiffres (« 3.5 » reste un nombre).
+  expr = expr
+    .replace(/\)\s*\.\s*(?=[\w(])/g, ")*")
+    .replace(/([A-Za-z])\s*\.\s*(?=[A-Za-z\d(])/g, "$1*")
+    .replace(/(\d)\.(?=[A-Za-z(])/g, "$1*");
   const s = imagJ(greekNames(expr), reserved)
     .replace(/π/g, "pi")
     .replace(/×|·/g, "*")

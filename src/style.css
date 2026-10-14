@@ -1604,3 +1604,10 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .tb-title { flex: 0 1 auto; }
 /* Au doigt, les raccourcis clavier des menus ne servent a rien. */
 @media (pointer: coarse) { .ctx-keys, .sb-search kbd, .sb-keys { display: none; } }
+
+/* Fraction en cours de frappe au « / » : curseur dessine dans la formule
+   (TextDoc.paintLive), le vrai curseur du texte cache pendant ce temps. */
+.text-doc.live-typing { caret-color: transparent; }
+.eq.live .live-caret { animation: live-caret 1.05s steps(1) infinite; }
+@keyframes live-caret { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .eq.live .live-caret { animation: none; } }
