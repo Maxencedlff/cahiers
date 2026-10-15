@@ -2234,6 +2234,7 @@ export class App {
       { label: "Photo du tableau…", icon: "camera", keys: keyLabel(PHOTO_IMPORT_KEYS), run: () => void this.importImage() },
       { label: "Importer un PDF…", icon: "fileUp", keys: keysOf("importPdf"), run: () => void this.importPdf() },
       { label: "Schéma (électrique, blocs)", icon: "pen", keys: keysOf("schema"), run: () => view.insertSchema() },
+      { label: "Importer un schéma LTspice (.asc)…", icon: "fileUp", run: () => void view.importLtspice() },
       "sep",
       {
         label: "Fond de page", icon: "grid", sub: PAPERS.map((p) => ({

@@ -28,7 +28,17 @@ import { SYMBOLS, symbolByLetter, type SymKey } from "../core/schema/symbols";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** Etiquette tapee lue en formule (« R1 » -> R_1, « 10k » -> 10 k), texte tel quel sinon. */
+/**
+ * Reference de composant (« 1N4148 », « BC547 », « TL081 ») ou parametre
+ * LTspice (« {R1/2} ») : du texte, jamais une formule (1 N_4148).
+ */
+export function isPartRef(line: string): boolean {
+  const t = line.trim();
+  return /[{}]/.test(t) || /^\d?[A-Za-z]{1,4}\d{2,}[A-Za-z0-9-]*$/.test(t) && !/^[A-Za-z]\d{1,2}$/.test(t);
+}
+
 function labelNode(line: string): Node {
+  if (isPartRef(line)) return el("span", { class: "sch-ref" }, line);
   const tex = forceFormula(line);
   return tex ? renderTex(tex) : document.createTextNode(line);
 }
@@ -517,6 +527,7 @@ const TEX_CHARS: Record<string, string> = {
  * « R1 » -> R puis 1 en indice, « 10 kΩ », « K/(1+τp) » tel quel.
  */
 function labelSvgText(line: string): string {
+  if (isPartRef(line)) return line.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
   const tex = forceFormula(line) ?? line;
   let s = tex
     .replace(/\\(?:mathrm|text|operatorname)\{([^{}]*)\}/g, "$1")
@@ -556,4 +567,36 @@ export function schemaSvgString(b: SchemaBlock, px = 16): { svg: string; w: numb
   }).join("");
   const svg = `<svg xmlns="${SVG_NS}" width="${w}" height="${h}" viewBox="${d.box.x} ${d.box.y} ${d.box.w} ${d.box.h}" style="color:#16181d"><rect x="${d.box.x}" y="${d.box.y}" width="${d.box.w}" height="${d.box.h}" fill="#ffffff"/>${d.body}${texts}</svg>`;
   return { svg, w, h };
+}
+
+/* ---------------- import LTspice ---------------- */
+
+/** Selecteur de fichier .asc ; null : ferme sans choix. */
+export function pickAsc(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = el("input", { type: "file", accept: ".asc", style: { display: "none" } }) as HTMLInputElement;
+    let done = false;
+    const finish = (f: File | null) => { if (done) return; done = true; input.remove(); resolve(f); };
+    input.addEventListener("change", () => finish(input.files?.[0] ?? null));
+    input.addEventListener("cancel", () => finish(null));
+    document.body.append(input);
+    input.click();
+  });
+}
+
+/** Texte d'un .asc : ASCII ou UTF-16 (selon la version de LTspice). */
+async function ascText(file: File): Promise<string> {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const utf16 = (buf[0] === 0xff && buf[1] === 0xfe) || (buf.length > 3 && buf[1] === 0 && buf[3] === 0);
+  if (utf16) return new TextDecoder("utf-16le").decode(buf).replace(/^\uFEFF/, "");
+  // Anciennes versions : Windows-1252 (« µ » sur un octet) ; UTF-8 sinon.
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(buf).replace(/^\uFEFF/, ""); }
+  catch { return new TextDecoder("windows-1252").decode(buf); }
+}
+
+/** Schema LTspice lu en bloc schema (symboles francais), avec les symboles non reconnus. */
+export async function importLtspiceFile(file: File, id: string): Promise<{ block: SchemaBlock; skipped: string[] } | null> {
+  const { importAsc } = await import("../core/schema/ltspice");
+  const r = importAsc(await ascText(file), id);
+  return r.block.parts.length || r.block.wires.length ? r : null;
 }

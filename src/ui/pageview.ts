@@ -3834,6 +3834,19 @@ export class PageView {
     });
   }
 
+  /** Schema LTspice (.asc) choisi par l'utilisateur, pose au curseur (normes francaises). */
+  async importLtspice(): Promise<void> {
+    const m = await import("./schema-view");
+    const file = await m.pickAsc();
+    if (!file) return;
+    const r = await m.importLtspiceFile(file, uuid()).catch(() => null);
+    if (!r) { toast("Ce fichier ne contient pas de schéma LTspice lisible", "warn", 5000); return; }
+    if (!this.insertLive(r.block, true)) return;
+    toast(r.skipped.length
+      ? `Schéma importé ; symboles non repris : ${[...new Set(r.skipped)].join(", ")} (un appui le rouvre pour compléter)`
+      : "Schéma importé : un appui le rouvre", r.skipped.length ? "warn" : "info", 7000);
+  }
+
   /** Nouveau schema au curseur du texte (ou sous le dernier contenu), editeur ouvert. */
   insertSchema(): boolean {
     const loaded = this.activePage();

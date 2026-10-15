@@ -65,9 +65,11 @@ const UNIT_OF: Partial<Record<SymKey, string>> = { R: "Ω", Pot: "Ω", C: "F", C
 export function valueText(sym: string, value: string): string {
   const v = value.trim();
   const unit = isSym(sym) ? UNIT_OF[sym] : undefined;
-  const m = /^(\d+(?:[.,]\d+)?)\s*([pnuµmkMG]?)$/.exec(v);
+  // LTspice ecrit aussi « 1K », « 2.2Meg » : k et M.
+  const m = /^(\d+(?:[.,]\d+)?)\s*([pnuµmkKMG]|Meg)?$/i.exec(v);
   if (!unit || !m) return v;
-  return `${m[1]} ${m[2] === "u" ? "µ" : m[2]}${unit}`;
+  const pre = !m[2] ? "" : /^meg$/i.test(m[2]) ? "M" : m[2] === "u" ? "µ" : m[2] === "K" ? "k" : m[2];
+  return `${m[1].replace(".", ",")} ${pre}${unit}`;
 }
 
 /**
