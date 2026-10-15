@@ -34,7 +34,8 @@ describe("suggestions de formules", () => {
     expect(formulaKey("ΔS = x").short).toBe("ds=x");
   });
 
-  const idx = new SuggestIndex([page(BUCK)]);
+  // Ecrites deux fois (cours puis TD) : assez sures pour etre proposees.
+  const idx = new SuggestIndex([page(BUCK), page(BUCK, "TD")]);
   it("ΔS, DeltaS, DS : la formule de l'ondulation", () => {
     for (const q of ["ΔS =", "DeltaS", "deltaS=", "DS =", "Donc DeltaS ="]) {
       const s = idx.suggest(q, ctx);
@@ -53,12 +54,40 @@ describe("suggestions de formules", () => {
     for (const q of ["d", "de", "pour", "On a", "la puissance"]) expect(idx.suggest(q, ctx), q).toBeNull();
   });
 
-  it("intercalaire courant prioritaire", () => {
+  it("deux ecritures aussi frequentes : rien plutot qu'un choix au hasard", () => {
     const two = new SuggestIndex([
       page("$S = \\alpha \\cdot E$", "EON Puissance"),
       page("$S = 2 \\cdot E \\cdot \\beta$", "Autre"),
       page("$S = 2 \\cdot E \\cdot \\beta$", "Autre"),
     ]);
-    expect(two.suggest("S =", ctx)?.insert).toBe("$S = \\alpha \\cdot E$");
+    expect(two.suggest("S =", ctx)).toBeNull();
+  });
+
+  // Cas reels : 3235 propositions sur ses cahiers, 121 justes, avant (mots en cours de frappe).
+  const strict = new SuggestIndex([
+    page("$P_f = V_{batt} \\cdot I_e$", "EON Puissance"),
+    page("$P_f = V_{batt} \\cdot I_e$", "Autre"),
+    page("$I_s = I_e - i$\n$I_s = I_e - i$\n$\\cos 0 = 1$\nvbatt = 9 V\nvbatt = 9 V", "EON Puissance"),
+    page("$\\alpha = t_{on}/T$\n$\\alpha = t_{on}/T$", "EON Puissance"),
+  ]);
+  it("jamais pendant un mot francais ni dans une phrase", () => {
+    for (const q of ["Sa tension n'est pas co", "On veut al", "La batterie est une bonne so", "CO", "di", "Il faut que i"]) {
+      expect(strict.suggest(q, ctx), q).toBeNull();
+    }
+  });
+  it("membre gauche tape puis « = » : la formule qu'il ecrit d'habitude", () => {
+    expect(strict.suggest("Pf =", ctx)?.insert).toBe("$P_f = V_{batt} \\cdot I_e$");
+    expect(strict.suggest("donc Pf = V", ctx)?.insert).toBe("$P_f = V_{batt} \\cdot I_e$");
+    expect(strict.suggest("alpha =", ctx)?.insert).toBe("$\\alpha = t_{on}/T$");
+  });
+  it("casse, debut du membre droit, terme au milieu d'un calcul, valeur, autre matiere : rien", () => {
+    expect(strict.suggest("is =", ctx)).toBeNull();
+    expect(strict.suggest("Pf = Vbatt.i", ctx)).toBeNull();
+    expect(strict.suggest("eta = Pu / Pf =", ctx)).toBeNull();
+    expect(strict.suggest("vbatt =", ctx)).toBeNull();
+    expect(strict.suggest("Pf =", { ...ctx, notebook: "Signaux" })).toBeNull();
+  });
+  it("ecrite une seule fois ailleurs : pas assez sur", () => {
+    expect(new SuggestIndex([page("$R_{eq} = \\beta R_u$")]).suggest("Req =", ctx)).toBeNull();
   });
 });

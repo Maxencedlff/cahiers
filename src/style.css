@@ -1657,3 +1657,13 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .sch-photo .sch-label { font-weight: 600; }
 /* Ligne encadree (« > », Ctrl+Maj+B) : le cadre suit le texte sans changer la hauteur de ligne (Seyes). */
 .text-doc .dl-box { width: fit-content; max-width: 100%; outline: 1.5px solid currentColor; outline-offset: calc(3px * var(--k, 1)); border-radius: 2px; }
+
+/* Ctrl+A sur un document de plusieurs pages (PageView.docSel) : le texte de
+   chaque page de la suite surligne comme une selection (Highlight API),
+   sinon la zone de texte teintee. */
+::highlight(doc-sel) { background-color: Highlight; color: HighlightText; }
+.sheet.doc-sel-tint .text-doc { background: color-mix(in srgb, Highlight 22%, transparent); }
+/* Gras et italique (KaTeX_Main Bold/Italic, plus hauts que la Regular) : sans
+   cela leur ligne faisait 35,3 px au lieu de 34,3 px, le texte glissait hors
+   des lignes du fond et une page de 33 lignes en gras debordait. */
+.text-doc b, .text-doc i { line-height: 1; }

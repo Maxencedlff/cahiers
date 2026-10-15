@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  BLOCK_MAX_H, CLUSTER_GAP, INK_LIMIT, TEXT_LIMIT, TEXT_ROWS, clusterInk, composeFlowText, groupRows,
-  inkItems, isLongPage, lineCount, moveFlowBlocks, pageBreaks, planFlow, type Span,
+  BLOCK_MAX_H, CLUSTER_GAP, INK_LIMIT, TEXT_LIMIT, TEXT_ROWS, canAutoPull, clusterInk, composeFlowText, freeRows,
+  groupRows, inkItems, isLongPage, lineCount, moveFlowBlocks, pageBreaks, planFlow, pullGains, pullSelection,
+  selectionSize, type Span,
 } from "../core/paginate";
 import { LINE, TEXT_TOP } from "../core/textlayout";
 import { PAGE_H } from "../core/ink/sheet";
@@ -311,5 +312,71 @@ describe("pagination : deplacement des blocs", () => {
     expect(dst.id).toBe("neuf");
     expect(dst.strokes[0].id).toBe("a");
     expect((from.blocks[0] as InkBlock).strokes).toEqual([]);
+  });
+});
+
+describe("pagination : remontee automatique de la suite (autoPull)", () => {
+  it("lignes libres : sous le texte (lignes vides comprises) et sous l'encre", () => {
+    expect(freeRows(0, 0)).toEqual({ used: 0, textRows: 0, free: TEXT_ROWS });
+    expect(freeRows(row(27).bottom, 0)).toEqual({ used: 28, textRows: 28, free: 5 });
+    // De l'encre plus bas que le texte : la place commence sous elle.
+    expect(freeRows(row(9).bottom, TEXT_TOP + 30 * LINE + 10).used).toBe(31);
+    expect(freeRows(row(32).bottom, 0).free).toBe(0);
+  });
+
+  it("selection de remontee : tout ce qui suit le texte (encre, zones, reperes, photos)", () => {
+    const flag: FlagBlock = { id: "f", type: "flag", note: "?", rect: { x: 10, y: 200, w: 20, h: 20 } };
+    const zone: MathBlock = {
+      id: "z", type: "math", strokes: [vline("zs", 50, 300, 340)], latex: null, rect: { x: 40, y: 290, w: 60, h: 60 },
+    } as MathBlock;
+    const next = page([
+      { id: "t", type: "text", content: "a ![](img:ph)" }, ink([vline("s1", 100, 120, 150)]), flag, zone,
+      { id: "ph", type: "image", src: "x.jpg" } as Block,
+    ]);
+    const sel = pullSelection(next);
+    expect(sel).toEqual({ strokeIds: ["s1"], zoneIds: ["z"], flagIds: ["f"], blockIds: ["ph"] });
+    expect(selectionSize(sel)).toBe(4);
+    expect(canAutoPull(next)).toBe(true);
+  });
+
+  it("une suite avec un texte encadre, un PDF ou deux fonds d'encre ne remonte pas d'elle-meme", () => {
+    expect(canAutoPull(page([{ id: "t", type: "text", content: "x", rect: { x: 0, y: 0, w: 10, h: 10 } }]))).toBe(false);
+    expect(canAutoPull(page([{ id: "p", type: "pdf" } as unknown as Block]))).toBe(false);
+    expect(canAutoPull(page([ink([vline("a", 1, 100, 120)]), { ...ink([vline("b", 1, 200, 220)]), id: "ink2" }]))).toBe(false);
+    expect(canAutoPull(page([{ id: "t", type: "text", content: "x" }, ink([])]))).toBe(true);
+  });
+
+  it("gain : rien ne remonte si la suite repartirait telle quelle", () => {
+    expect(pullGains("a\nb", "a\nb", 2, 2)).toBe(false);
+    expect(pullGains("a\nb", "\na\nb", 0, 0)).toBe(false);
+    expect(pullGains("a\nb", "b", 0, 0)).toBe(true);
+    expect(pullGains("a", "a", 1, 2)).toBe(true);
+  });
+
+  it("aller-retour : la suite ajoutee puis recoupee garde ses traits (ids) a leur place", () => {
+    // Page d'avant : 28 lignes ; suite : texte sur 6 lignes, un trait sur sa 2e ligne et un sur sa 6e.
+    const from = page([{ id: "t1", type: "text", content: "x" }, ink([vline("a", 100, row(3).top, row(3).bottom)])]);
+    const next = page([
+      { id: "t2", type: "text", content: "y" },
+      ink([vline("n1", 300, row(1).top + 4, row(1).bottom), vline("n2", 300, row(5).top + 4, row(5).bottom)], { id: "ink2" }),
+    ]);
+    const room = freeRows(row(27).bottom, 0);
+    const merged: Page = { ...from, blocks: structuredClone(from.blocks) };
+    moveFlowBlocks(structuredClone(next), merged, pullSelection(next), room.used * LINE, 0, nid);
+    // Rangees du texte reuni : 28 + 6.
+    const plan = planFlow(rows(28 + 6), merged.blocks)!;
+    expect(plan.firstRow).toBe(33);
+    const target: Page = { ...structuredClone(next), blocks: [] };
+    moveFlowBlocks(merged, target, { strokeIds: plan.strokeIds, zoneIds: plan.zoneIds, flagIds: plan.flagIds, blockIds: [] },
+      plan.dy, 0, nid);
+    const ids = (p: Page) => p.blocks.flatMap((b) => (b.type === "ink" ? b.strokes.map((s) => s.id) : [])).sort();
+    // n1 (2e ligne de la suite) est remonte, n2 (6e) y reste ; aucun trait perdu ni en double.
+    expect(ids(merged)).toEqual(["a", "n1"]);
+    expect(ids(target)).toEqual(["n2"]);
+    // n2 etait sur la 6e ligne de la suite ; 5 lignes sont remontees : il est sur sa 1re ligne.
+    const n2 = target.blocks.flatMap((b) => (b.type === "ink" ? b.strokes : [])).find((s) => s.id === "n2")!;
+    expect(cachedBounds(n2).y).toBeCloseTo(row(0).top + 3, 0);
+    const n1 = merged.blocks.flatMap((b) => (b.type === "ink" ? b.strokes : [])).find((s) => s.id === "n1")!;
+    expect(cachedBounds(n1).y).toBeCloseTo(row(29).top + 3, 0);
   });
 });

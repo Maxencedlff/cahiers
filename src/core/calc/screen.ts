@@ -30,6 +30,15 @@ export function insertText(state: EditState, text: string, hasResult = false, af
   };
 }
 
+/**
+ * Texte colle dans l'ecran Calcul : une egalite avec une lettre (« 2μ + 3 =
+ * 13 », « F(p) = α/p + … », « Feq = … ») part dans Résoudre ; le reste se
+ * calcule. Les noms de fonctions et constantes ne comptent pas comme lettres.
+ */
+export function pasteGoesToSolve(text: string): boolean {
+  return /(?<![=<>!])=(?!=)/.test(text) && /\p{L}/u.test(text.replace(/\b(?:sin|cos|tan|exp|ln|log|sqrt|pi|e)\b/g, ""));
+}
+
 export function deleteBack(state: EditState): EditState {
   if (state.caret === 0) return state;
   return {

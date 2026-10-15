@@ -603,7 +603,8 @@ describe("lot ecriture : une seule grammaire, jamais de maths fausses", () => {
     expect(one("int_0^T A e^(-pt) dt").tex).toBe("\\int_{0}^{T} A\\,e^{-p\\,t}\\,\\mathrm{d}t");
     expect(one("i = C dv/dt").tex).toBe("i = C\\,\\frac{\\mathrm{d}v}{\\mathrm{d}t}");
     expect(one("E = m c^2").tex).toBe("E = m\\,c^{2}");
-    expect(one("vs = vbatt . Ru/(R + Ru)").tex).toBe("v_s = \\frac{v_{batt}\\,R_u}{R + R_u}");
+    // « . » entoure d'espaces separe deux facteurs : la fraction qui suit reste entiere.
+    expect(one("vs = vbatt . Ru/(R + Ru)").tex).toBe("v_s = v_{batt} \\times \\frac{R_u}{R + R_u}");
     // Point colle au mot d'avant : fin de phrase.
     expect(findFormulas("on a x = 2. Ensuite y = 3").map((f) => f.latex)).toEqual(["x = 2", "y = 3"]);
     expect(one("dvs/dt = ic/C").tex).toBe("\\frac{\\mathrm{d}v_s}{\\mathrm{d}t} = \\frac{i_c}{C}");
@@ -763,5 +764,119 @@ describe("transformee de Laplace tapee", () => {
     expect(findFormulas("s(t) = TL^-1(S(p))").map((f) => f.latex)).toEqual(["s\\left(t\\right) = \\mathcal{L}^{-1}\\left(S\\left(p\\right)\\right)"]);
     expect(findFormulas("F(p) = Lap(f(t))")[0].latex).toContain("\\mathcal{L}");
     expect(findFormulas("on applique la TL inverse")).toEqual([]);
+  });
+});
+
+describe("frappe des fractions : banc Signaux & systemes (scripts/banc-fractions.py)", () => {
+  const tex = (s: string) => findFormulas(s).map((f) => f.latex);
+  it("point de produit colle a un nombre apres une parenthese : la fraction de fraction reste entiere", () => {
+    expect(tex("(4/(p+1))/(1+(4/(p+1)).0,2)")).toEqual(["\\frac{\\frac{4}{p + 1}}{1 + \\frac{4}{p + 1} \\times 0{,}2}"]);
+    expect(tex("(4/(p+1))/(1-4/(p+1).0,2)")).toEqual(["\\frac{\\frac{4}{p + 1}}{1 - \\frac{4}{p + 1} \\times 0{,}2}"]);
+  });
+  it("puissances de 10 a la francaise (10.10^3), jamais 2.5 coupe", () => {
+    expect(tex("10^5/(1+10^5.0,1)")).toEqual(["\\frac{10^{5}}{1 + 10^{5} \\times 0{,}1}"]);
+    expect(tex("-1/(10.10^3.100.10^-6) = -1")).toEqual(["\\frac{-1}{10 \\times 10^{3} \\times 100 \\times 10^{-6}} = -1"]);
+    expect(tex("x = 2.5.10^3")).toEqual(["x = 2.5 \\times 10^{3}"]);
+    expect(tex("x = 3.5")).toEqual(["x = 3.5"]);
+    expect(tex("Q1. 2 cas")).toEqual([]);
+  });
+  it("produit colle par un point au denominateur sans parentheses, pas apres une parenthese", () => {
+    expect(tex("H = 1/R.C")).toEqual(["H = \\frac{1}{R\\,C}"]);
+    expect(tex("p = -1/R.C donc")).toEqual(["p = \\frac{-1}{R\\,C}"]);
+    expect(tex("Vs = Ru/(R+Ru).Vbatt")).toEqual(["V_s = \\frac{R_u}{R + R_u}\\,V_{batt}"]);
+    expect(tex("on a H = 1/p. Puis")).toEqual(["H = \\frac{1}{p}"]);
+  });
+  it("signe de produit entoure d'espaces : la fraction qui suit est un facteur entier", () => {
+    expect(tex("S(p) = E0/p . 1/(1+tau p)")).toEqual(["S\\left(p\\right) = \\frac{E_0}{p} \\times \\frac{1}{1 + \\tau\\,p}"]);
+    expect(tex("Vs = Ru/(R+Ru) . Vbatt")).toEqual(["V_s = \\frac{R_u}{R + R_u}\\,V_{batt}"]);
+  });
+  it("R1R2 : produit de deux grandeurs numerotees", () => {
+    expect(tex("Req = R1R2/(R1+R2)")).toEqual(["R_{eq} = \\frac{R_1\\,R_2}{R_1 + R_2}"]);
+  });
+  it("grandeur seule devant une parenthese qui calcule (« Vz (1+R/Ru) »), pas devant du texte", () => {
+    expect(tex("Vz (1+R/Ru)")).toEqual(["V_z\\,\\left(1 + \\frac{R}{R_u}\\right)"]);
+    expect(findFormulas("on mesure Vz (en volts)").map((f) => f.latex)).not.toContain("V_z\\,\\left(en volts\\right)");
+    expect(tex("Ic (1 mA)").some((t) => t.includes("left("))).toBe(false);
+  });
+  it("frappe au « / » : le point colle reste au denominateur, apres « ) » il sort", () => {
+    expect(liveSplit("1/R", ".")).toEqual({ src: "1/R.", rest: "" });
+    expect(liveComplete("1/R.")).toBe(true);
+    expect(liveFormula("1/R.")).toBe("\\frac{1}{R\\,\\placeholder{}}");
+    expect(liveFormula("1/R.C")).toBe("\\frac{1}{R\\,C}");
+    expect(liveSplit("Ru/(R+Ru)", ".Vbatt")).toEqual({ src: "Ru/(R+Ru)", rest: ".Vbatt" });
+    expect(liveSplit("(Vbatt - Vz)/R", " soit")).toEqual({ src: "(Vbatt - Vz)/R", rest: " soit" });
+    // Dans une parenthese ouverte, le point est un produit (« (1+(4/(p+1)).0,2) »).
+    expect(liveSplit("(4/(p+1))/(1+(4/(p+1))", ".0,2)")).toEqual({ src: "(4/(p+1))/(1+(4/(p+1)).0,2)", rest: "" });
+  });
+});
+
+describe("banc de frappe des cours (scripts/banc-frappe.py)", () => {
+  const tex = (s: string, mode: "final" | "space" | "pause" = "final") => findFormulas(s, mode).map((f) => f.latex);
+  const srcs = (s: string) => findFormulas(s).map((f) => s.slice(f.start, f.end));
+  it("t_on, t_off du hacheur contre un operateur, « ton » mot ailleurs", () => {
+    expect(tex("Objectif α = ton/T < 1")).toEqual(["\\alpha = \\frac{t_{on}}{T} < 1"]);
+    expect(srcs("(E - S) ton/T - S/T (T - ton) = 0")).toEqual(["(E - S) ton/T - S/T (T - ton) = 0"]);
+    expect(tex("ton/toff = 2")).toEqual(["\\frac{t_{on}}{t_{off}} = 2"]);
+    expect(findFormulas("c'est ton cours")).toEqual([]);
+  });
+  it("deux grandeurs collees (VsIe), RCp", () => {
+    expect(tex("Pu = Vs.Is = VsIe")).toEqual(["P_u = V_s\\,I_s = V_s\\,I_e"]);
+    expect(tex("RCp + 1 = 0")).toEqual(["R\\,C\\,p + 1 = 0"]);
+    expect(tex("Vbatt = 3")).toEqual(["V_{batt} = 3"]);
+  });
+  it("± et lim sans « _ »", () => {
+    expect(tex("p^2 + 4 = 0 donc p = ±2j")).toEqual(["p^{2} + 4 = 0", "p = \\pm 2\\,j"]);
+    expect(tex("s(inf) = lim p→0 p S(p) = 5")).toEqual(["s\\left(\\infty\\right) = \\lim_{p \\to 0} p\\,S\\left(p\\right) = 5"]);
+    expect(tex("lim x -> +inf f(x) = 0")).toEqual(["\\lim_{x \\to +\\infty} f\\left(x\\right) = 0"]);
+    expect(findFormulas("la lim est")).toEqual([]);
+  });
+  it("un mot apres un nombre reprend la phrase", () => {
+    expect(srcs("T < 1 ok")).toEqual(["T < 1"]);
+    expect(tex("u = 3 cos(wt)")).toEqual(["u = 3\\,\\cos\\left(\\omega t\\right)"]);
+    expect(tex("w = 2 pi f")).toEqual(["w = 2\\,\\pi\\,f"]);
+    expect(tex("s = 3 ms")).toEqual(["s = 3\\,\\mathrm{ms}"]);
+  });
+  it("adresse ou chemin, meme sans « :// » et meme a la pause : jamais de maths", () => {
+    for (const mode of ["final", "space", "pause"] as const) {
+      expect(tex("(src: https://eepower.com/industry-articles/why-lithium-ion-batteries-last-longer-at-2080-soc/)", mode)).toEqual([]);
+      expect(tex("eepower.com/industry-articles/why-lithium-ion-batteries-last-longer-at", mode)).toEqual([]);
+      expect(tex("last-longer-at-2080-soc/) vu", mode)).toEqual([]);
+    }
+    expect(tex("i = vbatt-vs/R")).toEqual(["i = v_{batt} - \\frac{v_s}{R}"]);
+    expect(tex("x = a-b/c")).toEqual(["x = a - \\frac{b}{c}"]);
+  });
+  it("une formule de l'editeur qui ne se relit pas ne bloque pas la suite", () => {
+    const parts: LinePart[] = [{ kind: "text", str: "Donc " }, { kind: "eq", str: "mathcalL^-1", fixed: true }, { kind: "cur", str: "(1/p) = u(t)" }];
+    const p = planLine(parts, "space");
+    const full = parts.map((x) => x.str).join("");
+    expect(p?.formulas.map((f) => full.slice(f.start, f.end))).toEqual(["(1/p) = u(t)"]);
+  });
+  it("texte refuse (⌫ apres mise en forme) : jamais seul, mais prolonge il se relit", () => {
+    const refused: LinePart = { kind: "text", str: "Vs = Vz", refused: true };
+    expect(planLine([{ kind: "text", str: "On a " }, refused, { kind: "cur", str: " " }], "space")).toBeNull();
+    const p = planLine([{ kind: "text", str: "On a " }, refused, { kind: "cur", str: " - Vbe " }], "space");
+    expect(p?.formulas.map((f) => f.latex)).toEqual(["V_s = V_z - V_{be}"]);
+  });
+  it("editeur : espaces tapes autour de + et -, barre hors accolades relue", () => {
+    expect(cleanMathLive("V_{s}=V_{z}-V_{be}\\;+\\;0")).toBe("V_{s}=V_{z}-V_{be}+0");
+    expect(cleanMathLive("v_{batt} > V_z \\cdot (1 + R / R_u) = 5 \\,\\text{V}")).toBe("v_{batt}>V_z \\cdot (1 + \\frac{R}{R_u})=5 \\,\\text{V}");
+    expect(cleanMathLive("x_{1} = a/b")).toBe("x_{1}=\\frac{a}{b}");
+    expect(cleanMathLive("K_c = 2\\,\\mathrm{V}/\\mathrm{m}")).toBe("K_c=2\\,\\mathrm{V}/\\mathrm{m}");
+    expect(cleanMathLive("K = 4\\,\\mathrm{N/m}")).toBe("K=4\\,\\mathrm{N/m}");
+    expect(cleanMathLive("\\frac{a}{b}/2")).toBe("\\frac{a}{b}/2");
+  });
+});
+
+describe("dates apres un mot de phrase (« seance du 12/10 »)", () => {
+  it("jamais une fraction, ni en entier ni a moitie tapee", () => {
+    for (const mode of ["final", "space", "pause"] as const) {
+      for (const l of ["seance du 12/10", "Séance du 12/10 :", "seance du 12/1", "seance du 12/10/2026", "TD du 03/10 :"]) {
+        expect(findFormulas(l, mode), `${l} ${mode}`).toEqual([]);
+      }
+    }
+  });
+  it("les fractions restent des fractions", () => {
+    expect(findFormulas("on a 1/2 de la charge").map((f) => f.latex)).toEqual(["\\frac{1}{2}"]);
+    expect(findFormulas("x = 12/10").map((f) => f.latex)).toEqual(["x = \\frac{12}{10}"]);
   });
 });

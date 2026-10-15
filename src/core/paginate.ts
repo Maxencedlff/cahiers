@@ -358,3 +358,66 @@ export function pageBreaks(h: number): number[] {
 export function isLongPage(sheetH: number): boolean {
   return sheetH > LONG_PAGE;
 }
+
+/*
+ * Remontee automatique de la suite (facon Word) : quand une page raccourcit
+ * (lignes effacees), le haut de sa page de suite (`continues`) remonte
+ * combler la place. Orchestration : PageView.autoPull.
+ */
+
+/** Tout ce qui remonte d'une page de suite : son encre, ses zones, reperes, photos et blocs. */
+export function pullSelection(next: Page): FlowSelection {
+  const main = next.blocks.find(isMainInk);
+  const placed = next.blocks.filter((b) => b.type !== "text" && "rect" in b && b.rect);
+  return {
+    strokeIds: main ? main.strokes.map((s) => s.id) : [],
+    zoneIds: placed.filter((b) => b.type !== "flag").map((b) => b.id),
+    flagIds: placed.filter((b) => b.type === "flag").map((b) => b.id),
+    blockIds: next.blocks.filter((b) => b.type !== "text" && b.type !== "ink" && !("rect" in b && b.rect)).map((b) => b.id),
+  };
+}
+
+/**
+ * La page de suite peut-elle remonter d'elle-meme ? Seulement si tout ce
+ * qu'elle contient sait suivre le texte : un texte encadre (ancien format),
+ * une page de PDF ou un bloc inconnu restent ou ils sont.
+ */
+export function canAutoPull(next: Page): boolean {
+  const known = new Set(["text", "ink", "math", "flag", "image", "calc", "graph", "schema"]);
+  // Un seul fond d'encre (pullSelection ne prend que le premier) et un seul texte tape.
+  if (next.blocks.filter(isMainInk).length > 1) return false;
+  if (next.blocks.filter((b) => b.type === "text").length > 1) return false;
+  return next.blocks.every((b) => known.has(b.type) && !(b.type === "text" && "rect" in b && b.rect));
+}
+
+/**
+ * Lignes libres en bas d'une page (sous son texte, lignes vides comprises,
+ * et sous son encre). `textBottom` : bas de la derniere rangee de texte
+ * (unites de page), 0 sans texte.
+ */
+export function freeRows(textBottom: number, inkBottom: number): { used: number; textRows: number; free: number } {
+  const rows = (y: number) => (y > TEXT_TOP + 0.5 ? rowAt(y - 0.5) + 1 : 0);
+  const textRows = rows(textBottom);
+  const used = Math.max(textRows, rows(inkBottom));
+  return { used, textRows, free: TEXT_ROWS - used };
+}
+
+/** Texte sans blancs ni ancres invisibles (ce qu'on compare). */
+function squashText(s: string): string {
+  return s.replace(/[\s​]/g, "");
+}
+
+/**
+ * Apres la mesure de la page avec la suite ajoutee : quelque chose de la
+ * suite remonte-t-il vraiment ? `tail` = texte qui repartirait sur la
+ * suite, `theirs` = son texte d'avant ; `back` = traits/zones/reperes/blocs
+ * qui y repartiraient, `all` = tous les siens.
+ */
+export function pullGains(theirs: string, tail: string, back: number, all: number): boolean {
+  return squashText(tail) !== squashText(theirs) || back < all;
+}
+
+/** Nombre de morceaux (traits du fond, zones, reperes, blocs) d'une selection. */
+export function selectionSize(s: FlowSelection): number {
+  return s.strokeIds.length + s.zoneIds.length + s.flagIds.length + s.blockIds.length;
+}

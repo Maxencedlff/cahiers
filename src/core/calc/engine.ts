@@ -205,6 +205,9 @@ export class CalcEngine {
 
   get math(): MathJsInstance { return math; }
 
+  /** Fonction definie par l'utilisateur (f(x) = x^2) : « f(2) » reste un appel, « p(p+1) » avec p = 2 un produit. */
+  private isFunction = (name: string): boolean => typeof this.vars[name] === "function";
+
   scope(): Record<string, unknown> {
     return {
       ...this.vars,
@@ -219,7 +222,7 @@ export class CalcEngine {
    */
   calcInput(expr: string, mode: "eval" | "tex" = "eval"): { src: string; prefixed: boolean } {
     const reserved = (name: string) => name in this.vars;
-    return siPrefixes(normalizeInput(expr, reserved), reserved, mode);
+    return siPrefixes(letterProducts(normalizeInput(expr, reserved), this.isFunction), reserved, mode);
   }
 
   /**
@@ -228,7 +231,7 @@ export class CalcEngine {
    */
   toLatex(expr: string, prefixes = false): string | null {
     const reserved = (name: string) => name in this.vars;
-    const src = (prefixes ? this.calcInput(expr, "tex").src : normalizeInput(expr, reserved)).trim();
+    const src = (prefixes ? this.calcInput(expr, "tex").src : letterProducts(normalizeInput(expr, reserved), this.isFunction)).trim();
     if (!src) return null;
     try {
       const tex = math.parse(src).toTex({ parenthesis: "auto" });
@@ -279,7 +282,7 @@ export class CalcEngine {
       if (shown.polar) out.polar = shown.polar;
       return this.record(expr, out, latex, displayTex(raw, opts), raw, engFormat(raw, prefixed));
     } catch (e) {
-      return { ok: false, message: humanError(e, expr), latex };
+      return { ok: false, message: unitLetterError(e, src, this.scope()) ?? humanError(e, expr), latex };
     }
   }
 
@@ -328,7 +331,15 @@ export function normalizeInput(expr: string, reserved: (name: string) => boolean
   if (/\\[A-Za-z]|\$/.test(expr)) expr = texToPlain(expr.replace(/\$/g, " "));
   // Point de multiplication a la francaise (« (a+b).0,2 », « R.I ») : jamais
   // entre deux chiffres (« 3.5 » reste un nombre).
+  // Copie de cours : « 10.10^3 » = 10×10³, « 10^5.0,1 » = 10⁵×0,1 (le
+  // point suit un exposant et precede un decimal a virgule).
   expr = expr
+    .replace(/(\d)\.(?=10\^)/g, "$1*")
+    .replace(/(\^\(?-?\d+\)?)\.(?=\d+,\d)/g, "$1*")
+    // Deux nombres separes par une espace : un produit (« 2 3/4 », copie de
+    // « 2\,\frac34 »), sauf des milliers a la francaise (« 1 000 » = 1000).
+    .replace(/(?<![\d.,])\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?![\d.,])/g, (m) => m.replace(/[ \u00a0\u202f]/g, ""))
+    .replace(/(\d)\s+(?=\d)/g, "$1*")
     .replace(/\)\s*\.\s*(?=[\w(])/g, ")*")
     .replace(/([A-Za-z])\s*\.\s*(?=[A-Za-z\d(])/g, "$1*")
     .replace(/(\d)\.(?=[A-Za-z(])/g, "$1*");
@@ -350,6 +361,61 @@ export function normalizeInput(expr: string, reserved: (name: string) => boolean
     // Ω : l'ohm derriere une valeur (« 100 Ω », « 2,2 kΩ ») ; seul, une grandeur.
     .replace(/(\d\s?[kMmGu]?)Ω/g, "$1ohm");
   return renameLogs(parallel(decimalCommas(s)));
+}
+
+/**
+ * Lettre seule collee a une parenthese qui n'est pas une fonction connue :
+ * un produit, comme sur la copie (« p(p+1) » = p·(p+1), « R(1+jRCω) »).
+ * Un nom de plusieurs lettres (« foo(2) ») reste un appel : fonction inconnue.
+ * Restent des appels : les fonctions de mathjs, une variable ou fonction
+ * definie (`reserved`), une definition « f(x) = … », un argument qui n'est
+ * qu'un nom (« f(t) », « y(x) ») et plusieurs arguments. `reserved` : vrai
+ * pour une fonction definie (pas pour une variable : p = 2, « p(p+1) » = 6). Sur une saisie
+ * deja normalisee ; seule une « * » est inseree.
+ */
+export function letterProducts(s: string, reserved: (name: string) => boolean = () => false): string {
+  if (!s.includes("(")) return s;
+  return s.replace(/(?<![\p{L}_.'])(\p{L})(\s*)\(/gu, (all, name: string, _sp: string, off: number) => {
+    if (typeof (math as any)[name] === "function" || reserved(name)) return all;
+    const open = off + all.length - 1;
+    const close = matching(s, open);
+    if (close < 0) return all;
+    const arg = s.slice(open + 1, close);
+    if (/^\s*[\p{L}_][\p{L}\d_]*\s*$/u.test(arg)) return all;
+    let depth = 0;
+    for (const c of arg) {
+      if ("([{".includes(c)) depth++;
+      else if (")]}".includes(c)) depth--;
+      else if (c === "," && depth === 0) return all;
+    }
+    if (/^\s*=(?!=)/.test(s.slice(close + 1))) return all;
+    return `${name}*(`;
+  });
+}
+
+/**
+ * « sin(2 t) » avec t sans valeur : mathjs lit t comme une unite (la tonne)
+ * et echoue loin de la cause (« Unit in function cot is no angle »). On
+ * nomme la lettre, comme pour tout symbole inconnu.
+ */
+function unitLetterError(e: unknown, src: string, scope: Record<string, unknown>): string | null {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!/is no angle|Unexpected type of argument.*Unit|Units do not match/i.test(msg)) return null;
+  try {
+    const names: string[] = [];
+    math.parse(src).traverse((n: any, _p: string, parent: any) => {
+      if (n.type !== "SymbolNode" || n.name in scope || n.name in math) return;
+      if (parent?.type === "FunctionNode" && parent.fn === n) return;
+      if (!(math as any).Unit.isValuelessUnit(n.name)) return;
+      // « 5 m », « 2,2 kΩ » : une unite derriere un nombre est voulue.
+      if (parent?.type === "OperatorNode" && parent.implicit && parent.args[0]?.type === "ConstantNode" && parent.args[1] === n
+          && !/is no angle/.test(msg)) return;
+      if (!names.includes(n.name)) names.push(n.name);
+    });
+    return names.length ? `Symbole inconnu : ${names.join(", ")}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -1,6 +1,7 @@
 import { create, all, type MathNode } from "mathjs";
-import { normalizeInput, humanError, texArc } from "./engine";
+import { normalizeInput, humanError, texArc, letterProducts } from "./engine";
 import { equivalents } from "./nextstep";
+import { tidyRational } from "./solve";
 
 const math = create(all, { number: "number" });
 
@@ -57,7 +58,7 @@ export interface DerivOutcome {
 
 export function derivative(expr: string, variable = "x"): DerivOutcome {
   try {
-    return deriveNode(math.parse(normalizeInput(expr)), variable);
+    return deriveNode(math.parse(letterProducts(normalizeInput(expr))), variable);
   } catch (e) {
     return { ok: false, message: humanError(e) };
   }
@@ -92,7 +93,7 @@ function deriveNode(node: MathNode, variable: string): DerivOutcome {
 export function nthDerivative(expr: string, variable = "x", n = 2): DerivOutcome {
   let current: MathNode;
   try {
-    current = math.parse(normalizeInput(expr));
+    current = math.parse(letterProducts(normalizeInput(expr)));
   } catch (e) {
     return { ok: false, message: humanError(e) };
   }
@@ -366,7 +367,7 @@ export interface SimplifyOutcome {
 /** 2x + x donne 3x (section 7). */
 export function simplifyExpr(expr: string, substitutions?: Record<string, number | string>): SimplifyOutcome {
   try {
-    const src = normalizeInput(expr);
+    const src = letterProducts(normalizeInput(expr));
     const input = math.parse(src);
     let out = math.simplify(src, substitutions ?? {});
     // Fraction ou polynome en une lettre : la forme qu'on ecrit a la ligne
@@ -380,6 +381,9 @@ export function simplifyExpr(expr: string, substitutions?: Record<string, number
         const eq = equivalents(src)[0];
         if (eq) out = math.parse(normalizeInput(eq));
       } catch { /* on garde mathjs */ }
+    } else if ((!substitutions || !Object.keys(substitutions).length) && letters.size > 1) {
+      // Fraction de fractions en plusieurs lettres (K et p) : reduite.
+      out = tidyRational(out);
     }
     return {
       ok: true,
@@ -395,7 +399,7 @@ export function simplifyExpr(expr: string, substitutions?: Record<string, number
 /** Substitution de variables, sans simplification agressive. */
 export function substitute(expr: string, values: Record<string, number | string>): SimplifyOutcome {
   try {
-    const src = normalizeInput(expr);
+    const src = letterProducts(normalizeInput(expr));
     let node = math.parse(src);
     node = node.transform((n: any) => {
       if (n.type === "SymbolNode" && n.name in values) {

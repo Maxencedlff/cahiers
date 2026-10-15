@@ -169,10 +169,12 @@ const REL: Record<string, string> = {
   "∈": "\\in", "∉": "\\notin", "⊂": "\\subset", "⊆": "\\subseteq",
 };
 const PRODUCT = new Set(["·", "*", "×", "."]);
-const SUMOP = new Set(["+", "-", "−"]);
+const SUMOP = new Set(["+", "-", "−", "±", "∓"]);
+/** Signe en LaTeX : « ± » -> \pm (racines « p = ±2j »). */
+const SIGN_TEX: Record<string, string> = { "+": "+", "-": "-", "−": "-", "±": "\\pm", "∓": "\\mp" };
 
 const MULTI_OPS = ["<=>", "<=", ">=", "!=", "~=", "->", "=>", "<<", ">>"];
-const SINGLE_OPS = "=<>≈≤≥≠≪≫→⇒⇔∈∉⊂⊆∀∃+-−*·×/^()|²³._'";
+const SINGLE_OPS = "=<>≈≤≥≠≪≫→⇒⇔∈∉⊂⊆∀∃+-−±∓*·×/^()|²³._'";
 
 function tokenize(line: string): Tok[] {
   const out: Tok[] = [];
@@ -185,6 +187,15 @@ function tokenize(line: string): Tok[] {
       out.push({ t: "sp", s: m[0], a: i, b: i + m[0].length }); i += m[0].length; continue;
     }
     if ((m = rest.match(/^\d+(?:[.,]\d+)?/))) {
+      // Point de produit a la francaise entre deux nombres, pas une virgule
+      // decimale : « 10.10^3 » (puissance de 10), « 10^5.0,1 » (le nombre
+      // qui suit a deja sa virgule), « 10^3.100.10^-6 » (exposant entier).
+      const dot = /^(\d+)\.(\d+)/.exec(m[0]);
+      if (dot) {
+        const next = rest.slice(m[0].length);
+        if ((dot[2] === "10" && next.startsWith("^")) || /^,\d/.test(next)
+            || (line[i - 1] === "^" && /^\.\d/.test(next))) m = [dot[1]] as unknown as RegExpMatchArray;
+      }
       out.push({ t: "num", s: m[0], a: i, b: i + m[0].length }); i += m[0].length; continue;
     }
     // Un mot entier, accents compris : un accent le disqualifie ensuite.
@@ -225,6 +236,12 @@ const ACRONYMS = new Set([
   "RTC", "PHP", "IOT", "IDE", "IRL", "VGA", "ISO", "RFC", "IP", "PC", "PS", "RER", "RDV", "PME", "VIP",
   "RIP", "PPT", "IPV4", "IPV6", "IEEE", "IEC", "IRQ", "ISR", "PCI", "PCIE", "RISC", "VHDL", "RS232",
 ]);
+
+/**
+ * Temps de conduction du hacheur (t_on, t_off) : « ton » est aussi un mot
+ * ("ton cours"), lu comme grandeur seulement contre un operateur (voir letterA).
+ */
+const TIME_WORD = /^t(?:on|off)$/;
 
 /** Differentielle d'une integrale : dx, dt, dθ. */
 const DIFF = /^d(?:[a-zA-Z]|[α-ω])$/;
@@ -320,6 +337,14 @@ function identTex(s: string): string {
   if (s === "UI" || s === "IU" || s === "RI") return `${s[0]}\\,${s[1]}`;
   // 2piRC, 2piLC : pi colle devant des composants (pas p indice iRC).
   if (/^pi[A-Z]{1,3}$/.test(s)) return `\\pi\\,${identTex(s.slice(2))}`;
+  // R1R2, R1C1 : produit de deux grandeurs numerotees (pas R indice 1R2).
+  const pair = /^([A-Z]\d)([A-Z]\d)$/.exec(s);
+  if (pair) return `${identTex(pair[1])}\\,${identTex(pair[2])}`;
+  // VsIe, PuPf : deux grandeurs connues collees, un produit (pas V indice sIe).
+  const two = /^([A-Z][a-z0-9]{1,3})([A-Z][a-z0-9]{1,3})$/.exec(s);
+  if (two && loneVariable(two[1]) && loneVariable(two[2])) return `${identTex(two[1])}\\,${identTex(two[2])}`;
+  // RCp, LCp : composants devant la variable de Laplace (pas R indice Cp).
+  if (/^[RLC]{2,3}p$/.test(s) && new Set(s.slice(0, -1)).size === s.length - 1) return [...s].join("\\,");
   const m = s.match(/^([A-Za-z])([A-Za-z0-9]+)$/);
   if (!m) return s;
   return m[2].length === 1 ? `${m[1]}_${m[2]}` : `${m[1]}_{${m[2]}}`;
@@ -402,7 +427,7 @@ class Parser {
       this.seenOp = true;
       const rhs = this.product();
       if (!rhs) { this.i = save; this.seenOp = seen; break; }
-      tex += ` ${t.s === "+" ? "+" : "-"} ${rhs.tex}`; ops += 1 + rhs.ops; vars += rhs.vars;
+      tex += ` ${SIGN_TEX[t.s]} ${rhs.tex}`; ops += 1 + rhs.ops; vars += rhs.vars;
     }
     return { tex, ops, vars };
   }
@@ -418,14 +443,9 @@ class Parser {
       if (t?.t === "op" && t.s === "/") {
         this.skipSp(); this.i++;
         this.seenOp = true;
-        let den = this.unary();
-        if (!den) { this.i = save; this.seenOp = seen; break; }
-        den = this.gluedFactors(den);
-        cur = {
-          // « ((1+x)) » : la barre groupe deja, plus aucune parenthese autour.
-          tex: `\\frac{${bare(cur.group ?? cur.tex)}}{${bare(den.group ?? den.tex)}}`,
-          ops: cur.ops + den.ops + 1, vars: cur.vars + den.vars,
-        };
+        const frac = this.over(cur);
+        if (!frac) { this.i = save; this.seenOp = seen; break; }
+        cur = frac;
         continue;
       }
       if (t?.t === "op" && PRODUCT.has(t.s)) {
@@ -433,10 +453,21 @@ class Parser {
         // Un point suivi d'un espace finit une phrase ("Q1. Zener").
         // " . " entoure d'espaces dans une formule : un produit ("vbatt . Ru/(R + Ru)").
         const spacedDot = sp && this.seenOp && this.toks[this.i + 1]?.t === "sp";
-        if (t.s === "." && !spacedDot && this.toks[this.i + 1]?.t !== "id" && this.toks[this.i + 1]?.s !== "(") { this.i = save; break; }
+        if (t.s === "." && !spacedDot && this.toks[this.i + 1]?.t !== "id" && this.toks[this.i + 1]?.s !== "("
+            && !this.dotNumber(this.i)) { this.i = save; break; }
+        // Signe entoure d'espaces (« E0/p . 1/(1+tau p) », « a × b/c ») : il
+        // separe deux facteurs, la fraction qui suit est le second en entier.
+        const apart = sp && this.toks[this.i + 1]?.t === "sp";
         this.i++;
         this.seenOp = true;
-        const rhs = this.unary();
+        let rhs = this.unary();
+        while (rhs && apart && this.peek()?.t === "op" && this.peek()!.s === "/") {
+          const back = this.i;
+          this.skipSp(); this.i++;
+          const frac = this.over(rhs);
+          if (!frac) { this.i = back; break; }
+          rhs = frac;
+        }
         if (!rhs) { this.i = save; this.seenOp = seen; break; }
         // Comme sur une copie : × devant un nombre ou une fraction (« 2 × 3 »,
         // « a × 2 », « 2 × 1/3 »), sinon les facteurs se suivent (« 3p »,
@@ -464,11 +495,15 @@ class Parser {
       if (!startsAtom) break;
       // "dx" d'une integrale : la fin du corps, pas un facteur.
       if (this.inIntegral > 0 && t.t === "id" && DIFF.test(t.s)) break;
-      const spacedOk = !sp || this.lastWasNumOrGreek(save)
+      // « 2 R », « beta Ru » ; jamais un mot apres un nombre (« = 1 ok », « 0 ici »).
+      const spacedOk = !sp || (this.lastWasNumOrGreek(save) && !(t.t === "id" && proseWord(t.s)))
         || (this.seenOp && t.t === "id" && (t.s in FUNCS || this.strongVar(save, t.s) || this.factorAhead(this.i)))
         // Derivee en point : toujours des maths, meme en tete (« L ddoti(t) + R doti(t) = 0 »).
         || (t.t === "id" && /^d?dot([A-Za-z]|theta|omega|alpha|phi|varphi)$/.test(t.s));
-      const parenTry = sp && !spacedOk && this.seenOp && t.t === "op";
+      // « Vz (1+R/Ru) » en tete : une grandeur seule devant une parenthese qui calcule.
+      const lb = this.before(save);
+      const loneBefore = t.t === "op" && t.s === "(" && lb?.t === "id" && loneVariable(lb.s);
+      const parenTry = sp && !spacedOk && (this.seenOp || loneBefore) && t.t === "op";
       if (!spacedOk && !parenTry) break;
       this.skipSp();
       const rhs = this.unary();
@@ -482,6 +517,32 @@ class Parser {
       continue;
     }
     return cur;
+  }
+
+  /**
+   * Barre deja lue : lit le denominateur (et ses facteurs colles), rend la
+   * fraction `num`/denominateur, ou null.
+   */
+  private over(num: Node): Node | null {
+    let den = this.unary();
+    if (!den) return null;
+    den = this.gluedFactors(den);
+    return {
+      // « ((1+x)) » : la barre groupe deja, plus aucune parenthese autour.
+      tex: `\\frac{${bare(num.group ?? num.tex)}}{${bare(den.group ?? den.tex)}}`,
+      ops: num.ops + den.ops + 1, vars: num.vars + den.vars,
+    };
+  }
+
+  /**
+   * Point colle entre un nombre (ou une parenthese fermee) et un nombre, au
+   * jeton `at` : un produit a la francaise (« (1+x).0,2 », « 10.10^3 » coupe
+   * par tokenize). Jamais avec un espace (« Q1. 2 »).
+   */
+  private dotNumber(at: number): boolean {
+    const prev = this.toks[at - 1], next = this.toks[at + 1];
+    return this.toks[at]?.s === "." && next?.t === "num" && !!prev
+      && (prev.t === "num" || (prev.t === "op" && prev.s === ")"));
   }
 
   private lastWasNumOrGreek(at: number): boolean {
@@ -503,7 +564,20 @@ class Parser {
    * "1/2p" ; le denominateur les prend tous (jamais ceux apres un espace).
    */
   private gluedFactors(den: Node): Node {
+    // « 1/R.C », « 1/10.10^3 » : produit colle par un point, au denominateur
+    // seulement s'il n'est pas deja entre parentheses (« Ru/(R+Ru).Vbatt »).
+    const grouped = den.group !== undefined;
     for (;;) {
+      const d = this.toks[this.i], dn = this.toks[this.i + 1];
+      if (!grouped && d?.t === "op" && d.s === "." && dn
+          && (dn.t === "id" || (dn.t === "op" && dn.s === "(") || this.dotNumber(this.i))) {
+        const save = this.i;
+        this.i++;
+        const f = this.power();
+        if (!f) { this.i = save; return den; }
+        den = { tex: `${den.tex}${dn.t === "num" ? " \\times " : "\\,"}${f.tex}`, ops: den.ops + f.ops + 1, vars: den.vars + f.vars };
+        continue;
+      }
       const n = this.toks[this.i];
       if (!n || !((n.t === "op" && n.s === "(") || n.t === "id" || n.t === "num")) return den;
       if (this.inIntegral > 0 && n.t === "id" && DIFF.test(n.s)) return den;
@@ -525,6 +599,11 @@ class Parser {
     while (this.toks[j]?.t === "sp") j++;
     const t = this.toks[j];
     if (t?.t !== "id" || t.s in BIGOPS) return false;
+    // « (E - S) ton/T » : t_on colle a un operateur.
+    if (TIME_WORD.test(t.s)) {
+      const n = this.toks[j + 1];
+      return n?.t === "op" && (n.s === "/" || n.s === ")" || SUMOP.has(n.s) || PRODUCT.has(n.s));
+    }
     const letter = /^[A-Za-z]$/.test(t.s);
     const deriv = /^d[A-Za-zα-ωΔ]/.test(t.s) && this.toks[j + 1]?.s === "/";
     // « m ddotx(t) », « m dotx » : derivee en point ; « sumF ».
@@ -557,11 +636,11 @@ class Parser {
   private unary(): Node | null {
     const save = this.i;
     const t = this.peek();
-    if (t?.t === "op" && (t.s === "-" || t.s === "−")) {
+    if (t?.t === "op" && (t.s === "-" || t.s === "−" || t.s === "±" || t.s === "∓")) {
       this.skipSp(); this.i++;
       const inner = this.unary();
       if (!inner) { this.i = save; return null; }
-      return { tex: `-${inner.tex}`, ops: inner.ops + 1, vars: inner.vars };
+      return { tex: `${t.s === "±" || t.s === "∓" ? `${SIGN_TEX[t.s]} ` : "-"}${inner.tex}`, ops: inner.ops + 1, vars: inner.vars };
     }
     // "+inf", "x -> +∞" : un plus devant, seulement derriere une relation
     // ou une parenthese (sinon "a + b" se lit deja comme une somme).
@@ -698,6 +777,28 @@ class Parser {
         if (hi === null) return fail();
         tex += `^{${hi}}`;
       }
+    }
+    // « lim p->0 p S(p) », « lim x → +inf f(x) » : bornes tapees sans « _ »,
+    // la variable, la fleche, la valeur, puis un espace avant le corps.
+    if (t.s === "lim" && !bounded && this.toks[this.i]?.t === "sp") {
+      const back = this.i;
+      this.skipSp();
+      const v = this.toks[this.i];
+      let ok = false;
+      if (v?.t === "id" && (/^[A-Za-z]$/.test(v.s) || isGreek(v.s))) {
+        this.i++;
+        this.skipSp();
+        const arrow = this.toks[this.i];
+        if (arrow?.t === "op" && (arrow.s === "->" || arrow.s === "→")) {
+          this.i++;
+          const to = this.unary();
+          if (to && this.toks[this.i]?.t === "sp") {
+            tex += `_{${identTex(v.s)} \\to ${to.tex}}`;
+            bounded = ok = true;
+          }
+        }
+      }
+      if (!ok) this.i = back;
     }
     // Colle a autre chose qu'un blanc ou une parenthese : un mot ("intro").
     const next = this.toks[this.i];
@@ -1008,12 +1109,12 @@ class Parser {
   }
 
   /**
-   * "a" (et "A", "à" tape sans accent) est un mot outil ("il y a"), sauf en maths : colle a un nombre
+   * "a" (et "A", "à" tape sans accent ; "ton", "toff" du hacheur) est un mot outil ("il y a", "ton cours"), sauf en maths : colle a un nombre
    * ("2a"), derriere un operateur ou une parenthese ("= a", "(a"), ou
    * devant une relation ("a != b").
    */
   private letterA(t: Tok): boolean {
-    if (t.s !== "a" && t.s !== "A") return false;
+    if (t.s !== "a" && t.s !== "A" && !TIME_WORD.test(t.s)) return false;
     // Corps d'integrale, ou petit facteur qui finit une formule commencee ("F = m a").
     if (this.inIntegral > 0 || (this.seenOp && this.factorAhead(this.i))) return true;
     const prevRaw = this.toks[this.i - 1];
@@ -1064,6 +1165,19 @@ function loneVariable(s: string): boolean {
 }
 
 /**
+ * Mot en minuscules de 2 lettres ou plus qui n'a rien d'une grandeur ("ok",
+ * "ici", "soit") : derriere un nombre et un espace, il reprend la phrase.
+ * Fonctions, grec, unites, dt, wt, tensions (vs, ic, vbatt) restent des facteurs.
+ */
+function proseWord(s: string): boolean {
+  if (!/^[a-zàâçéèêëîïôûùüÿœ]{2,}$/.test(s)) return false;
+  if (s in FUNCS || s in BIGOPS || isGreek(s) || GREEK_NAME_SUB.test(s) || isUnit(s) || s === "inf" || s === "infty") return false;
+  if (DIFF.test(s) || OMEGA_WORD.test(s) || IMAG.test(s) || LOWER_SUB.test(s) || LOWER_VAR.test(s) || TIME_WORD.test(s)) return false;
+  if (/^[viu][a-z]$/.test(s) || /^d?dot/.test(s)) return false;
+  return true;
+}
+
+/**
  * Calcul sans variable ("3/2", "2^10", "5 * 3 = 15") : garde seulement
  * s'il a une fraction, une puissance, un produit ou une relation, et si ce
  * n'est pas une date ("30/09", "29/09/2026") ni un simple "1 - 2".
@@ -1073,6 +1187,26 @@ function numericOk(src: string, tex: string): boolean {
   if (/^\d+\/\d+\/\d+$/.test(s) || /^\d{2}\/\d{2}$/.test(s) || /^0\d\//.test(s)) return false;
   // Intervalle de nombres ("]0 ; 1[", "[0, +inf[") : des maths aussi.
   return /\\frac|\^|\\cdot|\\times|\\,|=|<|>|\\leq|\\geq|\\approx|\\neq|\\ll|\\gg|\\to|Rightarrow|\\left[[\]]/.test(tex);
+}
+
+/**
+ * « 12/10 », « 03/10 », « 12/1 » (date jj/mm, ou en cours de frappe) juste
+ * apres un mot de phrase (« du », « le », « seance ») : une date, jamais une
+ * fraction. « 1/2 », « 3/10 » restent des fractions ; « x = 12/10 » aussi
+ * (derriere une relation).
+ */
+export function dateAfterWord(before: string, num: string): boolean {
+  const m = /^(\d{1,2})\s*\/\s*(\d{1,2})?$/.exec(num.trim());
+  if (!m) return false;
+  const [d, mo] = [Number(m[1]), m[2] === undefined ? NaN : Number(m[2])];
+  if (d < 1 || d > 31) return false;
+  // Jour sur deux chiffres (jj/mm) : « on a 3/10 ici » reste une fraction.
+  if (m[1].length !== 2) return false;
+  if (m[2] !== undefined && m[2].length === 2 && (mo < 1 || mo > 12)) return false;
+  const w = /(?:^|[\s(])([A-Za-zÀ-ÖØ-öø-ÿœŒ']+)\s+$/.exec(before);
+  if (!w) return false;
+  const word = w[1];
+  return stopWord(word) || /[À-ÖØ-öø-ÿœŒ']/.test(word) || (word.length >= 3 && /^[A-Za-z]+$/.test(word) && !validIdent(word));
 }
 
 /** Paires a barre oblique qui ne sont pas des fractions (E/S, I/O). */
@@ -1112,7 +1246,24 @@ function maskLine(line: string): string {
   return line.replace(
     /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/\S*|\bwww\.\S*|`[^`\n]*(?:`|$)|\b[A-Z]{2,}(?:-[A-Z]+)+\b/g,
     (m) => "\u0001".repeat(m.length),
-  );
+  ).replace(/\S+/g, (m) => (urlLike(m) ? "\u0001".repeat(m.length) : m));
+}
+
+/**
+ * Bout d'adresse ou de chemin colle, meme sans « :// » (debut d'URL coupe,
+ * collee, relue a partir du milieu) : un domaine (« eepower.com/ »), une
+ * barre contre un mot a tirets (« industry-articles/why », « -soc/ »), ou une
+ * chaine de mots a tirets (« why-lithium-ion-batteries »). Jamais des maths.
+ */
+function urlLike(w: string): boolean {
+  if (/[a-z0-9-]\.(?:com|org|net|fr|io|edu|gov|eu|uk|de|html?|php)(?![A-Za-z])/i.test(w)) return true;
+  // Mots de 3 lettres ou plus qui ne sont pas des grandeurs (« vbatt-vce/R » reste une formule).
+  const word = (x: string) => x.length >= 3 && !LOWER_VAR.test(x) && !(x in FUNCS) && !isGreek(x) && !TIME_WORD.test(x);
+  for (const m of w.matchAll(/([a-z]+)-([a-z]+)(?=\/)|\/([a-z]+)-([a-z]+)|-([a-z]+)\/|\/([a-z]+)\//g)) {
+    const parts = m.slice(1).filter((x): x is string => !!x);
+    if (parts.every(word)) return true;
+  }
+  return /[a-z]{2,}-[a-z0-9]{2,}-[a-z0-9]{2,}/.test(w);
 }
 
 /**
@@ -1153,6 +1304,8 @@ export function findFormulas(line: string, mode: ScanMode = "final"): FoundFormu
       else if (!toks[j]) lone = mode === "final";
       else lone = !continues(toks, j);
     }
+    // « seance du 12/10 », « le 3/10 » (meme a moitie tape, « du 12/1 ») : une date, du texte.
+    if (node && dateAfterWord(line.slice(0, t.a), src)) { k = last + 1; continue; }
     if (node && (lone || (node.ops >= 1 && (node.vars >= 1 || numericOk(src, node.tex)) && !slashWord(src)))) {
       // Fin = dernier jeton non blanc consomme.
       const end = toks[last].b;
@@ -1173,7 +1326,12 @@ export function findFormulas(line: string, mode: ScanMode = "final"): FoundFormu
  * dans le noeud du curseur (toujours le dernier).
  */
 /** `fixed` : formule faite a l'editeur (relue en clair), jamais redefaite en texte. */
-export interface LinePart { kind: "text" | "eq" | "cur"; str: string; fixed?: boolean }
+/**
+ * `refused` : texte rendu tel quel par Retour arriere ou Ctrl+Z juste apres
+ * une mise en forme (`.raw`) : jamais remis en formule a lui seul, mais une
+ * formule qui part de lui et le prolonge (« Vs = Vz » puis « - Vbe ») le reprend.
+ */
+export interface LinePart { kind: "text" | "eq" | "cur"; str: string; fixed?: boolean; refused?: boolean }
 
 /**
  * Formules a (re)mettre en forme sur une ligne relue : celles qui touchent
@@ -1193,11 +1351,31 @@ export function planLine(
   for (const p of parts) { pos.push({ a: at, b: at + p.str.length }); at += p.str.length; }
   const full = parts.map((p) => p.str).join("");
   const curStart = pos[pos.length - 1]?.a ?? 0;
-  const found = findFormulas(full, mode);
   const eqIdx = parts.map((p, i) => (p.kind === "eq" ? i : -1)).filter((i) => i >= 0);
+  const refusedIdx = parts.map((p, i) => (p.refused ? i : -1)).filter((i) => i >= 0);
   const covers = (f: FoundFormula, i: number) => f.start <= pos[i].a && f.end >= pos[i].b;
-  const pick = (kept: number[]) => found.filter((f) => {
-    if (kept.some((i) => f.start < pos[i].b && f.end > pos[i].a && !covers(f, i))) return false;
+  const overlaps = (f: FoundFormula, i: number) => f.start < pos[i].b && f.end > pos[i].a;
+  // Une formule qui couperait une formule en forme (ou un texte refuse) ne
+  // bloque pas le reste de la ligne : ce morceau est masque et la ligne
+  // relue sans lui (« \mathcal{L}^{-1} » fait a l'editeur puis « (1/p) = u(t) »).
+  const scan = (kept: number[]): FoundFormula[] => {
+    const masked = new Set<number>();
+    for (;;) {
+      let text = full;
+      for (const i of masked) text = text.slice(0, pos[i].a) + "\u0001".repeat(pos[i].b - pos[i].a) + text.slice(pos[i].b);
+      const found = findFormulas(text, mode);
+      const bad = new Set<number>();
+      for (const f of found) {
+        for (const i of kept) if (!masked.has(i) && overlaps(f, i) && !covers(f, i)) bad.add(i);
+        for (const i of refusedIdx) {
+          if (!masked.has(i) && overlaps(f, i) && !(f.start === pos[i].a && f.end > pos[i].b)) bad.add(i);
+        }
+      }
+      if (!bad.size) return found;
+      for (const i of bad) masked.add(i);
+    }
+  };
+  const pick = (kept: number[]) => scan(kept).filter((f) => {
     if (kept.some((i) => pos[i].a === f.start && pos[i].b === f.end)) return false;
     return f.end > curStart || kept.some((i) => covers(f, i));
   });
@@ -1229,7 +1407,7 @@ export function liveFormula(src: string): string | null {
   if (!s) return null;
   const open = count(s, "(") - count(s, ")");
   if (open < 0) return null;
-  if (/[/^_+\-−*·×(=<>≤≥≈≠→|]$/.test(s)) s += LIVE_MARK;
+  if (/[/^_+\-−*·×(=<>≤≥≈≠→|]$/.test(s) || /[^.\s]\.$/.test(s)) s += LIVE_MARK;
   // "1/sqrt" : la fonction attend son argument.
   else if (/(?:^|[^A-Za-z])(?:sqrt|sin|cos|tan|ln|log|exp)$/.test(s)) s += `(${LIVE_MARK})`;
   s = glueDen(s);
@@ -1384,7 +1562,8 @@ export function glueDen(s: string): string {
  * d'ouvert, et le dernier caractere termine un terme.
  */
 export function liveComplete(src: string): boolean {
-  const s = src.replace(/\s+$/, "");
+  // « 1/R. » : point en attente (produit « 1/R.C » ou fin de phrase), le terme est fini.
+  const s = src.replace(/\s+$/, "").replace(/([^.])\.$/, "$1");
   return count(s, "(") === count(s, ")") && /[\p{L}\p{N})\]}²³'!∞]$/u.test(s);
 }
 
@@ -1399,7 +1578,11 @@ export function liveSplit(src: string, typed: string): { src: string; rest: stri
   for (; k < typed.length; k++) {
     const c = typed[k];
     if (c === ")" && count(src, "(") <= count(src, ")")) break;
-    if (c === "\n" || (liveComplete(src) && " =<>,;.:!?≈≤≥≠→⇒⇔".includes(c))) break;
+    // Point colle a un denominateur sans parentheses : garde en attente,
+    // « 1/R.C » est un produit au denominateur ; suivi d'un espace, il finit
+    // la phrase (relu avec la ligne). Apres « ) », il sort (« Ru/(R+Ru).Vbatt »).
+    const held = c === "." && !/[.)\s]$/.test(src);
+    if (c === "\n" || (liveComplete(src) && !held && " =<>,;.:!?≈≤≥≠→⇒⇔".includes(c))) break;
     src += c;
   }
   return { src, rest: typed.slice(k) };
@@ -1646,6 +1829,9 @@ export function cleanMathLive(latex: string): string {
     .replace(new RegExp(`${SP}+(?=\\\\(?:${REL_CMDS})(?![A-Za-z])|[=<>])`, "g"), "")
     .replace(new RegExp(`(\\\\(?:${REL_CMDS})(?![A-Za-z])|[=<>])${SP}+(?=([A-Za-z])?)`, "g"),
       (_a, rel: string, letter?: string) => (letter && rel.startsWith("\\") ? `${rel} ` : rel));
+  // Espaces tapes dans l'editeur autour d'un + ou d'un - (« V_{be}\;+\;0 ») : KaTeX espace deja.
+  const TYPED = "(?:(?<!\\\\)\\\\[;: ])";
+  s = s.replace(new RegExp(`${TYPED}+([+\\-])${TYPED}+`, "g"), "$1");
   return s.replace(/\u0000(\d+)\u0000/g, (_a, i: string) => keep[Number(i)]).trim();
 }
 
@@ -1695,10 +1881,74 @@ function slashFractions(s: string): string {
     return tex && !tex.includes("placeholder") ? tex : null;
   };
   if (!/[{}]/.test(s)) return (s.includes("/") && read(s)) || s;
-  return s.replace(/\{([^{}]*\/[^{}]*)\}/g, (all, inner: string) => {
+  const grouped = s.replace(/\{([^{}]*\/[^{}]*)\}/g, (all, inner: string) => {
     const tex = read(inner);
     return tex ? `{${tex}}` : all;
   });
+  return topSlashes(grouped, read);
+}
+
+/** Relations et separateurs qui bornent un terme hors accolades (LaTeX de MathLive). */
+const TOP_REL = /^(?:\\(?:approx|leq?|geq?|neq?|ll|gg|to|Rightarrow|Leftarrow|Leftrightarrow|iff|in|quad|qquad)(?![A-Za-z])|\\\\|[=<>&,;])/;
+
+/**
+ * Barre « / » hors accolades dans une formule qui en a ailleurs
+ * (« v_{batt} > V_z \cdot (1 + R / R_u) = 5 \,\text{V} ») : le terme qui
+ * la porte (sa parenthese, borne par les relations) est relu comme le reste
+ * (`read`) ; garde tel quel s'il ne se lit pas (unites « \mathrm{V}/\mathrm{m} »).
+ */
+function topSlashes(s: string, read: (inner: string) => string | null): string {
+  let out = s;
+  let from = 0;
+  for (let guard = 0; guard < 20; guard++) {
+    // Relations au niveau des accolades 0 (debut -> fin), et premiere barre a relire.
+    const relEnd = new Map<number, number>(), relStart = new Map<number, number>();
+    let brace = 0, k = -1;
+    for (let i = 0; i < out.length; i++) {
+      const c = out[i];
+      if (c === "{") { brace++; continue; }
+      if (c === "}") { brace--; continue; }
+      if (brace !== 0) continue;
+      const m = TOP_REL.exec(out.slice(i));
+      if (m) { relStart.set(i, i + m[0].length); relEnd.set(i + m[0].length - 1, i + m[0].length); i += m[0].length - 1; continue; }
+      if (c === "\\") { const w = /^\\[A-Za-z]+/.exec(out.slice(i)); if (w) i += w[0].length - 1; continue; }
+      if (c === "/" && k < 0 && i >= from) k = i;
+    }
+    if (k < 0) break;
+    // Vers la gauche : jusqu'a la parenthese qui l'ouvre ou une relation a ce niveau.
+    let a = 0, b = out.length, depth = 0;
+    brace = 0;
+    for (let i = k - 1; i >= 0; i--) {
+      const c = out[i];
+      if (c === "}") { brace++; continue; }
+      if (c === "{") { brace--; continue; }
+      if (brace !== 0) continue;
+      if (c === ")") { depth++; continue; }
+      if (c === "(") { if (depth === 0) { a = i + 1; break; } depth--; continue; }
+      if (depth === 0 && relEnd.has(i)) { a = relEnd.get(i)!; break; }
+    }
+    depth = 0; brace = 0;
+    for (let i = k + 1; i < out.length; i++) {
+      const c = out[i];
+      if (c === "{") { brace++; continue; }
+      if (c === "}") { brace--; continue; }
+      if (brace !== 0) continue;
+      if (c === "(") { depth++; continue; }
+      if (c === ")") {
+        if (depth === 0) { b = out.slice(0, i).endsWith("\\right") ? i - 6 : i; break; }
+        depth--; continue;
+      }
+      if (depth === 0 && relStart.has(i)) { b = i; break; }
+    }
+    const seg = out.slice(a, b);
+    const lead = /^\s*/.exec(seg)![0].length, trail = /\s*$/.exec(seg)![0].length;
+    const tex = seg.trim() ? read(seg.trim()) : null;
+    if (tex) {
+      out = out.slice(0, a + lead) + tex + out.slice(b - trail);
+      from = a + lead + tex.length;
+    } else from = k + 1;
+  }
+  return out;
 }
 
 /** Terme de fraction sans les parentheses qui l'englobent en entier (autant de fois qu'il y en a). */

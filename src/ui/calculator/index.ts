@@ -15,6 +15,7 @@ import type { CalcSpec, GraphSpec } from "../../core/liveblock";
 import { drawPlot } from "../plotdraw";
 import {
   insertText, deleteBack, deleteForward, moveCaret, HistoryRecall, type EditState,
+  pasteGoesToSolve,
 } from "../../core/calc/screen";
 import { KEYPAD, FAMILY_CLASS, mapKey, acceptText, type Key } from "./keys";
 
@@ -169,7 +170,7 @@ export class Calculator {
       e.preventDefault();
       // Calcul copie de la page avec une inconnue (« 2μ + 3 = 13 », elements
       // simples) : il part dans Résoudre, resolu tout de suite.
-      if (/(?<![=<>!])=(?!=)/.test(text) && /\p{L}/u.test(text.replace(/\b(?:sin|cos|tan|exp|ln|log|sqrt|pi|e)\b/g, ""))) {
+      if (pasteGoesToSolve(text)) {
         this.state.resoudre.eq = text;
         this.selectTab("resoudre");
         this.body.querySelector<HTMLButtonElement>("button.primary")?.click();

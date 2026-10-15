@@ -124,6 +124,7 @@ export function solveEquation(equation: string, variable?: string): SolveOutcome
 function solveCore(equation: string, variable?: string): SolveOutcome {
   let zero: string;
   let v: string;
+  let def: string | undefined;
   try {
     zero = toZeroForm(equation);
     const symbols = freeSymbols(zero);
@@ -135,6 +136,10 @@ function solveCore(equation: string, variable?: string): SolveOutcome {
       return Math.abs(val) < 1e-12
         ? { ok: true, degree: 0, message: "Égalité toujours vraie", roots: [] }
         : { ok: false, message: "Égalité fausse : aucune solution" };
+    } else if ((def = definedSymbol(equation, zero, symbols)) !== undefined) {
+      // « Feq = (K/(p(p+3)))/(1+K/(p(p+3))) » : une definition a mettre en
+      // forme, resolue pour la lettre seule du premier membre.
+      v = def;
     } else if (!/(?<![=<>!])=(?!=)/.test(normalizeInput(equation))) {
       return { ok: false, message: "Pas de signe = : copie toute l'égalité (par exemple F(p) = α/p + …), pas seulement un membre." };
     } else {
@@ -653,6 +658,178 @@ function depends(n: MathNode, v: string): boolean {
   return found;
 }
 
+/**
+ * Fraction de fractions en plusieurs lettres mise sous la forme qu'on ecrit
+ * (« K/(p(p+3))/(1+K/(p(p+3))) » -> « K/(p^2+3p+K) ») : produit de facteurs
+ * en haut et en bas, denominateur commun des sommes, facteurs identiques
+ * simplifies, puis numerateur et denominateur developpes (`rationalize`
+ * seul ne simplifie pas les facteurs communs). Garde seulement si
+ * l'ecriture est plus courte et vaut la meme chose en plusieurs points ;
+ * sinon le noeud tel quel.
+ */
+export function tidyRational(node: MathNode): MathNode {
+  try {
+    const src = node.toString();
+    let nested = false;
+    node.traverse((n: any, _p: string, parent: any) => {
+      if (n.type === "OperatorNode" && n.fn === "divide" && parent
+          && !(parent.type === "OperatorNode" && parent.fn === "unaryMinus")) nested = true;
+    });
+    if (!nested) return node;
+    const f = toFrac(node);
+    const keys = new Map<string, number>();
+    for (const x of f.num) keys.set(keyOf(x), (keys.get(keyOf(x)) ?? 0) + 1);
+    const den: MathNode[] = [];
+    for (const x of f.den) {
+      const k = keyOf(x), c = keys.get(k) ?? 0;
+      if (c > 0) keys.set(k, c - 1); else den.push(x);
+    }
+    const num: MathNode[] = [];
+    for (const x of f.num) {
+      const k = keyOf(x), c = keys.get(k) ?? 0;
+      if (c > 0) { keys.set(k, c - 1); num.push(x); }
+    }
+    const expand = (xs: MathNode[]): string => {
+      const prod = xs.length ? xs.map((x) => `(${x.toString()})`).join(" * ") : "1";
+      let r: any;
+      try { r = (math as any).rationalize(prod); } catch { r = math.simplify(prod); }
+      while (r.type === "ParenthesisNode") r = r.content;
+      return byDegree(r);
+    };
+    const N = expand(num), D = expand(den);
+    const out: MathNode = D === "1" ? math.parse(N) : new math.OperatorNode("/", "divide", [math.parse(N), math.parse(D)]);
+    if (out.toString({ implicit: "hide" }).length >= node.toString({ implicit: "hide" }).length) return node;
+    // Meme valeur en quelques points (jamais une forme fausse).
+    const syms = freeSymbols(src);
+    const a = math.parse(src).compile(), b = out.compile();
+    for (let t = 0; t < 4; t++) {
+      const scope: Record<string, number> = {};
+      syms.forEach((x, i) => { scope[x] = SAMPLES[(t * 3 + i) % SAMPLES.length] + 0.1 * i; });
+      const va = Number(a.evaluate(scope)), vb = Number(b.evaluate(scope));
+      if (!Number.isFinite(va) || !Number.isFinite(vb) || Math.abs(va - vb) > 1e-9 * (1 + Math.abs(va))) return node;
+    }
+    return out;
+  } catch {
+    return node;
+  }
+}
+
+/**
+ * Somme ecrite par degre decroissant de sa lettre principale (celle qui
+ * monte le plus haut) : « p^2 + 3p + K », pas « K + p^2 + 3p ».
+ */
+function byDegree(n: any): string {
+  const terms: { node: any; neg: boolean }[] = [];
+  const flat = (x: any, neg: boolean) => {
+    while (x.type === "ParenthesisNode") x = x.content;
+    if (x.type === "OperatorNode" && x.fn === "add" && x.args.length === 2) { flat(x.args[0], neg); flat(x.args[1], neg); }
+    else if (x.type === "OperatorNode" && x.fn === "subtract" && x.args.length === 2) { flat(x.args[0], neg); flat(x.args[1], !neg); }
+    else if (x.type === "OperatorNode" && x.fn === "unaryMinus") flat(x.args[0], !neg);
+    else terms.push({ node: x, neg });
+  };
+  flat(n, false);
+  if (terms.length < 2) return n.toString();
+  const degreeIn = (t: any, v: string) => {
+    let d = 0;
+    t.traverse((x: any, _p: string, parent: any) => {
+      if (x.type !== "SymbolNode" || x.name !== v) return;
+      d += parent?.type === "OperatorNode" && parent.fn === "pow" && parent.args[0] === x && parent.args[1].type === "ConstantNode"
+        ? Number(parent.args[1].value) : 1;
+    });
+    return d;
+  };
+  const letters = freeSymbols(n.toString());
+  let main = letters[0], best = -1;
+  for (const v of letters) {
+    const d = Math.max(...terms.map((t) => degreeIn(t.node, v)));
+    if (d > best) { best = d; main = v; }
+  }
+  if (!main) return n.toString();
+  const sorted = terms.map((t, i) => ({ ...t, i, d: degreeIn(t.node, main) })).sort((a, b) => b.d - a.d || a.i - b.i);
+  return sorted.map((t, k) => `${k === 0 ? (t.neg ? "-" : "") : t.neg ? " - " : " + "}${t.node.toString()}`).join("");
+}
+
+/** Fraction en facteurs : produit `num` sur produit `den` (listes vides = 1). */
+interface Frac { num: MathNode[]; den: MathNode[] }
+
+function keyOf(n: MathNode): string {
+  let x: any = n;
+  while (x.type === "ParenthesisNode") x = x.content;
+  return x.toString({ implicit: "show" }).replace(/\s+/g, "");
+}
+
+function product(xs: MathNode[]): MathNode {
+  if (!xs.length) return new math.ConstantNode(1);
+  return xs.slice(1).reduce((acc: MathNode, x) => new math.OperatorNode("*", "multiply", [acc, new math.ParenthesisNode(x)]), new math.ParenthesisNode(xs[0]) as MathNode);
+}
+
+function toFrac(n: any): Frac {
+  if (n.type === "ParenthesisNode") return toFrac(n.content);
+  if (n.type === "OperatorNode") {
+    if (n.fn === "multiply") {
+      const parts = n.args.map(toFrac);
+      return { num: parts.flatMap((p: Frac) => p.num), den: parts.flatMap((p: Frac) => p.den) };
+    }
+    if (n.fn === "divide") {
+      const a = toFrac(n.args[0]), b = toFrac(n.args[1]);
+      return { num: [...a.num, ...b.den], den: [...a.den, ...b.num] };
+    }
+    if (n.fn === "unaryMinus") {
+      const a = toFrac(n.args[0]);
+      return { num: [new math.ConstantNode(-1), ...a.num], den: a.den };
+    }
+    if ((n.fn === "add" || n.fn === "subtract") && n.args.length === 2) {
+      const a = toFrac(n.args[0]), b = toFrac(n.args[1]);
+      if (!a.den.length && !b.den.length) return { num: [n], den: [] };
+      // Denominateur commun : les facteurs de chacun, sans doublon.
+      const common = [...a.den];
+      const left = new Map<string, number>();
+      for (const x of a.den) left.set(keyOf(x), (left.get(keyOf(x)) ?? 0) + 1);
+      const bMissing: MathNode[] = []; // facteurs de b.den absents de a.den
+      for (const x of b.den) {
+        const k = keyOf(x), c = left.get(k) ?? 0;
+        if (c > 0) left.set(k, c - 1); else { common.push(x); bMissing.push(x); }
+      }
+      // a multiplie par ce qui manque a son denominateur, b de meme.
+      const bLeft = new Map<string, number>();
+      for (const x of b.den) bLeft.set(keyOf(x), (bLeft.get(keyOf(x)) ?? 0) + 1);
+      const aMissing: MathNode[] = [];
+      for (const x of a.den) {
+        const k = keyOf(x), c = bLeft.get(k) ?? 0;
+        if (c > 0) bLeft.set(k, c - 1); else aMissing.push(x);
+      }
+      const ta = product([...a.num, ...bMissing]), tb = product([...b.num, ...aMissing]);
+      return { num: [new math.OperatorNode(n.op, n.fn, [ta, tb])], den: common };
+    }
+    if (n.fn === "pow" && n.args[1].type === "ConstantNode" && Number.isInteger(n.args[1].value) && Math.abs(n.args[1].value) <= 6) {
+      const a = toFrac(n.args[0]), k = n.args[1].value as number;
+      const rep = (xs: MathNode[]) => Array.from({ length: Math.abs(k) }, () => xs).flat();
+      return k >= 0 ? { num: rep(a.num), den: rep(a.den) } : { num: rep(a.den), den: rep(a.num) };
+    }
+  }
+  if (n.type === "ConstantNode" && n.value === 1) return { num: [], den: [] };
+  return { num: [n], den: [] };
+}
+
+/**
+ * Lettre seule a gauche, absente a droite, et un second membre qui se met
+ * en forme (sinon « U = R I » garde son message : quelle inconnue ?).
+ */
+function definedSymbol(equation: string, zero: string, symbols: string[]): string | undefined {
+  try {
+    const parts = implicitProducts(normalizeInput(equation)).split(/(?<![=<>!])=(?!=)/);
+    if (parts.length !== 2) return undefined;
+    const name = parts[0].trim();
+    if (!/^[\p{L}_][\p{L}\d_]*$/u.test(name) || !symbols.includes(name)) return undefined;
+    const rhs = math.parse(parts[1]);
+    if (depends(rhs, name) || !freeSymbols(zero).some((x) => x !== name)) return undefined;
+    const tidy = tidyRational(math.simplify(rhs));
+    return tidy.toString() !== rhs.toString() ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Exposants essayes pour isoler l'inconnue : a v^n + b = 0. */
 const POWERS = [1, 2, 3, 4, -1, -2, 0.5, -0.5];
 
@@ -687,12 +864,13 @@ function symbolicSolve(equation: string, zero: string, v: string): SolveOutcome 
     const inside = math.simplify(`(${rhs.toString()}) / (${lhsA.toString()})`);
     if (n !== 1) steps.push(`On divise par ${$(texOf(lhsA))} : ${$(`${vn} = ${texOf(inside)}`)}`);
     let sol: MathNode, latex: string, text: string;
+    const tidy = n === 1 ? tidyRational(inside) : inside;
     if (n === 2) {
       sol = math.parse(`sqrt(${inside.toString()})`);
       latex = `\\pm\\sqrt{${texOf(inside)}}`;
       text = `±${sol.toString({ implicit: "hide" })}`;
     } else {
-      sol = n === 1 ? inside : math.simplify(`(${inside.toString()})^(${1 / n})`);
+      sol = n === 1 ? tidy : math.simplify(`(${inside.toString()})^(${1 / n})`);
       latex = texOf(sol);
       text = sol.toString({ implicit: "hide" });
       if (n === 4) { latex = `\\pm ${latex}`; text = `±${text}`; }

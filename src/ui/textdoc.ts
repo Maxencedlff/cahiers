@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  LIVE_CARET, balanceParens, toggleBox, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveCaretFormula, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
+  LIVE_CARET, balanceParens, dateAfterWord, toggleBox, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveCaretFormula, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -225,6 +225,7 @@ let typingSize: number = NORMAL_SIZE;
 /** Taille choisie (barre du haut, Ctrl+Maj+> <) : la selection la prend, sinon la frappe qui suit. */
 export function setTypingSize(size: number): void {
   typingSize = size;
+  if (docSelHook?.({ size })) return;
   const sel = document.getSelection();
   if (lastDoc && sel?.rangeCount && sel.isCollapsed) {
     const r = sel.getRangeAt(0);
@@ -250,8 +251,26 @@ export function setSpellcheck(on: boolean): void {
   document.querySelectorAll<HTMLElement>(".text-doc").forEach((d) => { d.spellcheck = on; });
 }
 
+/**
+ * Selection « tout le document » (Ctrl+A sur une page qui a une suite,
+ * PageView.docSel) : la couleur ou la taille choisie va a toutes ses pages.
+ * Vrai si le crochet l'a prise.
+ */
+let docSelHook: ((f: { color?: ColorKey | null; size?: number }) => boolean) | null = null;
+export function setDocSelHook(h: typeof docSelHook): void { docSelHook = h; }
+
+/** Ce que Ctrl+C met au presse-papiers pour un texte au format de la page (selection document). */
+export function clipboardPayload(doc: string): { plain: string; doc: string; html: string } {
+  const tokens = normalizeTokens(parseDoc(doc));
+  return { plain: docClipboardText(tokens, texToPlain), doc, html: clipboardHtml(tokens, doc) };
+}
+
+/** Type du presse-papiers interne (morceau au format de la page). */
+export function clipboardDocType(): string { return CLIP_TYPE; }
+
 export function setTypingColor(color: ColorKey | null): void {
   typingColor = color;
+  if (docSelHook?.({ color })) { lastDoc?.paintColorTag(); return; }
   // Texte selectionne : il prend la couleur, comme dans Word.
   lastDoc?.colorSelection(color);
   lastDoc?.paintColorTag();
@@ -604,6 +623,8 @@ export class TextDoc {
       }
       // Touche morte (« ^ » en AZERTY) : la frappe arrive en composition,
       // traitee a sa fin (compositionend) comme une frappe ordinaire.
+      // Texte refuse corrige (lettre effacee ou tapee dedans) : du texte ordinaire.
+      if (!ie.isComposing) this.releaseRaw();
       if (ie.inputType === "insertText") { if (this.afterTyped(ie.data ?? "")) return; }
       else if (!ie.isComposing) this.hideGhost();
       this.emit();
@@ -925,14 +946,21 @@ export class TextDoc {
     this.emit();
   }
 
-  /** La formule en cours rendue en texte tel quel (Ctrl+Z, Retour arriere a l'ouverture). */
-  private dropLive(): void {
+  /**
+   * La formule en cours rendue en texte tel quel (Ctrl+Z). `atOpen` (Retour
+   * arriere a l'ouverture) : seule la barre reste figee en texte, le
+   * numerateur redevient du texte ordinaire ; effacer ensuite la barre
+   * (« R/ » ⌫ ⌫ puis « I ») laisse la ligne se relire en formule.
+   */
+  private dropLive(atOpen = false): void {
     const lv = this.live;
     this.live = null;
     this.root.classList.remove("live-typing");
     if (!lv?.eq.isConnected) return;
-    const raw = rawSpan(lv.src);
+    const raw = rawSpan(atOpen && lv.src.endsWith("/") ? "/" : lv.src);
     dropAnchorAfter(lv.eq);
+    const num = atOpen && lv.src.endsWith("/") ? lv.src.slice(0, -1) : "";
+    if (num) lv.eq.before(document.createTextNode(num));
     lv.eq.replaceWith(raw);
     this.caretBeside(raw, true);
     this.emit();
@@ -945,7 +973,7 @@ export class TextDoc {
     const mod = e.ctrlKey || e.metaKey || e.altKey;
     if (e.key === "Backspace" && !mod) {
       e.preventDefault();
-      if (lv.src === lv.base) { this.dropLive(); return true; }
+      if (lv.src === lv.base) { this.dropLive(true); return true; }
       lv.src = lv.src.slice(0, -1);
       this.paintLive();
       this.caretAfterLive();
@@ -2452,6 +2480,56 @@ export class TextDoc {
     return this.readTail(this.toEnd(at));
   }
 
+  /** Formule en edition ou fraction en cours de frappe : la pagination n'y touche pas. */
+  get busy(): boolean { return !!this.field || !!this.live; }
+
+  /**
+   * Remontee de la suite (PageView.autoPull) : `md` ajoute a la fin du
+   * texte (sur une ligne neuve s'il y a deja du texte), sans toucher au
+   * curseur, a la selection ni a ce qui est deja ecrit, et sans prevenir la
+   * page (l'appelant mesure puis coupe avec splitOff, ou retire l'ajout avec
+   * dropAppended). null si le texte obtenu n'est pas exactement celui
+   * attendu (rien n'est alors change ; l'appelant renonce).
+   */
+  appendDoc(md: string): { added: Node[]; shown: Node | null } | null {
+    if (this.field || this.live) return null;
+    const before = this.content;
+    const last = this.root.lastChild;
+    // Derniere ligne vide, ou texte vide : le <br> d'affichage est remplace.
+    const shown = (before.endsWith("\n") || !before) && last?.nodeName === "BR" ? last : null;
+    const tokens = parseDoc(md);
+    const want = before ? `${before}\n${md}` : md;
+    // Saut de ligne avant l'ajout ; apres une ligne mise en forme (titre,
+    // puce), le bloc de la ligne la termine deja : second essai sans.
+    for (const lead of before ? [true, false] : [false]) {
+      const added: Node[] = [];
+      if (shown) shown.remove();
+      if (lead) {
+        const br = el("br");
+        added.push(br);
+        this.root.append(br);
+      }
+      const frag = this.buildNodes(tokens);
+      added.push(...Array.from(frag.childNodes));
+      this.root.append(frag);
+      if (tokens[tokens.length - 1]?.kind === "br") {
+        const end = el("br");
+        added.push(end);
+        this.root.append(end);
+      }
+      const out = { added, shown };
+      if (this.content === want) return out;
+      this.dropAppended(out);
+    }
+    return null;
+  }
+
+  /** Retire un ajout d'appendDoc (rien n'a tenu sur la page). */
+  dropAppended(a: { added: Node[]; shown: Node | null }): void {
+    for (const n of a.added) n.parentNode?.removeChild(n);
+    if (a.shown && !a.shown.parentNode) this.root.append(a.shown);
+  }
+
   private toEnd(at: Range): Range {
     const r = document.createRange();
     r.setStart(at.startContainer, at.startOffset);
@@ -3277,6 +3355,13 @@ export class TextDoc {
         if (n >= 0) break;
       } else if (prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.src) {
         back.push({ node: prev, kind: "eq", str: prev.dataset.src, a: 0, b: 0, head: "" });
+      } else if (prev instanceof HTMLElement && prev.classList.contains("raw") && !prev.querySelector(".eq, br")
+          && !(prev.textContent ?? "").includes("\n")) {
+        // Texte refuse : relu comme du texte, jamais remis en formule a lui
+        // seul (planLine), mais il ne coupe plus la ligne : « Vs = Vz »
+        // refuse puis « - Vbe » se relit encore.
+        const str = (prev.textContent ?? "").replace(/\u200b/g, "");
+        back.push({ node: prev, kind: "text", str, a: 0, b: 0, head: "", refused: str === (prev.dataset.refused ?? str) });
       } else if (prev instanceof HTMLElement && prev.classList.contains("eq") && prev.dataset.latex && !prev.closest(".raw")) {
         // Formule faite a l'editeur (sans source tapee) : relue en clair, elle
         // se fond dans la formule de la ligne (« (A)/(B) » tape autour d'elle
@@ -3363,7 +3448,8 @@ export class TextDoc {
       for (const s of touched) {
         const a = Math.max(from, s.a), b = Math.min(to, s.b);
         if (a >= b) continue;
-        if (s.kind === "eq" && s !== undone) { pieces.push(s.node); kept.add(s.node); }
+        const rawWhole = s.node instanceof HTMLElement && s.node.classList.contains("raw") && a === s.a && b === s.b;
+        if ((s.kind === "eq" && s !== undone) || rawWhole) { pieces.push(s.node); kept.add(s.node); }
         else pieces.push(full.slice(a, b));
       }
     };
@@ -3438,6 +3524,8 @@ export class TextDoc {
     // "28/09/2026" : une date reste du texte (un chiffre seul, "3/", fait
     // bien une fraction).
     if (/^[\d/\s]+$/.test(num) && /\d{2}/.test(num)) return false;
+    // « seance du 12/ », « le 3/ » : une date qui commence.
+    if (dateAfterWord(full.slice(0, found.start), num)) return false;
     if (!slashOpensFraction(num, full)) return false;
 
     const cur = segs[segs.length - 1];
@@ -3468,6 +3556,84 @@ export class TextDoc {
   }
 
   /**
+   * Curseur dans un texte refuse (`.raw`) dont le texte a change : il redevient
+   * du texte ordinaire (« Vs = Vz » refuse, puis « z » efface et « x - Vbe »
+   * tape : la ligne se remet en formule). Une frappe collee a sa fin en sort
+   * (`leaveRawEnd`), le texte refuse reste alors tel quel.
+   */
+  private releaseRaw(): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const node = sel.getRangeAt(0).startContainer;
+    const raw = (node.nodeType === Node.TEXT_NODE ? node.parentElement : node as HTMLElement)?.closest<HTMLElement>(".raw");
+    if (!raw || !this.root.contains(raw) || raw.querySelector(".eq")) return;
+    const text = raw.textContent ?? "";
+    const refused = raw.dataset.refused;
+    if (refused !== undefined && text === refused) return;
+    const offset = sel.getRangeAt(0).startOffset;
+    const kids = Array.from(raw.childNodes);
+    raw.replaceWith(...kids);
+    if (node.isConnected) sel.collapse(node, offset);
+  }
+
+  /** Frappe juste a la fin d'un texte refuse : elle part apres lui, en texte ordinaire. */
+  private leaveRawEnd(): void {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    let raw: HTMLElement | null = null;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const inRaw = node.parentElement?.closest<HTMLElement>(".raw") ?? null;
+      if (inRaw && inRaw.lastChild === node && r.startOffset === (node.textContent ?? "").length) raw = inRaw;
+    } else {
+      // Curseur pose entre deux noeuds, juste apres le texte refuse.
+      const prev = node.childNodes[r.startOffset - 1];
+      if (prev instanceof HTMLElement && prev.classList.contains("raw")) raw = prev;
+    }
+    if (!raw || !this.root.contains(raw)) return;
+    if ((raw.textContent ?? "") !== (raw.dataset.refused ?? raw.textContent)) return;
+    let next = raw.nextSibling;
+    if (!(next instanceof Text)) {
+      next = anchor();
+      raw.after(next);
+    }
+    const t = next as Text;
+    sel.collapse(t, t.data.startsWith("\u200b") ? 1 : 0);
+  }
+
+  /**
+   * Retour arriere juste apres une formule mise en forme automatiquement :
+   * elle redevient le texte tape, moins sa derniere lettre, comme si on
+   * corrigeait la frappe (« Vbb » ⌫ « e ») ; remise en forme a la pause ou a
+   * l'Espace. Par la pile d'annulation du navigateur : Ctrl+Z la rend.
+   */
+  private reopenEq(eq: HTMLElement): boolean {
+    const src = eq.dataset.src;
+    if (!src || eq.classList.contains("live") || eq.closest(".raw")) return false;
+    const sel = document.getSelection();
+    if (!sel) return false;
+    const r = document.createRange();
+    r.selectNode(eq);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    const text = src.slice(0, -1);
+    this.quiet = true;
+    let ok: boolean;
+    try {
+      ok = text ? document.execCommand("insertText", false, text) : document.execCommand("delete");
+    } finally { this.quiet = false; }
+    if (!ok) {
+      const t = document.createTextNode(text);
+      eq.replaceWith(t);
+      sel.collapse(t, t.length);
+    }
+    this.lastAuto = null;
+    this.emit();
+    return true;
+  }
+
+  /**
    * Ctrl+Z ou Retour arriere juste apres une mise en forme automatique :
    * les formules creees redeviennent le texte tape, et ne sont plus
    * reconverties. `backspace` : seulement ce qui touche le curseur (une
@@ -3491,6 +3657,7 @@ export class TextDoc {
       return true;
     }
     let done = false;
+    let lastRaw: HTMLElement | null = null;
     const g = last.greek;
     if (last.eqs.length && (!backspace || last.atCaret) && last.eqs.every((q) => this.root.contains(q))) {
       last.eqs.forEach((q, i) => {
@@ -3500,9 +3667,24 @@ export class TextDoc {
           src = src.slice(0, -1) + g.word;
         }
         dropAnchorAfter(q);
-        q.replaceWith(rawSpan(src));
+        const raw = rawSpan(src);
+        q.replaceWith(raw);
+        if (i === last.eqs.length - 1) lastRaw = raw;
       });
       done = true;
+      // Retour arriere : l'espace qui avait mis en forme part aussi, comme
+      // une frappe ordinaire (« Vbb » puis Espace, ⌫ ⌫ : « Vb »), le curseur
+      // au bout du texte rendu.
+      const sel = document.getSelection();
+      const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
+      const n = r?.startContainer;
+      const lr = lastRaw as HTMLElement | null;
+      if (backspace && !g && lr && r && n instanceof Text && n === lr.nextSibling
+          && n.data.slice(0, r.startOffset).replace(/\u200b/g, "") === " ") {
+        n.deleteData(0, r.startOffset);
+        const t = lr.lastChild;
+        if (t instanceof Text) sel!.collapse(t, t.length);
+      }
     }
     // "π " redevient "pi ", le curseur reste apres l'espace.
     if (g && this.root.contains(g.node) && (g.node.textContent ?? "").slice(g.at - 1, g.at) === g.char) {
@@ -3920,6 +4102,8 @@ export class TextDoc {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
     }
+    // Frappe collee a la fin d'un texte refuse : elle part apres lui.
+    if (!this.live && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) this.leaveRawEnd();
     // Fraction en cours de frappe au "/" : ses touches d'abord.
     if (this.live) {
       if (!this.live.eq.isConnected) this.live = null;
@@ -4043,6 +4227,7 @@ export class TextDoc {
         const eq = neighbour(sel.getRangeAt(0), e.key === "Delete");
         if (eq instanceof HTMLElement && eq.classList.contains("eq")) {
           e.preventDefault();
+          if (e.key === "Backspace" && this.reopenEq(eq)) return;
           const r = document.createRange();
           r.selectNode(eq);
           sel.removeAllRanges();
@@ -4405,8 +4590,13 @@ function scrollToCenter(from: HTMLElement, rect: DOMRect): void {
  * Texte redevenu brut apres une annulation de mise en forme : son propre
  * noeud, que la relecture des formules ne reprend pas.
  */
+/**
+ * Texte rendu tel quel (Retour arriere ou Ctrl+Z juste apres une mise en
+ * forme, « en texte ») : `data-refused` garde ce qui a ete refuse. Corrige
+ * ensuite (lettre effacee), il redevient du texte ordinaire (`releaseRaw`).
+ */
 function rawSpan(text: string): HTMLElement {
-  return el("span", { class: "raw" }, text);
+  return el("span", { class: "raw", dataset: { refused: text } }, text);
 }
 
 /** Pose `text` a la place de `range`, dans la couleur de frappe choisie. */

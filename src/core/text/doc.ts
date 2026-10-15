@@ -612,6 +612,23 @@ const TEX_WORDS: Record<string, string> = {
   Rightarrow: "=>", Leftrightarrow: "<=>", infty: "infini", pm: "+-", partial: "d",
 };
 
+/** Point de multiplication a la francaise : « R.C », « 10.10^3 », « 10^5.0,1 » ; jamais « 3.5 ». */
+const FR_DOT = /(?<!\d)\.|\.(?!\d)|\d\.(?=10\^)|\^\{?-?\d+\}?\.(?=\d)/;
+/** Ce qui suit une fraction et la multiplie (lettre, chiffre, parenthese, commande qui n'est pas un operateur ; pas « dx »). */
+const FACTOR_AHEAD = /^(?:\s|\\[,;:! ])*(?!d[A-Za-z](?![A-Za-z]))(?:[A-Za-z0-9({]|\\(?!(?:cdot|times|div|pm|mp|leq|geq|neq|approx|ll|gg|to|Rightarrow|Leftrightarrow|right|quad|qquad|end|text|mbox)(?![A-Za-z])|mathrm\{d\})[A-Za-z])/;
+/** Facteur juste avant une fraction : chiffre, lettre, parenthese ou groupe ferme. */
+const FACTOR_BEHIND = /[A-Za-z0-9)}](?:\s|\\[,;:! ])*$/;
+/** Sauf apres une fonction ou une borne (« \sin\frac{\pi}{2} », « \int_0^1\frac1x »). */
+const NO_FACTOR_BEHIND = /\\(?:sin|cos|tan|cot|sh|ch|th|sinh|cosh|tanh|arcsin|arccos|arctan|exp|ln|log|lim|int|iint|oint|sum|prod|left|right|mathrm|text|operatorname|displaystyle)(?:\s|\\[,;:! ])*$|\\(?:int|iint|oint|sum|prod|lim)\s*(?:[_^\u0001]\s*(?:\{[^{}]*\}|\([^()]*\)|\\?[A-Za-z0-9]+)\s*)*(?:\s|\\[,;:! ])*$/;
+
+/** Commandes qui valent une grandeur (lettres grecques, π, ∞) : un facteur ; les autres (\cdot, \sin, \int…) non. */
+const VALUE_CMD = /^(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|infty|ell|hbar)$/;
+function factorBehind(before: string): boolean {
+  const cmd = /\\([A-Za-z]+)(?:\s|\\[,;:! ])*$/.exec(before);
+  if (cmd) return VALUE_CMD.test(cmd[1]);
+  return FACTOR_BEHIND.test(before) && !NO_FACTOR_BEHIND.test(before);
+}
+
 /**
  * Formule LaTeX relue en texte simple, comme on l'aurait tapee :
  * "V_{be}" -> "Vbe", "\frac{V_z - V_{be}}{R}" -> "(Vz - Vbe)/R",
@@ -636,9 +653,24 @@ export function texToPlain(tex: string): string {
   const productParens = (x: string) => /[\w)}]\s*\(/.test(x)
     && !/^\\?(?:sqrt|sin|cos|tan|exp|ln|log|sh|ch|th|arcsin|arccos|arctan)\s*\([^()]*\)$/.test(x.trim());
   // Nombre colle a une lettre (« 2p ») : un produit, entre parentheses (« 1/(2p) »).
+  // Une fraction (« 3/4 ») ou un produit au point (« R.C », « 10.10^3 »,
+  // « 10^5.0,1 ») aussi : « 1/(R.C) », jamais « 1/R.C » relu (1/R).C.
   const wrapDen = (x: string) =>
-    (/[\s+\-−=<>]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) || productParens(x) || /^\d+(?:[.,]\d+)?\s*\\?[A-Za-z]/.test(x.trim())
+    (/[\s+\-−=<>/·×*]|\\[,;:! ]|\\(?:cdot|times)(?![A-Za-z])/.test(top(x)) || FR_DOT.test(top(x)) || productParens(x)
+      || /^\d+(?:[.,]\d+)?\s*\\?[A-Za-z]/.test(x.trim())
       ? `(${x.trim()})` : x.trim());
+  // Fraction dans son contexte : elevee a une puissance (« (3/4)^2 ») ;
+  // collee a un facteur devant (« 2\frac34 » = « 2 · 3/4 », jamais « 23/4 »)
+  // ou derriere quand son denominateur n'est pas un nombre (« K/p · T »,
+  // jamais « K/pT » ; « 1/2C » reste : mathjs lit (1/2)C).
+  // « d/dt (…) » (derivee notee en operateur) n'est pas un produit.
+  const fracInContext = (f: string, num: string, den: string, before: string, after: string) => {
+    if (/^\s*\^/.test(after)) f = `(${f})`;
+    else if (!/^\d+(?:[.,]\d+)?$/.test(den) && !/^\s*(?:d|\\partial)(?:\^\S+)?\s*$/.test(num) && FACTOR_AHEAD.test(after)) f = `${f} · `;
+    if (factorBehind(before)) f = ` · ${f}`;
+    else if (/[A-Za-z0-9}]$/.test(before)) f = ` ${f}`; // « int_0^1 1/x », jamais « int_0^11/x »
+    return f;
+  };
   // Indice compose : entre parentheses, comme on le tape ("u_(n+1)").
   const sub = (x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `(${x.trim()})` : x.trim());
   // \dfrac, \tfrac : des fractions comme les autres (« \dfrac1p » -> « 1/p »).
@@ -655,7 +687,8 @@ export function texToPlain(tex: string): string {
       // Groupe nu (« { p}^{2} » de MathLive), pas l'argument d'une commande ni d'un ^ ou _.
       .replace(/(^|[^\\A-Za-z^_}])\{([^{}]*)\}/g, "$1$2")
       .replace(/(\\frac\{[^{}]*\})\s*([0-9A-Za-z])/g, "$1{$2}")
-      .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (_a, n: string, d: string) => `${wrapNum(n)}/${wrapDen(d)}`)
+      .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (a: string, n: string, d: string, off: number, all: string) =>
+        fracInContext(`${wrapNum(n)}/${wrapDen(d)}`, n, wrapDen(d), all.slice(0, off), all.slice(off + a.length)))
       // « i\sqrt{7} » -> « i sqrt(7) », jamais « isqrt(7) ».
       .replace(/\\sqrt\{([^{}]*)\}/g, (_a, x: string, off: number, all: string) => `${/[A-Za-z0-9)]/.test(all[off - 1] ?? "") ? " " : ""}sqrt(${x})`)
       // Bornes d'une integrale, d'une somme : le "_" reste ("int_0^1").
@@ -663,7 +696,7 @@ export function texToPlain(tex: string): string {
       .replace(/\\(int|sum|prod|lim)_/g, "\\$1\u0001")
       .replace(/_\{([^{}]*)\}/g, (_a, x: string) => (/[\s+\-−=<>]/.test(x.trim()) ? `_${sub(x)}` : x))
       // Exposant : nu s'il tient en un nombre ou une lettre (« e^(2t) », « x^10 »).
-      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${/^\s*(?:-?\d+(?:[.,]\d+)?|\\?[A-Za-z]+|[A-Za-z])\s*$/.test(e) && !/^\s*[A-Za-z]{2,}\s*$/.test(e) ? e.trim() : wrapDen(e).startsWith("(") ? wrapDen(e) : `(${e.trim()})`}`)
+      .replace(/\^\{([^{}]*)\}/g, (_a, e: string) => `^${/^\s*(?:-?\d+(?:,\d+)?|\\?[A-Za-z]+|[A-Za-z])\s*$/.test(e) && !/^\s*[A-Za-z]{2,}\s*$/.test(e) ? e.trim() : wrapDen(e).startsWith("(") ? wrapDen(e) : `(${e.trim()})`}`)
       .replace(/\{,\}/g, ",");
     if (next === s) break;
     s = next;

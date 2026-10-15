@@ -68,6 +68,11 @@ const GREEK_NAMES = [
 ];
 const GREEK_RE = new RegExp(`(${GREEK_NAMES.sort((a, b) => b.length - a.length).join("|")})`, "g");
 
+/** Relecture en clair sans reste de LaTeX ni de structure (cases, displaystyle) : proposable telle quelle. */
+function cleanPlain(plain: string): boolean {
+  return !/[\\$]|displaystyle|begin|endcases|mathcal|langle|rangle/.test(plain);
+}
+
 /** Texte lisible d'un morceau en markdown restreint (formules relues comme tapees). */
 function plainOf(src: string): string {
   return parseDoc(src).map((t) => (t.kind === "text" ? t.text : t.kind === "math" ? texToPlain(t.latex) : "")).join("");
@@ -138,7 +143,8 @@ export function extractFormulas(content: string): Formula[] {
       } else {
         const before = clause.slice(0, eq.at);
         const m = LHS.exec(before);
-        lhs = (m?.[0] ?? "").trim();
+        // « Donc $f_{eq}$ = » : le mot outil devant la grandeur n'en fait pas partie.
+        lhs = (m?.[0] ?? "").trim().replace(/^(\S+)\s+(?=\$)/, (all, w: string) => (STOP.has(w.toLowerCase()) ? "" : all));
         // Nom ecrit en texte : court (Ru, Cte, Δ$i_L$), jamais un mot (« fournie », « que $I_B$ »).
         const word = lhs.replace(/\$[^$]*\$/g, "").trim();
         if (word && (/^[a-zàâçéèêëîïôûùü]{3,}$/.test(word) || word.length > 4)) continue;
@@ -202,6 +208,16 @@ interface Entry {
   short: string;
   lhsLong: string;
   lhsShort: string;
+  /** Membre droit plie (apres le « = » du membre gauche). */
+  rhsLong: string;
+  rhsShort: string;
+  /** Membres, casse gardee (caseKey). */
+  lhsCase: string;
+  /** Initiale de la lettre grecque en tete du membre gauche (greekLead). */
+  lhsGreek: string;
+  rhsCase: string;
+  /** Relue proprement (pas de reste de LaTeX : \\displaystyle, cases...). */
+  clean: boolean;
   count: number;
   valueOnly: boolean;
   /** Ou elle apparait : « cahier/intercalaire » -> date la plus recente. */
@@ -227,8 +243,12 @@ export class SuggestIndex {
       // Meme formule a espaces pres : une seule entree.
       const dedup = long;
       const lk = formulaKey(plainOf(f.lhs));
+      const rhsOf = (k: string, lhs: string) => (k.startsWith(`${lhs}=`) ? k.slice(lhs.length + 1) : k.slice(k.indexOf("=") + 1));
       const e = this.entries.get(dedup) ?? {
-        insert: f.insert, long, short, lhsLong: lk.long, lhsShort: lk.short, count: 0, valueOnly: f.valueOnly, where: new Map(),
+        insert: f.insert, long, short, lhsLong: lk.long, lhsShort: lk.short,
+        rhsLong: rhsOf(long, lk.long), rhsShort: rhsOf(short, lk.short), lhsCase: caseKey(plainOf(f.lhs)), lhsGreek: greekLead(plainOf(f.lhs)),
+        rhsCase: caseKey(plain.slice(plain.indexOf("=", plainOf(f.lhs).length - 1) + 1)),
+        clean: cleanPlain(plain), count: 0, valueOnly: f.valueOnly, where: new Map(),
       };
       e.count++;
       const seen = e.where.get(where);
@@ -246,6 +266,14 @@ export class SuggestIndex {
    * formules deja mises en forme sous leur source tapee). On essaie les
    * debuts de mot du plus long au plus court : « Donc DeltaS = » cherche
    * « Donc DeltaS = », puis « DeltaS = ».
+   *
+   * Stricte : mieux vaut rien qu'une formule sans rapport. Seulement
+   * - le membre gauche tape en entier puis « = » (« Req = », « ΔS = V »),
+   *   le debut du membre droit deja tape devant etre celui de la formule ;
+   * - ou un debut de grandeur qui ne peut pas etre un mot (« DeltaS », « iLm »,
+   *   « ΔS », « R1 ») ;
+   * dans la meme matiere, jamais une simple valeur (« vbatt = 9 V »), et
+   * seulement si une formule l'emporte nettement sur les autres.
    */
   suggest(line: string, ctx: SuggestContext): Suggestion | null {
     if (!this.entries.size || /\s{2,}$/.test(line)) return null;
@@ -257,8 +285,10 @@ export class SuggestIndex {
       }
     }
     for (const s of starts) {
+      // « Pu / Pf = », « iD = is - ie = » : un terme au milieu d'un calcul, pas le debut d'une relation.
+      if (/[=+\-−*/·^(<>≈]\s*$/.test(line.slice(0, line.length - tail.length + s))) continue;
       const raw = tail.slice(s);
-      const q = queryOk(raw);
+      const q = queryOf(raw);
       if (!q) continue;
       const best = this.best(q, raw, ctx);
       if (best) return { insert: best.e.insert, replace: raw.length, score: best.score };
@@ -266,17 +296,26 @@ export class SuggestIndex {
     return null;
   }
 
-  private best(q: { long: string; short: string }, raw: string, ctx: SuggestContext): { e: Entry; score: number } | null {
+  private best(q: Query, raw: string, ctx: SuggestContext): { e: Entry; score: number } | null {
     const now = ctx.now ?? Date.now();
     const here = `${ctx.notebook}/${ctx.divider}`;
-    let best: { e: Entry; score: number } | null = null;
+    const scored: { e: Entry; score: number }[] = [];
     for (const e of this.entries.values()) {
-      const hit = e.long.startsWith(q.long) || e.short.startsWith(q.short);
-      if (!hit) continue;
-      // La formule entiere est deja tapee : rien a proposer.
-      if (e.long === q.long || e.short === q.short) continue;
-      // Tape en clair, la requete doit au moins couvrir le debut du membre gauche.
-      if (!(e.lhsLong.startsWith(q.long) || q.long.startsWith(e.lhsLong) || e.lhsShort.startsWith(q.short) || q.short.startsWith(e.lhsShort))) continue;
+      if (!e.clean) continue;
+      // Meme matiere seulement : une formule de Signaux n'a rien a faire en Electronique.
+      if (![...e.where.keys()].some((w) => w.startsWith(`${ctx.notebook}/`))) continue;
+      // Casse respectee : is n'est pas Is, iD n'est pas Id.
+      if (!caseMatch(q.lhsCase, q.lhsGreek, e, q.rhs === null)) continue;
+      if (q.rhs === null) {
+        // Debut du membre gauche (« DeltaS », « iLm ») : il doit en etre le debut.
+        if (!(e.lhsLong.startsWith(q.long) || e.lhsShort.startsWith(q.short))) continue;
+      } else {
+        // « X = ... » : X est exactement le membre gauche, la suite le debut du membre droit.
+        if (!(e.lhsLong === q.long || e.lhsShort === q.short)) continue;
+        if (!(e.rhsLong.startsWith(q.rhs.long) || e.rhsShort.startsWith(q.rhs.short))) continue;
+        if (!e.rhsCase.startsWith(q.rhs.case)) continue;
+        if (e.rhsLong === q.rhs.long || e.rhsShort === q.rhs.short) continue;
+      }
       let score = 2 * Math.log(1 + e.count);
       let latest = "";
       for (const [w, d] of e.where) {
@@ -286,31 +325,94 @@ export class SuggestIndex {
       }
       const age = (now - (Date.parse(latest) || now)) / 86400000;
       score += 2 * 0.5 ** (Math.max(0, age) / 30);
-      if (e.valueOnly) score -= 2;
       // Casse respectee (S et s ne sont pas la meme grandeur).
       const lhsPlainStart = raw.replace(/\s/g, "")[0];
       if (lhsPlainStart && e.insert.replace(/[\s$\\{}]/g, "").includes(lhsPlainStart)) score += 0.5;
       score -= Math.max(0, e.long.length - 60) * 0.02;
-      if (!best || score > best.score) best = { e, score };
+      scored.push({ e, score });
     }
-    return best;
+    // Jamais une simple valeur (« Ru = 50 Ω », l'application numerique d'un exercice).
+    // Meme formule ecrite un peu autrement (« $\\frac{..}{8C}$T », « $\\frac{..}{8C}T$ ») : une seule.
+    const groups = new Map<string, { best: { e: Entry; score: number }; count: number }>();
+    for (const x of scored) {
+      if (x.e.valueOnly) continue;
+      const g = groups.get(x.e.rhsCase);
+      if (!g) groups.set(x.e.rhsCase, { best: x, count: x.e.count });
+      else { g.count += x.e.count; if (x.score > g.best.score) g.best = x; }
+    }
+    const ranked = [...groups.values()].sort((a, b) => b.best.score - a.best.score);
+    const win = ranked[0];
+    if (!win) return null;
+    // Ecrite une seule fois : pas assez sur pour la proposer.
+    if (win.count < MIN_SEEN) return null;
+    // Deux ecritures aussi probables l'une que l'autre : on ne choisit pas a sa place.
+    const rival = ranked[1];
+    if (rival && win.best.score - rival.best.score < AMBIGUOUS) return null;
+    // Une grandeur ecrite de plusieurs facons (Pf = Vbatt.Ie, Pf = Pc + Pu...) :
+    // seulement celle qu'il ecrit le plus souvent, et nettement.
+    const total = ranked.reduce((n, g) => n + g.count, 0);
+    if (win.count < DOMINANT * total) return null;
+    return win.best;
   }
 }
 
+/** Ecart de score en dessous duquel deux formules sont trop proches pour en proposer une. */
+const AMBIGUOUS = 0.5;
+/** Part des ecritures d'une grandeur que la formule proposee doit avoir, s'il y en a plusieurs. */
+const DOMINANT = 0.6;
+/** Nombre de fois qu'une formule doit deja avoir ete ecrite pour etre proposee. */
+const MIN_SEEN = 2;
+
+interface Query { long: string; short: string; lhsCase: string; lhsGreek: string; rhs: { long: string; short: string; case: string } | null }
+
+/** Lettres du membre gauche, casse gardee (« iD » n'est pas « Id »). */
+function caseKey(text: string): string {
+  return text.replace(GREEK_RE_CASE, "").replace(/[^A-Za-z0-9]/g, "");
+}
+
+/** Initiale (minuscule) de la lettre grecque qui ouvre le membre gauche (« ΔS » -> « d »), sinon "". */
+function greekLead(text: string): string {
+  const m = new RegExp(`^(?:${GREEK_RE_CASE.source})`, "i").exec(text.trim());
+  if (!m) return "";
+  return (/^[α-ωΑ-Ω]$/.test(m[0]) ? fold(m[0]).text : m[0])[0].toLowerCase();
+}
+
 /**
- * Ce qui est tape peut-il lancer une suggestion ? Au moins 2 caracteres
- * plies ; pas un mot outil ; un mot tout en minuscules seulement s'il
- * ressemble a une grandeur (court, ou avec chiffre ou « = »).
+ * Le membre gauche tape (`q`, casse gardee) est-il celui de l'entree (ou son
+ * debut, `prefix`) ? Grec en toutes lettres, en symbole ou par son initiale
+ * latine (« DS » pour « ΔS ») ; ailleurs la casse compte (« is » n'est pas « Is »).
  */
-function queryOk(raw: string): { long: string; short: string } | null {
+function caseMatch(q: string, qLead: string, e: Entry, prefix: boolean): boolean {
+  const same = (a: string, b: string) => (prefix ? b.startsWith(a) : a === b);
+  if (same(q, e.lhsCase) && (!qLead || qLead === e.lhsGreek)) return true;
+  // « DS = » pour ΔS : l'initiale latine tapee tient lieu de la lettre grecque.
+  return !qLead && !!e.lhsGreek && q[0]?.toLowerCase() === e.lhsGreek && same(q.slice(1), e.lhsCase);
+}
+const GREEK_RE_CASE = new RegExp(`${GREEK_NAMES.join("|")}|[α-ωΑ-Ω]`, "gi");
+
+/**
+ * Ce qui est tape peut-il lancer une suggestion ? « X = suite » : X une
+ * grandeur (pas un mot outil ni une phrase). Sans « = » : un seul mot qui a
+ * la forme d'une grandeur et jamais d'un mot francais en cours de frappe
+ * (grec, Delta, majuscule apres une minuscule, chiffre, « _ »).
+ */
+function queryOf(raw: string): Query | null {
   const t = raw.trim();
   if (!t) return null;
+  const eq = /^([^=<>!~≈≤≥]+?)\s*=(?!=)\s*([^=<>]*)$/.exec(t);
+  if (eq) {
+    const lhs = eq[1].trim();
+    const words = lhs.toLowerCase().split(/\s+/);
+    if (words.length > 2 || words.some((w) => STOP.has(w) || (w.length >= 4 && /^[a-zàâçéèêëîïôûùüÿœ]+$/.test(w) && !GREEK_NAMES.some((g) => w.startsWith(g))))) return null;
+    const k = formulaKey(lhs);
+    if (!k.long) return null;
+    return { ...k, lhsCase: caseKey(lhs), lhsGreek: greekLead(lhs), rhs: { ...formulaKey(eq[2]), case: caseKey(eq[2]) } };
+  }
+  // Sans « = » : un nom de grandeur seulement (« 2/ » ou « (p » ne sont pas un debut de membre gauche).
+  if (t.length < 2 || !/^[A-Za-zΔα-ωΑ-Ω][A-Za-z0-9_α-ωΑ-Ω]*$/.test(t)) return null;
+  const shaped = /^(?:Δ|Delta|delta)|[α-ωΑ-Ω]|[a-z][A-Z]|\d|_/.test(t) && !/^[A-Z]{2,}/.test(t);
+  if (!shaped) return null;
   const k = formulaKey(t);
   if (k.long.length < 2) return null;
-  const words = t.toLowerCase().split(/[\s=]+/).filter(Boolean);
-  if (words.length === 1 && STOP.has(words[0])) return null;
-  // Phrase en cours (plusieurs mots courants) : pas une formule.
-  if (words.some((w) => w.length >= 4 && /^[a-zàâçéèêëîïôûùüÿœ]+$/.test(w) && !GREEK_NAMES.includes(w) && !/^(?:delta|alpha|sigma|omega)/.test(w))) return null;
-  if (/^[a-z]+$/.test(t) && t.length > 3) return null;
-  return k;
+  return { ...k, lhsCase: caseKey(t), lhsGreek: greekLead(t), rhs: null };
 }
