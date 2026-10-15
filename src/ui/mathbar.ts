@@ -39,12 +39,15 @@ export function buildFormulaPanel(getDoc: () => TextDoc | undefined): HTMLElemen
 
   const eq = keep(el("button", { class: "mathkey eq", title: "Nouvelle formule (Alt+=)" }, "Équation"));
   eq.addEventListener("click", () => getDoc()?.insertMath(""));
+  const boxed = keep(el("button", { class: "mathkey", title: "Encadrer la formule avant le curseur (Ctrl+Maj+B)" }));
+  boxed.append(renderTex("\\boxed{x}"));
+  boxed.addEventListener("click", () => getDoc()?.boxFormula());
   const extras: [string, string][] = [["\\partial", "\\partial"], ["\\mathcal{L}", "\\mathcal{L}"], ["\\mathrm{A}", "\\mathrm{A}"]];
   const paint = () => {
     const order = orderedSymbols().map(([, insert]) => insert);
     const rank = (x: string) => { const i = order.indexOf(x); return i < 0 ? 999 : i; };
     root.replaceChildren(
-      section("Structures", eq,
+      section("Structures", eq, boxed,
         ...MATH_TEMPLATES.map((t) => key(t.label, t.key ? `${t.title} (Alt+${t.key.toUpperCase()})` : t.title, t.insert)),
         ...extras.map(([label, insert]) => key(label, symbolName(insert), insert, true))),
       ...SECTIONS.map((sct) => section(sct.title,

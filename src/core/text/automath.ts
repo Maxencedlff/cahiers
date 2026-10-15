@@ -1719,3 +1719,16 @@ function unwrapGroups(s: string): string {
   }
   return out;
 }
+
+/** \boxed{...} ajoute, ou retire s'il entoure deja toute la formule. */
+export function toggleBox(latex: string): string {
+  const t = latex.trim();
+  const m = /^\\boxed\{([\s\S]*)\}$/.exec(t);
+  if (m) {
+    // Accolades equilibrees : le cadre entoure bien tout.
+    let depth = 0, ok = true;
+    for (const c of m[1]) { if (c === "{") depth++; else if (c === "}" && --depth < 0) { ok = false; break; } }
+    if (ok && depth === 0) return m[1];
+  }
+  return `\\boxed{${t}}`;
+}

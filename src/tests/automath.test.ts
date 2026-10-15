@@ -737,3 +737,12 @@ describe("dates dans le texte", () => {
     expect(findFormulas("on a 3/10 ici").map((f) => f.latex)).toEqual(["\\frac{3}{10}"]);
   });
 });
+
+describe("encadrer une formule (Ctrl+Maj+B)", () => {
+  it("toggleBox ajoute puis retire le cadre", async () => {
+    const { toggleBox } = await import("../core/text/automath");
+    expect(toggleBox("A = 5")).toBe("\\boxed{A = 5}");
+    expect(toggleBox("\\boxed{A = 5}")).toBe("A = 5");
+    expect(toggleBox("\\boxed{a}+\\boxed{b}")).toBe("\\boxed{\\boxed{a}+\\boxed{b}}");
+  });
+});

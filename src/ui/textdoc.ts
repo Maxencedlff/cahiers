@@ -10,7 +10,7 @@ import {
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
 import {
-  LIVE_CARET, balanceParens, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveCaretFormula, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
+  LIVE_CARET, balanceParens, toggleBox, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveCaretFormula, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
@@ -2857,6 +2857,13 @@ export class TextDoc {
   }
 
   private onFieldKey(e: KeyboardEvent, mf: MathfieldElement): void {
+    // Ctrl+Maj+B : encadrer toute la formule en cours d'edition (encore : retirer le cadre).
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      e.stopPropagation();
+      mf.setValue(toggleBox(mf.getValue("latex")));
+      return;
+    }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (this.fieldKey(e.key, e.shiftKey, mf)) {
       e.preventDefault();
@@ -3077,6 +3084,36 @@ export class TextDoc {
    * (ou selectionnee) redevient le texte tape, que plus rien ne remet en
    * forme ; Alt+= le reconvertit. Vrai si fait.
    */
+  /**
+   * Encadre la formule juste avant le curseur, ou la formule selectionnee
+   * (resultat a mettre en valeur) ; si elle l'est deja, retire le cadre.
+   * Formule en cours d'edition : toute la formule. Vrai si fait.
+   */
+  boxFormula(): boolean {
+    if (this.field) { this.field.setValue(toggleBox(this.field.getValue("latex"))); return true; }
+    let eq = this.selectedEq();
+    if (!eq) {
+      const sel = document.getSelection();
+      const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
+      if (r && this.root.contains(r.startContainer) && r.collapsed) {
+        let prev: Node | null = r.startContainer.nodeType === Node.TEXT_NODE
+          ? ((r.startContainer.textContent ?? "").slice(0, r.startOffset).replace(/[\u200b\s]/g, "") ? null : r.startContainer.previousSibling)
+          : r.startContainer.childNodes[r.startOffset - 1] ?? null;
+        while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/[\u200b\s]/g, "")) prev = prev.previousSibling;
+        if (prev instanceof HTMLElement && prev.classList.contains("tc")) prev = prev.lastElementChild;
+        if (prev instanceof HTMLElement && prev.classList.contains("eq") && !prev.classList.contains("live")) eq = prev;
+      }
+    }
+    if (!eq) { toast("Place le curseur juste après une formule (ou sélectionne-la), puis Ctrl+Maj+B", "info", 4000); return false; }
+    // Formule figee : sa source tapee n'est plus relue (elle perdrait le cadre).
+    const box = makeEq(toggleBox(eq.dataset.latex ?? ""));
+    eq.replaceWith(box);
+    this.lastAuto = null;
+    this.caretBeside(box, true);
+    this.emit();
+    return true;
+  }
+
   toText(): boolean {
     if (this.field || this.live) return false;
     const sel = document.getSelection();
@@ -3998,6 +4035,8 @@ export class TextDoc {
     }
     if (e.ctrlKey && !e.altKey) {
       const k = e.key.toLowerCase();
+      // Ctrl+Maj+B : encadrer la formule (resultat d'un exercice), pas du gras.
+      if (k === "b" && e.shiftKey) { e.preventDefault(); e.stopPropagation(); this.boxFormula(); return; }
       if (k === "b" || k === "g") { e.preventDefault(); document.execCommand("bold"); this.emit(); return; }
       if (k === "i") { e.preventDefault(); document.execCommand("italic"); this.emit(); return; }
     }
