@@ -465,7 +465,9 @@ class Parser {
       // "dx" d'une integrale : la fin du corps, pas un facteur.
       if (this.inIntegral > 0 && t.t === "id" && DIFF.test(t.s)) break;
       const spacedOk = !sp || this.lastWasNumOrGreek(save)
-        || (this.seenOp && t.t === "id" && (t.s in FUNCS || this.strongVar(save, t.s) || this.factorAhead(this.i)));
+        || (this.seenOp && t.t === "id" && (t.s in FUNCS || this.strongVar(save, t.s) || this.factorAhead(this.i)))
+        // Derivee en point : toujours des maths, meme en tete (« L ddoti(t) + R doti(t) = 0 »).
+        || (t.t === "id" && /^d?dot([A-Za-z]|theta|omega|alpha|phi|varphi)$/.test(t.s));
       const parenTry = sp && !spacedOk && this.seenOp && t.t === "op";
       if (!spacedOk && !parenTry) break;
       this.skipSp();

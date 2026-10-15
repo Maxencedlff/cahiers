@@ -754,6 +754,7 @@ describe("mecanique : somme des forces, derivees en point, primes", () => {
     expect(findFormulas("v = dotx(t)").map((f) => f.latex)).toEqual(["v = \\dot{x}\\left(t\\right)"]);
     expect(findFormulas("on a ddot(x) = 0").map((f) => f.latex)).toEqual(["\\ddot{x} = 0"]);
     expect(findFormulas("la somme des forces")).toEqual([]);
+    expect(findFormulas("L ddoti(t) + R doti(t) = 0").map((f) => f.latex)).toEqual(["L\\,\\ddot{i}\\left(t\\right) + R\\,\\dot{i}\\left(t\\right) = 0"]);
   });
 });
 
