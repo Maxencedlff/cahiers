@@ -1291,6 +1291,7 @@ export function glueDen(s: string): string {
     const k = s.indexOf("/", i);
     if (k < 0) { out += s.slice(i); break; }
     out += s.slice(i, k + 1);
+    const spaced = /\s/.test(s[k - 1] ?? "") || /\s/.test(s[k + 1] ?? "");
     let j = k + 1;
     // « / 1+K/p » : un espace juste apres la barre ne coupe pas le denominateur.
     while (j < s.length && /\s/.test(s[j])) j++;
@@ -1316,12 +1317,17 @@ export function glueDen(s: string): string {
     // qui suit (« 1/(p+1)+2 ») reste dehors.
     const parened = s[start] === "(";
     while (!parened && isOp(s[j]) && !/\s/.test(s[j - 1] ?? " ") && j + 1 < s.length && !/\s/.test(s[j + 1])) {
+      const before = j;
       j++;
       if (!term()) break;
+      if (s[j] === "/") {
+        // Barre collee (« A/p+B/p+1 ») : une somme de fractions (elements
+        // simples), le denominateur s'arrete avant le « + ». Barre entouree
+        // d'espaces (« X / 1+K/(p+3) ») : grosse fraction, le terme garde le sien.
+        if (!spaced) { j = before; break; }
+        if (j + 1 < s.length && !/\s/.test(s[j + 1])) { j++; if (!term()) break; }
+      }
       glued = true;
-      // Terme colle qui est lui-meme une fraction (« 1/1+1/x ») : il garde
-      // son denominateur, 1/(1+1/x) et pas (1/(1+1))/x.
-      if (s[j] === "/" && j + 1 < s.length && !/\s/.test(s[j + 1])) { j++; if (!term()) break; }
     }
     const den = s.slice(start, j);
     out += glued && !(den.startsWith("(") && den.endsWith(")") && count(den, "(") === 1) ? `(${den})` : den;

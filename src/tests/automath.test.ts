@@ -639,12 +639,15 @@ describe("denominateur tape colle : + et - y restent", () => {
   it("glueDen", () => {
     expect(glueDen("2/p+2")).toBe("2/(p+2)");
     // Fraction collee dans le denominateur ; parentheses qui delimitent deja.
-    expect(glueDen("1/1+1/x")).toBe("1/(1+1/x)");
+    // Barre collee : somme de fractions (elements simples).
+    expect(glueDen("1/1+1/x")).toBe("1/1+1/x");
+    expect(glueDen("A/p+B/p+1")).toBe("A/p+B/(p+1)");
+    expect(glueDen("1/ 1+1/x")).toBe("1/ (1+1/x)");
     expect(glueDen("K/(p(p+3)) / 1+K/(p(p+3))")).toBe("K/(p(p+3)) / (1+K/(p(p+3)))");
-    expect(glueDen("1/x+1/y")).toBe("1/(x+1/y)");
+    expect(glueDen("1/x+1/y")).toBe("1/x+1/y");
     expect(glueDen("1/(p+1)+2")).toBe("1/(p+1)+2");
     expect(glueDen("1/(p+1)(p+2)+3")).toBe("1/(p+1)(p+2)+3");
-    expect(liveFormula(glueDen("1/1+1/x"))).toBe("\\frac{1}{1 + \\frac{1}{x}}");
+    expect(liveFormula("A/p+B/p+1")).toBe("\\frac{A}{p} + \\frac{B}{p + 1}");
     expect(glueDen("1/x^2-1")).toBe("1/(x^2-1)");
     expect(glueDen("1/2 + 1/3")).toBe("1/2 + 1/3");
     expect(glueDen("5/p(p^2+1)")).toBe("5/p(p^2+1)");
