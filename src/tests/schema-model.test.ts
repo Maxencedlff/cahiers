@@ -12,13 +12,14 @@ describe("schema : saisie au clavier (tortue)", () => {
     turtlePlace(s, t, "O");                 // borne d'entree
     turtleMove(s, t, "right", 2);
     const r1 = turtlePlace(s, t, "R");
-    expect(r1.name).toBe("R1");
+    expect(r1.name).toBe("R");              // seule de son espece : la lettre seule
     expect(t.at).toEqual({ x: 6, y: 0 });   // repart de la borne b
     turtleMove(s, t, "right", 2);
     turtleNode(t);
     turtleMove(s, t, "down", 1);
     const r2 = turtlePlace(s, t, "R");
     expect(r2.name).toBe("R2");
+    expect(r1.name).toBe("R1");             // la deuxieme renomme la premiere
     expect(r2.rot).toBe(90);
     expect(partPorts(r2).map((p) => [p.x, p.y])).toEqual([[8, 1], [8, 5]]);
     turtleMove(s, t, "down", 1);
@@ -99,8 +100,8 @@ describe("schema : rendu", () => {
     const d = drawSchema(s);
     expect(d.body).toContain('data-part="p1"');
     expect(d.body).not.toContain("<text");
-    expect(d.labels.filter((l) => l.part === r.id).map((l) => l.lines)).toEqual([["R1"], ["10 kΩ"]]);
-    expect(d.labels.some((l) => l.note === 0 && l.lines[0] === "uR1")).toBe(true);
+    expect(d.labels.filter((l) => l.part === r.id).map((l) => l.lines)).toEqual([["R"], ["10 kΩ"]]);
+    expect(d.labels.some((l) => l.note === 0 && l.lines[0] === "uR")).toBe(true);
     expect(d.box.w).toBeGreaterThan(0);
     expect(schemaBounds(s).w).toBe(d.box.w);
   });

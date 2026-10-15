@@ -19,7 +19,8 @@
  *   f F (fusible)               w Pot (potentiometre, w = curseur)
  *   b B (bloc)                  s S (sommateur)
  * Maj+lettre : variante quand elle existe (Maj+C = Cp, Maj+Q = Qp, Maj+M = Mp,
- * Maj+V = Vm, Maj+A = Am, Maj+R = Pot), sinon le meme symbole qu'en minuscule
+ * Maj+V = Vm, Maj+A = Am, Maj+R = Pot, Maj+O = X circuit ouvert : deux bornes
+ * non reliees, sans lettre a lui), sinon le meme symbole qu'en minuscule
  * (Maj+Z = Zener, Maj+P = Cp...).
  *
  * Choix de norme :
@@ -40,7 +41,7 @@
 
 export type SymKey =
   | "R" | "C" | "Cp" | "L" | "D" | "Dz" | "LED" | "K" | "V" | "Vdc" | "I" | "G" | "O" | "A"
-  | "Q" | "Qp" | "M" | "Mp" | "T" | "Vm" | "Am" | "Lamp" | "F" | "Pot" | "B" | "S";
+  | "Q" | "Qp" | "M" | "Mp" | "T" | "Vm" | "Am" | "Lamp" | "F" | "Pot" | "B" | "S" | "X";
 
 export interface Port { name: string; x: number; y: number }
 
@@ -191,6 +192,9 @@ const BODY_G = line(1, 0, 1, 1) + line(0.2, 1, 1.8, 1) + line(0.45, 1.35, 1.55, 
 
 const BODY_O = circle(1, 1, 0.2);
 
+/** Circuit ouvert : deux bornes (petits ronds) non reliees, a la place d'une piece. */
+const BODY_X = line(0, 1, 1.3, 1) + circle(1.5, 1, 0.2) + circle(2.5, 1, 0.2) + line(2.7, 1, 4, 1);
+
 const BODY_A =
   line(0, 1, 1, 1) + line(0, 3, 1, 3) + line(5, 2, 6, 2) +
   path("M1 0 L1 4 L5 2 Z") +
@@ -265,6 +269,7 @@ export const SYMBOLS: Record<SymKey, SymbolDef> = {
   Lamp: dipole("Lamp", "Lampe", "x", BODY_LAMP),
   F: dipole("F", "Fusible", "f", BODY_F),
   Pot: dipole("Pot", "Potentiomètre", "w", BODY_POT, [{ name: "w", x: 2, y: 0 }]),
+  X: dipole("X", "Circuit ouvert", "", BODY_X),
   G: {
     key: "G", label: "Masse", letter: "g", w: 2, h: 2,
     ports: [{ name: "a", x: 1, y: 0 }],
@@ -335,11 +340,11 @@ export const SYMBOLS: Record<SymKey, SymbolDef> = {
   },
 };
 
-const BY_LETTER = new Map<string, SymbolDef>(Object.values(SYMBOLS).map((d) => [d.letter, d]));
+const BY_LETTER = new Map<string, SymbolDef>(Object.values(SYMBOLS).filter((d) => d.letter).map((d) => [d.letter, d]));
 
 /** Maj+lettre : variante du symbole de la lettre minuscule. */
 const SHIFT_VARIANT: Partial<Record<string, SymKey>> = {
-  c: "Cp", q: "Qp", m: "Mp", v: "Vm", a: "Am", r: "Pot",
+  c: "Cp", q: "Qp", m: "Mp", v: "Vm", a: "Am", r: "Pot", o: "X",
 };
 
 /**

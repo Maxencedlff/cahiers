@@ -6,13 +6,17 @@ import {
 
 const KEYS = Object.keys(SYMBOLS) as SymKey[];
 const ROTS: Rot[] = [0, 90, 180, 270];
-const DIPOLES: SymKey[] = ["R", "C", "Cp", "L", "D", "Dz", "LED", "K", "F", "Lamp", "I", "V", "Vdc", "Vm", "Am", "Pot"];
+const DIPOLES: SymKey[] = ["R", "C", "Cp", "L", "D", "Dz", "LED", "K", "F", "Lamp", "I", "V", "Vdc", "Vm", "Am", "Pot", "X"];
+/** Symboles a lettre (le circuit ouvert X n'en a pas : Maj+O). */
+const LETTERED = KEYS.filter((k) => SYMBOLS[k].letter);
 const ALLOWED_TAGS = new Set(["path", "line", "circle", "rect", "polyline"]);
 
 describe("table des symboles", () => {
-  it("26 symboles, cle coherente, grille de 10 px", () => {
+  it("27 symboles (26 lettres + circuit ouvert), cle coherente, grille de 10 px", () => {
     expect(GRID).toBe(10);
-    expect(KEYS.length).toBe(26);
+    expect(KEYS.length).toBe(27);
+    expect(LETTERED.length).toBe(26);
+    expect(symbolByLetter("O")?.key).toBe("X");
     for (const k of KEYS) expect(SYMBOLS[k].key).toBe(k);
   });
 
@@ -43,8 +47,8 @@ describe("table des symboles", () => {
   });
 
   it("lettres uniques, minuscules, une seule touche", () => {
-    const letters = KEYS.map((k) => SYMBOLS[k].letter);
-    expect(new Set(letters).size).toBe(KEYS.length);
+    const letters = LETTERED.map((k) => SYMBOLS[k].letter);
+    expect(new Set(letters).size).toBe(LETTERED.length);
     for (const l of letters) expect(l).toMatch(/^[a-z]$/);
   });
 
@@ -106,7 +110,7 @@ describe("symbolByLetter", () => {
     expect(symbolByLetter("e")?.key).toBe("LED");
     expect(symbolByLetter("u")?.key).toBe("Vdc");
     expect(symbolByLetter("g")?.key).toBe("G");
-    for (const k of KEYS) expect(symbolByLetter(SYMBOLS[k].letter)?.key).toBe(k);
+    for (const k of LETTERED) expect(symbolByLetter(SYMBOLS[k].letter)?.key).toBe(k);
   });
   it("Maj : variante, sinon meme symbole", () => {
     expect(symbolByLetter("C")?.key).toBe("Cp");

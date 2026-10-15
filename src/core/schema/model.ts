@@ -25,6 +25,24 @@ export function rotForDir(d: Dir): Rot {
   return d === "right" ? 0 : d === "down" ? 90 : d === "left" ? 180 : 270;
 }
 
+/**
+ * Dipoles sans sens (resistance, condensateur, bobine, interrupteur...) :
+ * traces vers la gauche ou vers le haut, ils gardent l'orientation habituelle
+ * (bosses de la bobine en haut, lame de l'interrupteur vers la droite) ;
+ * seuls les dipoles polarises (diode, source, condensateur polarise)
+ * suivent le sens du trace.
+ */
+const NO_SENSE = new Set<string>(["R", "C", "L", "K", "F", "Lamp", "X"]);
+
+/** Rotation et borne posee au debut du trace, pour un dipole trace dans le sens `d`. */
+export function orientFor(sym: SymKey, d: Dir): { rot: Rot; entry: string; exit: string } {
+  const th = SYMBOLS[sym].through ?? ["a", "b"];
+  if (NO_SENSE.has(sym) && (d === "left" || d === "up")) {
+    return { rot: rotForDir(d === "left" ? "right" : "down"), entry: th[1], exit: th[0] };
+  }
+  return { rot: rotForDir(d), entry: th[0], exit: th[1] };
+}
+
 export function samePt(a: Pt, b: Pt): boolean { return a.x === b.x && a.y === b.y; }
 
 export function emptySchema(id: string): SchemaBlock {
@@ -59,15 +77,25 @@ const NAME_PREFIX: Partial<Record<SymKey, string>> = {
   Q: "Q", Qp: "Q", M: "M", Mp: "M", T: "T", F: "F", Lamp: "H",
 };
 
-/** Nom suivant d'une piece (« R3 » s'il y a deja R1 et R2), rien pour une masse, un AOP, un bloc. */
+/**
+ * Nom suivant d'une piece : la lettre seule pour la premiere de son espece
+ * (« L », « C », comme au tableau), puis « R2 », « R3 »... (la premiere,
+ * restee « R », devient alors « R1 », voir `addPart`). Rien pour une masse,
+ * un AOP, un bloc, un circuit ouvert.
+ */
 export function nextName(s: SchemaBlock, sym: SymKey): string | undefined {
   const pre = NAME_PREFIX[sym];
   if (!pre) return undefined;
-  let n = 1;
   const used = new Set(s.parts.map((p) => p.name));
+  const same = s.parts.some((p) => p.name === pre || new RegExp(`^${pre}\\d+$`).test(p.name ?? ""));
+  if (!same) return pre;
+  let n = used.has(pre) ? 2 : 1;
   while (used.has(`${pre}${n}`)) n++;
   return `${pre}${n}`;
 }
+
+/** Etiquette de tension par defaut d'une piece nommee. */
+function defaultU(name: string): string { return `u${name}`; }
 
 function newId(s: SchemaBlock): string {
   let n = s.parts.length + 1;
@@ -178,7 +206,16 @@ export function addPart(s: SchemaBlock, sym: SymKey, at: Pt, rot: Rot = 0, mirro
   if (rot) part.rot = rot;
   if (mirror) part.mirror = true;
   const name = nextName(s, sym);
-  if (name) part.name = name;
+  if (name) {
+    part.name = name;
+    // Deuxieme de son espece : la premiere, restee « R », devient « R1 » (et sa tension uR1).
+    const pre = NAME_PREFIX[sym];
+    const bare = pre && name !== pre ? s.parts.find((p) => p.name === pre) : undefined;
+    if (bare && pre) {
+      bare.name = `${pre}1`;
+      for (const n of s.notes ?? []) if (n.part === bare.id && n.label === defaultU(pre)) n.label = defaultU(bare.name);
+    }
+  }
   s.parts.push(part);
   return part;
 }
@@ -307,8 +344,8 @@ export function insertOnWire(s: SchemaBlock, sym: SymKey, wire: number, seg: num
   off = Math.max(0, Math.min(len - def.w, off));
   const start = { x: a.x + step.x * off, y: a.y + step.y * off };
   const end = { x: start.x + step.x * def.w, y: start.y + step.y * def.w };
-  const rot = rotForDir(dir);
-  const part = addPart(s, sym, placeFor(sym, def.through[0], start, rot), rot);
+  const o = orientFor(sym, dir);
+  const part = addPart(s, sym, placeFor(sym, o.entry, start, o.rot), o.rot);
   s.wires.splice(wire, 1);
   addWire(s, [...pts.slice(0, seg + 1), start]);
   addWire(s, [end, ...pts.slice(seg + 1)]);
@@ -324,7 +361,7 @@ export function deleteWire(s: SchemaBlock, wire: number): void {
 
 /** Fleche de tension le long d'une piece (convention recepteur), nommee u_<nom>. */
 export function addVoltage(s: SchemaBlock, part: SchemaPart): SchemaNote {
-  const n: SchemaNote = { kind: "u", part: part.id, label: part.name ? `u${part.name}` : "u" };
+  const n: SchemaNote = { kind: "u", part: part.id, label: part.name ? defaultU(part.name) : "u" };
   (s.notes ??= []).push(n);
   return n;
 }
@@ -363,6 +400,212 @@ export function addText(s: SchemaBlock, at: Pt, label: string): SchemaNote {
   const n: SchemaNote = { kind: "text", x: at.x, y: at.y, label };
   (s.notes ??= []).push(n);
   return n;
+}
+
+/* ---------------- circuit ouvert, court-circuit ---------------- */
+
+/**
+ * Circuit ouvert a la place d'un dipole (schema equivalent d'une phase :
+ * diode bloquee, interrupteur ouvert) : deux bornes non reliees, memes
+ * bornes, memes fils, la fleche de tension reste. Encore une fois : la piece
+ * revient (`was`). Rend false si ce n'est pas un dipole.
+ */
+export function toggleOpen(s: SchemaBlock, id: string): boolean {
+  const part = s.parts.find((p) => p.id === id);
+  if (!part) return false;
+  if (part.sym === "X") {
+    if (!part.was || !isSym(part.was)) return false;
+    part.sym = part.was;
+    delete part.was;
+    return true;
+  }
+  if (!isSym(part.sym) || !SYMBOLS[part.sym].through || SYMBOLS[part.sym].w !== 4) return false;
+  part.was = part.sym;
+  part.sym = "X";
+  return true;
+}
+
+/**
+ * Court-circuit : la piece (dipole) est remplacee par un fil entre ses deux
+ * bornes (interrupteur ferme, diode passante ideale) ; ses annotations partent.
+ */
+export function shortPart(s: SchemaBlock, id: string): boolean {
+  const part = s.parts.find((p) => p.id === id);
+  if (!part || !isSym(part.sym) || !SYMBOLS[part.sym].through) return false;
+  const d = SYMBOLS[part.sym];
+  const ports = partPorts(part);
+  const a = ports.find((q) => q.name === d.through![0]), b = ports.find((q) => q.name === d.through![1]);
+  if (!a || !b) return false;
+  s.parts = s.parts.filter((p) => p !== part);
+  s.notes = (s.notes ?? []).filter((n) => n.part !== id);
+  if (!s.notes.length) delete s.notes;
+  addWire(s, routeOrtho(a, b));
+  return true;
+}
+
+/* ---------------- annotations : deplacer, retourner ---------------- */
+
+/** Point du fil le plus proche (au demi-carreau), avec le sens du segment ; null si aucun fil a `tol` pres. */
+export function nearestOnWire(s: SchemaBlock, p: { x: number; y: number }, tol = 1.2): { at: Pt; horizontal: boolean } | null {
+  let best: { at: Pt; horizontal: boolean; d: number } | null = null;
+  for (const [a, b] of segments(s)) {
+    const horizontal = a.y === b.y;
+    if (samePt(a, b)) continue;
+    const half = (v: number) => Math.round(v * 2) / 2;
+    const at = horizontal
+      ? { x: Math.max(Math.min(a.x, b.x), Math.min(Math.max(a.x, b.x), half(p.x))), y: a.y }
+      : { x: a.x, y: Math.max(Math.min(a.y, b.y), Math.min(Math.max(a.y, b.y), half(p.y))) };
+    const d = Math.hypot(at.x - p.x, at.y - p.y);
+    if (d <= tol && (!best || d < best.d)) best = { at, horizontal, d };
+  }
+  return best ? { at: best.at, horizontal: best.horizontal } : null;
+}
+
+/**
+ * Fleche de courant au point du fil le plus proche, dans le sens `dir` si
+ * on le donne (geste le long du fil), sinon de gauche a droite / de haut en bas.
+ */
+export function currentOnWire(s: SchemaBlock, p: { x: number; y: number }, dir?: Dir): SchemaNote | null {
+  const w = nearestOnWire(s, p);
+  if (!w) return null;
+  const along: Dir = w.horizontal
+    ? (dir === "left" ? "left" : "right")
+    : (dir === "up" ? "up" : "down");
+  return addCurrent(s, w.at, along);
+}
+
+/**
+ * Deplace une annotation : un courant glisse le long des fils (il garde son
+ * sens sur un fil de meme orientation), un texte, une fleche libre ou un
+ * trait suivent le geste au quart de case.
+ */
+export function moveNote(s: SchemaBlock, i: number, to: { x: number; y: number }, from: { x: number; y: number }): void {
+  const n = s.notes?.[i];
+  if (!n || n.x === undefined || n.y === undefined) return;
+  const q = (v: number) => Math.round(v * 4) / 4;
+  if (n.kind === "i") {
+    const w = nearestOnWire(s, to);
+    if (!w) return;
+    const was = DIRS[(n.dir ?? "right") as Dir];
+    const wasH = was.y === 0;
+    if (wasH !== w.horizontal) n.dir = w.horizontal ? (was.y < 0 ? "left" : "right") : (was.x < 0 ? "up" : "down");
+    n.x = w.at.x; n.y = w.at.y;
+    return;
+  }
+  const dx = q(to.x - from.x), dy = q(to.y - from.y);
+  n.x = q(n.x + dx); n.y = q(n.y + dy);
+  if (n.x2 !== undefined && n.y2 !== undefined) { n.x2 = q(n.x2 + dx); n.y2 = q(n.y2 + dy); }
+}
+
+/** Retourne une annotation : sens du courant, sens de la tension, fleche libre. */
+export function flipNote(s: SchemaBlock, i: number): void {
+  const n = s.notes?.[i];
+  if (!n) return;
+  if (n.kind === "i") {
+    const opp: Record<Dir, Dir> = { right: "left", left: "right", up: "down", down: "up" };
+    n.dir = opp[(n.dir ?? "right") as Dir];
+  } else if (n.kind === "u") {
+    if (n.flip) delete n.flip; else n.flip = true;
+  } else if (n.x2 !== undefined && n.y2 !== undefined && n.x !== undefined && n.y !== undefined) {
+    [n.x, n.y, n.x2, n.y2] = [n.x2, n.y2, n.x, n.y];
+  }
+}
+
+/* ---------------- groupe : selection, copier, coller ---------------- */
+
+export interface Rect { x: number; y: number; w: number; h: number }
+
+function inRect(p: { x: number; y: number }, r: Rect): boolean {
+  return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+}
+
+/** Pieces (ids) dont la boite est entierement dans le rectangle. */
+export function partsIn(s: SchemaBlock, r: Rect): string[] {
+  return s.parts.filter((p) => { const b = partBox(p); return inRect(b, r) && inRect({ x: b.x + b.w, y: b.y + b.h }, r); }).map((p) => p.id);
+}
+
+/**
+ * Deplace un groupe de pieces : les fils entierement dans le rectangle `r`
+ * (ou entre deux pieces du groupe) bougent en bloc, les autres suivent par
+ * leurs extremites ; les annotations libres dans `r` suivent aussi.
+ */
+export function moveGroup(s: SchemaBlock, ids: string[], r: Rect | null, dx: number, dy: number): void {
+  if (!dx && !dy) return;
+  const group = s.parts.filter((p) => ids.includes(p.id));
+  const before = group.flatMap((p) => partPorts(p));
+  const key = (p: Pt) => `${p.x},${p.y}`;
+  const ports = new Set(before.map(key));
+  // Fils qui bougent en bloc : tous leurs points dans r, ou leurs deux bouts sur le groupe.
+  const whole = new Set<number>();
+  s.wires.forEach((w, i) => {
+    const p = wirePts(w);
+    if ((r && p.every((q) => inRect(q, r))) || (ports.has(key(p[0])) && ports.has(key(p[p.length - 1])))) whole.add(i);
+  });
+  for (const i of whole) s.wires[i].pts = s.wires[i].pts.map((v, k) => v + (k % 2 ? dy : dx));
+  for (const p of group) { p.x += dx; p.y += dy; }
+  const after = group.flatMap((p) => partPorts(p));
+  // Les autres fils suivent leurs extremites (le bloc deja bouge n'est pas retouche).
+  const moved = s.wires.filter((_w, i) => whole.has(i));
+  const rest = s.wires.filter((_w, i) => !whole.has(i));
+  const tmp: SchemaBlock = { ...s, wires: rest };
+  reattach(tmp, before, after);
+  s.wires = [...moved, ...tmp.wires];
+  for (const n of s.notes ?? []) {
+    if (n.part || n.x === undefined || n.y === undefined || !r || !inRect({ x: n.x, y: n.y }, r)) continue;
+    n.x += dx; n.y += dy;
+    if (n.x2 !== undefined && n.y2 !== undefined) { n.x2 += dx; n.y2 += dy; }
+  }
+}
+
+/** Morceau de schema copie : pieces du groupe, fils et annotations dans r. */
+export function extractGroup(s: SchemaBlock, ids: string[], r: Rect | null): Pick<SchemaBlock, "parts" | "wires" | "notes"> {
+  const parts = s.parts.filter((p) => ids.includes(p.id));
+  const ports = new Set(parts.flatMap((p) => partPorts(p)).map((q) => `${q.x},${q.y}`));
+  const wires = s.wires.filter((w) => {
+    const p = wirePts(w);
+    return (r && p.every((q) => inRect(q, r))) || (ports.has(`${p[0].x},${p[0].y}`) && ports.has(`${p[p.length - 1].x},${p[p.length - 1].y}`));
+  });
+  const notes = (s.notes ?? []).filter((n) => (n.part ? ids.includes(n.part) : !!r && n.x !== undefined && n.y !== undefined && inRect({ x: n.x, y: n.y }, r)));
+  return JSON.parse(JSON.stringify({ parts, wires, notes })) as Pick<SchemaBlock, "parts" | "wires" | "notes">;
+}
+
+/**
+ * Colle un morceau (copie, modele) decale de (dx, dy) : nouveaux ids, noms
+ * suivants (« R » deja pris : R2...). Rend les ids des pieces collees.
+ */
+export function pasteGroup(s: SchemaBlock, g: Pick<SchemaBlock, "parts" | "wires" | "notes">, dx: number, dy: number, keepNames = false): string[] {
+  const map = new Map<string, string>();
+  const out: string[] = [];
+  for (const p0 of g.parts) {
+    const p: SchemaPart = { ...p0, x: p0.x + dx, y: p0.y + dy, id: newId(s) };
+    map.set(p0.id, p.id);
+    const taken = s.parts.some((q) => q.name === p.name);
+    if (p.name && isSym(p.sym) && (!keepNames || taken)) {
+      const pre = NAME_PREFIX[p.sym];
+      // Un nom tape a la main (« Rf ») reste ; un nom automatique prend le suivant.
+      if (pre && (p.name === pre || new RegExp(`^${pre}\\d+$`).test(p.name))) {
+        const nm = nextName(s, p.sym);
+        if (nm) {
+          const bare = nm !== pre ? s.parts.find((q) => q.name === pre) : undefined;
+          if (bare) bare.name = `${pre}1`;
+          p.name = nm;
+        }
+      }
+    }
+    s.parts.push(p);
+    out.push(p.id);
+  }
+  for (const w of g.wires) s.wires.push({ pts: w.pts.map((v, k) => v + (k % 2 ? dy : dx)) });
+  for (const n0 of g.notes ?? []) {
+    const n: SchemaNote = { ...n0 };
+    if (n.part) { const id = map.get(n.part); if (!id) continue; n.part = id; }
+    if (n.x !== undefined) n.x += dx;
+    if (n.y !== undefined) n.y += dy;
+    if (n.x2 !== undefined) n.x2 += dx;
+    if (n.y2 !== undefined) n.y2 += dy;
+    (s.notes ??= []).push(n);
+  }
+  return out;
 }
 
 /* ---------------- dimensions ---------------- */
@@ -437,9 +680,9 @@ export function turtlePlace(s: SchemaBlock, t: Turtle, sym: SymKey): SchemaPart 
   const def = SYMBOLS[sym];
   t.pick = undefined;
   if (def.through) {
-    const rot = rotForDir(t.dir);
-    const part = addPart(s, sym, placeFor(sym, def.through[0], t.at, rot), rot);
-    const out = partPorts(part).find((q) => q.name === def.through![1]);
+    const o = orientFor(sym, t.dir);
+    const part = addPart(s, sym, placeFor(sym, o.entry, t.at, o.rot), o.rot);
+    const out = partPorts(part).find((q) => q.name === o.exit);
     if (out) t.at = { x: out.x, y: out.y };
     return part;
   }

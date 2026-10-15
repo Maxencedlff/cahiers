@@ -281,6 +281,8 @@ export interface SchemaPart {
   name?: string;
   /** Valeur tapee (« 10k », « K/(1+tau p) » pour un bloc). */
   value?: string;
+  /** Circuit ouvert (sym "X") mis a la place d'une piece : son symbole d'origine, pour revenir. */
+  was?: string;
 }
 
 /**
@@ -301,6 +303,8 @@ export interface SchemaNote {
   /** Fleche libre ou trait : son autre bout. */
   x2?: number;
   y2?: number;
+  /** Trait ou fleche en pointilles (chronogramme : niveaux, reperes). */
+  dash?: boolean;
   label: string;
 }
 

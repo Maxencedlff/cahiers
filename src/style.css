@@ -1635,9 +1635,23 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 }
 .sch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .sch-pal { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; }
-.sch-pal-btn { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 8px; font-size: var(--fs-sm, 13px); border-radius: 7px; }
+.sch-pal-btn { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 7px; font-size: var(--fs-sm, 13px); border-radius: 7px; touch-action: none; }
+.sch-pal-btn.on { background: var(--accent, #2f6fed); color: #fff; }
+.sch-pal-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--border); }
+.sch-help-btn { min-width: 30px; min-height: 28px; border-radius: 50%; font-weight: 600; }
+.sch-help { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; padding: 8px 14px; max-height: 40%; overflow: auto; border-bottom: 1px solid var(--border); font-size: var(--fs-xs, 12px); }
+.sch-help[hidden] { display: none; }
+.sch-help-row { display: contents; }
+.sch-help-row b { font-weight: 600; color: var(--text); }
+.sch-help-row span { color: var(--text-2, var(--muted)); }
+.sch-ghost { position: fixed; z-index: 200; pointer-events: none; padding: 3px 8px; border-radius: 6px; background: var(--accent, #2f6fed); color: #fff; font: 12px system-ui, sans-serif; }
+.sch-armed { cursor: copy; }
+.sch-over .sch-band { fill: rgba(47, 111, 237, .06); stroke: var(--accent, #2f6fed); stroke-width: .06; stroke-dasharray: .25 .2; }
+.sch-over .sch-sel-note { stroke: var(--accent, #2f6fed); stroke-width: .35; opacity: .35; stroke-linecap: round; }
+.sch-over .sch-sel-note-box { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .06; stroke-dasharray: .2 .15; }
+.sch-over .sch-free { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .06; opacity: .7; }
 .sch-pal-k { font: 600 11px ui-monospace, Consolas, monospace; padding: 1px 5px; border-radius: 4px; background: var(--surface-3, #eef0f4); color: var(--text-2); }
-.sch-hint { flex: 1 1 100%; font-size: var(--fs-xs, 12px); color: var(--muted); }
+.sch-hint { flex: 1 1 0; min-width: 200px; font-size: var(--fs-xs, 12px); color: var(--muted); }
 .sch-close { margin-left: auto; }
 .sch-stage { position: relative; flex: 1 1 auto; overflow: auto; background: var(--sheet-bg, #fff); color: var(--sheet-text, #16181d); }
 .sch-frame-edit { container-type: inline-size; cursor: crosshair; }
