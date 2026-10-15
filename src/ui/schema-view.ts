@@ -186,6 +186,8 @@ export function openSchemaEditor(o: EditorOptions): void {
   let armed: Tool | null = null;
   let last: SchemaDrawing | null = null;
   let clip: ReturnType<typeof extractGroup> | null = null;
+  /** Derniere saisie au clavier : le curseur de trace ne se montre qu'alors (a la souris il ne sert a rien). */
+  let kb = false;
 
   const photoHint = "Glisser : flèche · Maj+glisser : trait droit · clic : texte · Suppr sur une annotation : l'effacer · Ctrl+Z · Échap : fermer (sans annotation, la photo redevient normale)";
   const hintText = "Glisser : fil · Alt+glisser sur une pièce : tension, le long d'un fil : courant · double-clic : modifier · Ctrl+glisser : sélection · ? : tous les raccourcis";
@@ -285,11 +287,15 @@ export function openSchemaEditor(o: EditorOptions): void {
     }
     if (preview) extra.push(`<polyline class="sch-preview" points="${preview.map((p) => `${p.x},${p.y}`).join(" ")}"/>`);
     if (t.pick) extra.push(`<circle class="sch-pick" cx="${t.pick.x}" cy="${t.pick.y}" r="0.45"/>`);
-    // Bornes libres : un petit rond ou accrocher un fil.
-    if (!s.under) for (const f of freePorts(s)) extra.push(`<circle class="sch-free" cx="${f.port.x}" cy="${f.port.y}" r="0.22"/>`);
-    // Curseur clavier : point bleu et petite fleche dans le sens du trace.
-    const dv = DIRS[t.dir];
-    extra.push(`<circle class="sch-cursor" cx="${t.at.x}" cy="${t.at.y}" r="0.32"/><line class="sch-cursor-dir" x1="${t.at.x}" y1="${t.at.y}" x2="${t.at.x + dv.x * 0.9}" y2="${t.at.y + dv.y * 0.9}"/>`);
+    // Bornes libres : un petit rond discret ou accrocher un fil.
+    if (!s.under) for (const f of freePorts(s)) extra.push(`<circle class="sch-free" cx="${f.port.x}" cy="${f.port.y}" r="0.2"/>`);
+    // Curseur clavier (seulement apres une touche) : un anneau et une pointe
+    // de fleche dans le sens ou partira le prochain fil.
+    if (kb) {
+      const dv = DIRS[t.dir], nx = -dv.y, ny = dv.x;
+      const tip = { x: t.at.x + dv.x * 1.1, y: t.at.y + dv.y * 1.1 }, base = { x: t.at.x + dv.x * 0.55, y: t.at.y + dv.y * 0.55 };
+      extra.push(`<circle class="sch-cursor" cx="${t.at.x}" cy="${t.at.y}" r="0.3"/><polygon class="sch-cursor-dir" points="${tip.x},${tip.y} ${base.x + nx * 0.3},${base.y + ny * 0.3} ${base.x - nx * 0.3},${base.y - ny * 0.3}"/>`);
+    }
     const svg = svgEl(`${bgImage(s, o.background)}<g class="sch-under">${s.under ? "" : extra[0]}</g>${d.body}<g class="sch-over">${extra.slice(1).join("")}</g>`, view);
     svg.style.width = `${view.w * U}px`;
     svg.style.height = `${view.h * U}px`;
@@ -552,6 +558,7 @@ export function openSchemaEditor(o: EditorOptions): void {
 
   function onKey(e: KeyboardEvent): void {
     if (valueBox) return;
+    if (!kb && !["Control", "Shift", "Alt", "Meta"].includes(e.key)) { kb = true; paint(); }
     e.stopPropagation();
     const ctrl = e.ctrlKey || e.metaKey;
     const k = e.key;
@@ -824,6 +831,7 @@ export function openSchemaEditor(o: EditorOptions): void {
   stage.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || (e.target as HTMLElement).closest(".sch-value")) return;
     e.preventDefault();
+    kb = false;
     root.focus();
     stage.setPointerCapture(e.pointerId);
     const g = toGrid(e);

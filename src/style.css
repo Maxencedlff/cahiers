@@ -1649,7 +1649,7 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .sch-over .sch-band { fill: rgba(47, 111, 237, .06); stroke: var(--accent, #2f6fed); stroke-width: .06; stroke-dasharray: .25 .2; }
 .sch-over .sch-sel-note { stroke: var(--accent, #2f6fed); stroke-width: .35; opacity: .35; stroke-linecap: round; }
 .sch-over .sch-sel-note-box { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .06; stroke-dasharray: .2 .15; }
-.sch-over .sch-free { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .06; opacity: .7; }
+.sch-over .sch-free { fill: none; stroke: #9aa1ab; stroke-width: .06; }
 .sch-pal-k { font: 600 11px ui-monospace, Consolas, monospace; padding: 1px 5px; border-radius: 4px; background: var(--surface-3, #eef0f4); color: var(--text-2); }
 .sch-hint { flex: 1 1 0; min-width: 200px; font-size: var(--fs-xs, 12px); color: var(--muted); }
 .sch-close { margin-left: auto; }
@@ -1661,8 +1661,8 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .sch-over .sch-hov-wire { stroke: var(--accent, #2f6fed); stroke-width: .3; opacity: .35; stroke-linecap: round; }
 .sch-over .sch-preview { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .1; stroke-dasharray: .3 .2; }
 .sch-over .sch-pick { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .12; }
-.sch-over .sch-cursor { fill: var(--accent, #2f6fed); }
-.sch-over .sch-cursor-dir { stroke: var(--accent, #2f6fed); stroke-width: .12; stroke-linecap: round; }
+.sch-over .sch-cursor { fill: none; stroke: var(--accent, #2f6fed); stroke-width: .1; }
+.sch-over .sch-cursor-dir { fill: var(--accent, #2f6fed); stroke: none; }
 .sch-value { position: absolute; z-index: 2; width: 220px; font: 14px system-ui, sans-serif; padding: 4px 8px; border: 1px solid var(--accent, #2f6fed); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 4px 14px rgba(10,14,25,.15); }
 .sch-label .sch-ref { font-style: normal; font-family: KaTeX_Main, "Times New Roman", serif; }
 /* Photo annotee : les annotations en rouge, lisibles sur l'image. */
