@@ -237,6 +237,12 @@ export function drawSchema(s: SchemaBlock): SchemaDrawing {
   (s.notes ?? []).forEach((n, i) => {
     if (n.kind === "u") { const v = voltage(s, n, i); if (v) { out.push(v.svg); labels.push(v.label); } }
     else if (n.kind === "i") { const c = current(n, i); if (c) { out.push(c.svg); labels.push(c.label); } }
+    else if ((n.kind === "arrow" || n.kind === "line") && n.x !== undefined && n.y !== undefined && n.x2 !== undefined && n.y2 !== undefined) {
+      out.push(n.kind === "arrow"
+        ? arrow({ x: n.x, y: n.y }, { x: n.x2, y: n.y2 }, "sch-arrow")
+        : `<line class="sch-line" x1="${n.x}" y1="${n.y}" x2="${n.x2}" y2="${n.y2}" stroke-linecap="round"/>`);
+      if (n.label) labels.push({ x: n.x, y: n.y - 0.7, anchor: "middle", lines: [n.label], note: i });
+    }
     else if (n.x !== undefined && n.y !== undefined) labels.push({ x: n.x, y: n.y, anchor: "middle", lines: [n.label], note: i });
   });
   out.push("</g>");

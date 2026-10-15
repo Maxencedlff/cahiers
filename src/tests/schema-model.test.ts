@@ -105,3 +105,21 @@ describe("schema : rendu", () => {
     expect(schemaBounds(s).w).toBe(d.box.w);
   });
 });
+
+describe("schema : photo annotee", () => {
+  it("fleche libre et trait : dessines, retrouves sous la souris ; cadre = la photo", async () => {
+    const { addArrow, noteAt, schemaBounds, schemaWidth } = await import("../core/schema/model");
+    const s = emptySchema("a");
+    s.under = { src: "assets/p.png", w: 320, h: 160, photo: "p" };
+    addArrow(s, { x: 1, y: 1 }, { x: 5, y: 3 });
+    addArrow(s, { x: 1, y: 6 }, { x: 8, y: 6 }, true);
+    expect(schemaBounds(s)).toEqual({ x: 0, y: 0, w: 20, h: 10 });
+    expect(schemaWidth(s)).toBe(320);
+    expect(noteAt(s, { x: 3, y: 2 })).toBe(0);
+    expect(noteAt(s, { x: 4, y: 6.1 })).toBe(1);
+    expect(noteAt(s, { x: 15, y: 9 })).toBe(-1);
+    const d = drawSchema(s);
+    expect(d.body).toContain("sch-arrow");
+    expect(d.body).toContain("sch-line");
+  });
+});

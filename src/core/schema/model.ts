@@ -336,6 +336,29 @@ export function addCurrent(s: SchemaBlock, at: Pt, dir: Dir): SchemaNote {
   return n;
 }
 
+/** Fleche libre (photo annotee, schema) de a vers b. */
+export function addArrow(s: SchemaBlock, a: { x: number; y: number }, b: { x: number; y: number }, line = false): SchemaNote {
+  const n: SchemaNote = { kind: line ? "line" : "arrow", x: a.x, y: a.y, x2: b.x, y2: b.y, label: "" };
+  (s.notes ??= []).push(n);
+  return n;
+}
+
+/** Annotation sous le point (fleche, trait, texte, courant), la plus recente d'abord. */
+export function noteAt(s: SchemaBlock, p: { x: number; y: number }, tol = 0.5): number {
+  const notes = s.notes ?? [];
+  for (let i = notes.length - 1; i >= 0; i--) {
+    const n = notes[i];
+    if (n.x === undefined || n.y === undefined) continue;
+    if (n.x2 !== undefined && n.y2 !== undefined) {
+      const dx = n.x2 - n.x, dy = n.y2 - n.y;
+      const L = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((p.x - n.x) * dx + (p.y - n.y) * dy) / L));
+      if (Math.hypot(p.x - (n.x + t * dx), p.y - (n.y + t * dy)) <= tol) return i;
+    } else if (Math.hypot(p.x - n.x, p.y - n.y) <= tol * 2) return i;
+  }
+  return -1;
+}
+
 export function addText(s: SchemaBlock, at: Pt, label: string): SchemaNote {
   const n: SchemaNote = { kind: "text", x: at.x, y: at.y, label };
   (s.notes ??= []).push(n);
@@ -350,7 +373,12 @@ export function schemaBounds(s: SchemaBlock, margin = 2): { x: number; y: number
   const grow = (x: number, y: number) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
   for (const p of s.parts) { const b = partBox(p); grow(b.x, b.y); grow(b.x + b.w, b.y + b.h); }
   for (const w of s.wires) for (const p of wirePts(w)) grow(p.x, p.y);
-  for (const n of s.notes ?? []) if (n.x !== undefined && n.y !== undefined) grow(n.x, n.y);
+  for (const n of s.notes ?? []) {
+    if (n.x !== undefined && n.y !== undefined) grow(n.x, n.y);
+    if (n.x2 !== undefined && n.y2 !== undefined) grow(n.x2, n.y2);
+  }
+  // Photo annotee : le cadre est celui de la photo (les annotations debordant rarement).
+  if (s.under) return { x: 0, y: 0, w: s.under.w / SCHEMA_UNIT, h: s.under.h / SCHEMA_UNIT };
   if (x0 === Infinity) return { x: 0, y: 0, w: 20, h: 10 };
   return { x: x0 - margin, y: y0 - margin, w: x1 - x0 + 2 * margin, h: y1 - y0 + 2 * margin };
 }
@@ -468,6 +496,7 @@ export const SCHEMA_MAX_W = 700;
 
 /** Largeur du schema dans le texte, en unites de page (taille naturelle, bornee). */
 export function schemaWidth(b: SchemaBlock): number {
+  if (b.under) return Math.round(b.under.w);
   if (b.width) return Math.min(SCHEMA_MAX_W, b.width);
   return Math.max(160, Math.min(SCHEMA_MAX_W, Math.round(schemaBounds(b).w * SCHEMA_UNIT)));
 }

@@ -18,7 +18,7 @@ import { forceFormula } from "../core/text/automath";
 import type { SchemaBlock, SchemaPart } from "../core/types";
 import { drawSchema, type SchemaLabel } from "../core/schema/render";
 import {
-  addCurrent, addText, addVoltage, addWire, deletePart, deleteWire, freePorts, insertOnWire, mirrorPart, movePart,
+  addArrow, addCurrent, addText, noteAt, SCHEMA_UNIT, addVoltage, addWire, deletePart, deleteWire, freePorts, insertOnWire, mirrorPart, movePart,
   newTurtle, partAt, partBox, partPorts, rotatePart, routeOrtho, schemaBounds, turtleConnect, turtleJump, turtleMove,
   turtleNextFree, turtleNode, turtlePlace, wireAt, wirePts, DIRS, type Dir, type Pt, type Turtle,
 } from "../core/schema/model";
@@ -62,17 +62,24 @@ function placeLabels(layer: HTMLElement, labels: SchemaLabel[], box: { x: number
   }
 }
 
+/** Photo annotee : l'image en fond, sur tout le cadre (unites de grille). */
+function bgImage(b: SchemaBlock, url?: string): string {
+  if (!b.under || !url) return "";
+  const w = b.under.w / SCHEMA_UNIT, h = b.under.h / SCHEMA_UNIT;
+  return `<image href="${url.replace(/"/g, "&quot;")}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none"/>`;
+}
+
 /** Dessine le schema dans `node` (bloc de la page : largeur fixee par la figure, hauteur au rapport). */
-export function paintSchema(node: HTMLElement, b: SchemaBlock): void {
+export function paintSchema(node: HTMLElement, b: SchemaBlock, bg?: string): void {
   const d = drawSchema(b);
-  const svg = svgEl(d.body, d.box);
+  const svg = svgEl(`${bgImage(b, bg)}${d.body}`, d.box);
   const labels = el("div", { class: "sch-labels" });
   placeLabels(labels, d.labels, d.box);
-  const frame = el("div", { class: "sch-frame" }, svg, labels);
+  const frame = el("div", { class: `sch-frame${b.under ? " sch-photo" : ""}` }, svg, labels);
   frame.style.aspectRatio = `${d.box.w} / ${d.box.h}`;
   // Etiquettes a la taille du schema : une case vaut SCHEMA_UNIT unites de page.
   frame.style.setProperty("--sch-cells", String(d.box.w));
-  if (!b.parts.length && !b.wires.length) {
+  if (!b.parts.length && !b.wires.length && !b.under) {
     node.replaceChildren(el("div", { class: "sch-empty" }, "Schéma vide : un appui l'ouvre"));
     return;
   }
@@ -88,6 +95,8 @@ interface EditorOptions {
   /** Apres chaque modification : redessiner le bloc, enregistrer. */
   onChange: () => void;
   onClose: () => void;
+  /** Photo annotee : URL de l'image de fond. */
+  background?: string;
 }
 
 let openEditor: { close: () => void } | null = null;
@@ -107,7 +116,8 @@ const PALETTE: { sym: SymKey; hint: string }[] = [
 export function openSchemaEditor(o: EditorOptions): void {
   openEditor?.close();
   const s = o.block;
-  const U = 22; // pixels par case dans l'editeur
+  // Pixels par case dans l'editeur ; photo annotee : elle tient dans la largeur.
+  const U = s.under ? Math.max(8, Math.min(30, (Math.min(window.innerWidth - 64, 1100)) / (s.under.w / SCHEMA_UNIT))) : 22;
   const undo: string[] = [];
   const redo: string[] = [];
   const snap = () => JSON.stringify({ parts: s.parts, wires: s.wires, notes: s.notes ?? null });
@@ -142,12 +152,13 @@ export function openSchemaEditor(o: EditorOptions): void {
   let view = { x: 0, y: 0, w: 30, h: 16 };
   let valueBox: HTMLInputElement | null = null;
 
+  const photoHint = "Glisser : flèche · Maj+glisser : trait droit · clic : texte · Suppr sur une annotation : l'effacer · Ctrl+Z · Échap : fermer (sans annotation, la photo redevient normale)";
   const head = el("div", { class: "sch-head" },
-    el("div", { class: "sch-pal" }, ...PALETTE.map((p) => el("button", {
+    s.under ? null : el("div", { class: "sch-pal" }, ...PALETTE.map((p) => el("button", {
       class: "sch-pal-btn", title: `${SYMBOLS[p.sym].label} (${p.hint})`,
       onclick: () => { place(p.sym); root.focus(); },
     }, el("span", { class: "sch-pal-k" }, p.hint), SYMBOLS[p.sym].label))),
-    el("div", { class: "sch-hint" },
+    el("div", { class: "sch-hint" }, s.under ? photoHint :
       "Flèches : fil · lettre : composant puis sa valeur · « . » : nœud · Tab, Entrée : relier · Maj+flèche : aller sans fil · Ctrl+R : tourner · Alt+U : tension (encore : autre côté, Maj : sens) · Alt+I : courant · Suppr · Ctrl+Z · Échap : fermer"),
     el("button", { class: "sch-close", onclick: () => close() }, "Terminé"),
   );
@@ -164,6 +175,8 @@ export function openSchemaEditor(o: EditorOptions): void {
   const snapPt = (p: { x: number; y: number }): Pt => ({ x: Math.round(p.x), y: Math.round(p.y) });
 
   let preview: Pt[] | null = null;
+  /** Redessin en cours : le champ de saisie deplace perd le focus, ce n'est pas une validation. */
+  let repainting = false;
 
   function paint(): void {
     const d = drawSchema(s);
@@ -172,6 +185,8 @@ export function openSchemaEditor(o: EditorOptions): void {
     const x0 = Math.min(view.x, want.x), y0 = Math.min(view.y, want.y);
     const x1 = Math.max(view.x + view.w, want.x1, x0 + 30), y1 = Math.max(view.y + view.h, want.y1, y0 + 14);
     view = { x: Math.floor(x0), y: Math.floor(y0), w: Math.ceil(x1 - x0), h: Math.ceil(y1 - y0) };
+    // Photo annotee : le cadre de la photo, toujours.
+    if (s.under) view = { ...d.box };
     const extra: string[] = [];
     // Points de la grille.
     extra.unshift(`<pattern id="sch-grid" x="0" y="0" width="1" height="1" patternUnits="userSpaceOnUse"><circle cx="0" cy="0" r="0.06" fill="currentColor" opacity="0.35"/></pattern><rect class="sch-grid" x="${view.x}" y="${view.y}" width="${view.w}" height="${view.h}" fill="url(#sch-grid)"/>`);
@@ -192,18 +207,20 @@ export function openSchemaEditor(o: EditorOptions): void {
     // Curseur clavier : point bleu et petite fleche dans le sens du trace.
     const dv = DIRS[t.dir];
     extra.push(`<circle class="sch-cursor" cx="${t.at.x}" cy="${t.at.y}" r="0.32"/><line class="sch-cursor-dir" x1="${t.at.x}" y1="${t.at.y}" x2="${t.at.x + dv.x * 0.9}" y2="${t.at.y + dv.y * 0.9}"/>`);
-    const svg = svgEl(`<g class="sch-under">${extra[0]}</g>${d.body}<g class="sch-over">${extra.slice(1).join("")}</g>`, view);
+    const svg = svgEl(`${bgImage(s, o.background)}<g class="sch-under">${s.under ? "" : extra[0]}</g>${d.body}<g class="sch-over">${extra.slice(1).join("")}</g>`, view);
     svg.style.width = `${view.w * U}px`;
     svg.style.height = `${view.h * U}px`;
     const labels = el("div", { class: "sch-labels" });
     placeLabels(labels, d.labels, view);
-    const frame = el("div", { class: "sch-frame sch-frame-edit" }, svg, labels);
+    const frame = el("div", { class: `sch-frame sch-frame-edit${s.under ? " sch-photo" : ""}` }, svg, labels);
     frame.style.width = `${view.w * U}px`;
     frame.style.height = `${view.h * U}px`;
     frame.style.setProperty("--sch-cells", String(view.w));
     const keep = valueBox;
+    repainting = true;
     stage.replaceChildren(frame);
-    if (keep) frame.append(keep);
+    if (keep) { frame.append(keep); keep.focus(); }
+    repainting = false;
     // Le curseur reste visible.
     const cx = (t.at.x - view.x) * U, cy = (t.at.y - view.y) * U;
     if (cx < stage.scrollLeft + 40 || cx > stage.scrollLeft + stage.clientWidth - 40) stage.scrollLeft = cx - stage.clientWidth / 2;
@@ -243,7 +260,7 @@ export function openSchemaEditor(o: EditorOptions): void {
       if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); done(true); return; }
       if (e.key.startsWith("Arrow") && !e.shiftKey) { e.preventDefault(); done(true, e.key); }
     });
-    input.addEventListener("blur", () => done(true));
+    input.addEventListener("blur", () => { if (!repainting) done(true); });
     stage.querySelector(".sch-frame")?.append(input);
     input.focus();
   };
@@ -268,7 +285,7 @@ export function openSchemaEditor(o: EditorOptions): void {
       if (e.key === "Escape") { e.preventDefault(); done(false); }
       else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); done(true); }
     });
-    input.addEventListener("blur", () => done(true));
+    input.addEventListener("blur", () => { if (!repainting) done(true); });
     stage.querySelector(".sch-frame")?.append(input);
     input.focus();
   };
@@ -357,6 +374,9 @@ export function openSchemaEditor(o: EditorOptions): void {
       e.preventDefault();
       const p = sel();
       if (p) { edit(() => deletePart(s, p.id)); selected = null; paint(); return; }
+      // Annotation sous la souris (fleche, trait, texte), sinon le fil survole.
+      const ni = hover ? noteAt(s, hover.pt) : -1;
+      if (ni >= 0) { edit(() => { s.notes!.splice(ni, 1); if (!s.notes!.length) delete s.notes; }); return; }
       if (hover?.wire) { const w = hover.wire.wire; edit(() => deleteWire(s, w)); hover = null; paint(); }
       return;
     }
@@ -385,7 +405,19 @@ export function openSchemaEditor(o: EditorOptions): void {
   }
 
   /* ---- souris ---- */
-  let drag: { kind: "part"; id: string; last: Pt; moved: boolean } | { kind: "wire"; from: Pt; moved: boolean; vertical?: boolean } | null = null;
+  let drag: { kind: "part"; id: string; last: Pt; moved: boolean }
+    | { kind: "wire"; from: Pt; moved: boolean; vertical?: boolean }
+    | { kind: "arrow" | "line"; from: { x: number; y: number }; to: { x: number; y: number }; moved: boolean }
+    | null = null;
+  /** Annotation : au quart de case pres (une photo n'a pas de grille). */
+  const fine = (p: { x: number; y: number }) => ({ x: Math.round(p.x * 4) / 4, y: Math.round(p.y * 4) / 4 });
+  /** Trait droit : aimante a l'horizontale, la verticale ou 45 degres. */
+  const straight = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    const len = Math.hypot(dx, dy);
+    return fine({ x: a.x + Math.cos(ang) * len, y: a.y + Math.sin(ang) * len });
+  };
 
   stage.addEventListener("pointermove", (e) => {
     const g = toGrid(e);
@@ -399,6 +431,13 @@ export function openSchemaEditor(o: EditorOptions): void {
         drag.last = p;
         paint();
       }
+      return;
+    }
+    if (drag && (drag.kind === "arrow" || drag.kind === "line")) {
+      drag.to = drag.kind === "line" ? straight(drag.from, g) : fine(g);
+      drag.moved = drag.moved || Math.hypot(drag.to.x - drag.from.x, drag.to.y - drag.from.y) > 0.4;
+      preview = drag.moved ? [drag.from as Pt, drag.to as Pt] : null;
+      paint();
       return;
     }
     if (drag?.kind === "wire") {
@@ -425,14 +464,17 @@ export function openSchemaEditor(o: EditorOptions): void {
     stage.setPointerCapture(e.pointerId);
     const g = toGrid(e);
     const part = partAt(s, g);
-    if (part) {
+    if (part && !e.altKey && !e.shiftKey) {
       selected = part.id;
       drag = { kind: "part", id: part.id, last: snapPt(g), moved: false };
       paint();
       return;
     }
     selected = null;
-    drag = { kind: "wire", from: snapPt(g), moved: false };
+    // Alt+glisser : fleche libre ; Maj+glisser : trait droit ; sur une photo, glisser = fleche.
+    if (e.shiftKey) drag = { kind: "line", from: fine(g), to: fine(g), moved: false };
+    else if (e.altKey || s.under) drag = { kind: "arrow", from: fine(g), to: fine(g), moved: false };
+    else drag = { kind: "wire", from: snapPt(g), moved: false };
   });
   stage.addEventListener("pointerup", (e) => {
     const d = drag;
@@ -442,15 +484,25 @@ export function openSchemaEditor(o: EditorOptions): void {
       if (d.moved) { redo.length = 0; o.onChange(); }
       return;
     }
+    if (d.kind === "arrow" || d.kind === "line") {
+      preview = null;
+      if (d.moved) { edit(() => { addArrow(s, d.from, d.to, d.kind === "line"); }); return; }
+      paint();
+      // Simple clic sur une photo : un texte a cet endroit (apres le redessin, qui remplacerait le champ).
+      if (s.under) askText(fine(toGrid(e)));
+      return;
+    }
+    if (d.kind !== "wire") return;
+    const wd = d;
     const to = snapPt(toGrid(e));
     preview = null;
-    if (d.moved && (to.x !== d.from.x || to.y !== d.from.y)) {
-      edit(() => addWire(s, routeOrtho(d.from, to, d.vertical)));
+    if (wd.moved && (to.x !== wd.from.x || to.y !== wd.from.y)) {
+      edit(() => addWire(s, routeOrtho(wd.from, to, wd.vertical)));
       t.at = to;
-      t.dir = to.x !== d.from.x && !d.vertical ? (to.x > d.from.x ? "right" : "left") : (to.y > d.from.y ? "down" : "up");
+      t.dir = to.x !== wd.from.x && !wd.vertical ? (to.x > wd.from.x ? "right" : "left") : (to.y > wd.from.y ? "down" : "up");
     } else {
       // Simple clic : le curseur clavier vient ici.
-      t.at = d.from;
+      t.at = wd.from;
       t.pick = undefined;
     }
     paint();
@@ -554,7 +606,7 @@ function labelSvgText(line: string): string {
  * Schema complet en SVG autonome (geometrie + etiquettes en <text>), fond
  * blanc, `px` pixels par case : pour l'export Word (rendu en PNG).
  */
-export function schemaSvgString(b: SchemaBlock, px = 16): { svg: string; w: number; h: number } {
+export function schemaSvgString(b: SchemaBlock, px = 16, bg?: string): { svg: string; w: number; h: number } {
   const d = drawSchema(b);
   const w = Math.round(d.box.w * px), h = Math.round(d.box.h * px);
   const texts = d.labels.map((l) => {
@@ -565,7 +617,7 @@ export function schemaSvgString(b: SchemaBlock, px = 16): { svg: string; w: numb
       return `<text x="${l.x}" y="${y}" text-anchor="${anchor}" dominant-baseline="middle" font-size="0.95" font-family="Cambria, 'Times New Roman', serif" font-style="italic" fill="#16181d" stroke="none">${labelSvgText(line)}</text>`;
     }).join("");
   }).join("");
-  const svg = `<svg xmlns="${SVG_NS}" width="${w}" height="${h}" viewBox="${d.box.x} ${d.box.y} ${d.box.w} ${d.box.h}" style="color:#16181d"><rect x="${d.box.x}" y="${d.box.y}" width="${d.box.w}" height="${d.box.h}" fill="#ffffff"/>${d.body}${texts}</svg>`;
+  const svg = `<svg xmlns="${SVG_NS}" width="${w}" height="${h}" viewBox="${d.box.x} ${d.box.y} ${d.box.w} ${d.box.h}" style="color:#16181d"><rect x="${d.box.x}" y="${d.box.y}" width="${d.box.w}" height="${d.box.h}" fill="#ffffff"/>${bgImage(b, bg)}<g style="color:${b.under ? "#d92d20" : "#16181d"}">${d.body}</g>${texts}</svg>`;
   return { svg, w, h };
 }
 

@@ -1651,3 +1651,7 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .sch-over .sch-cursor-dir { stroke: var(--accent, #2f6fed); stroke-width: .12; stroke-linecap: round; }
 .sch-value { position: absolute; z-index: 2; width: 220px; font: 14px system-ui, sans-serif; padding: 4px 8px; border: 1px solid var(--accent, #2f6fed); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 4px 14px rgba(10,14,25,.15); }
 .sch-label .sch-ref { font-style: normal; font-family: KaTeX_Main, "Times New Roman", serif; }
+/* Photo annotee : les annotations en rouge, lisibles sur l'image. */
+.sch-photo .sch-notes, .sch-photo .sch-label { color: #d92d20; }
+.sch-photo .sch-notes { stroke-width: .15; }
+.sch-photo .sch-label { font-weight: 600; }

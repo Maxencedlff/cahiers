@@ -288,11 +288,11 @@ async function graphImage(b: GraphBlock): Promise<DxImage | null> {
 }
 
 /** Schema : SVG autonome (etiquettes en texte) rendu en PNG densite 3, a sa largeur dans la page. */
-async function schemaImage(b: SchemaBlock): Promise<DxImage | null> {
+async function schemaImage(b: SchemaBlock, bg?: string): Promise<DxImage | null> {
   try {
     const { schemaSvgString, schemaWidth } = await import("./schema-view");
     const W = schemaWidth(b);
-    const { svg, w, h } = schemaSvgString(b);
+    const { svg, w, h } = schemaSvgString(b, 16, bg);
     const H = Math.round((W * h) / Math.max(1, w));
     const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
     try {
@@ -384,7 +384,8 @@ async function pageParas(repo: Repo, notebook: string, divider: string, src: Doc
         inline.set(b.id, [{ kind: "text", text: "[photo introuvable]", italic: true }]);
       }
     } else if (b.type === "schema") {
-      const img = await schemaImage(b);
+      const bg = b.under ? await repo.readAsset(notebook, divider, b.under.src).catch(() => undefined) : undefined;
+      const img = await schemaImage(b, bg);
       inline.set(b.id, img ? [{ kind: "image", image: img }] : [{ kind: "text", text: "[schéma]", italic: true }]);
       if (img) heights.set(b.id, img.cy / EMU_PER_UNIT);
     } else if (b.type === "calc" || b.type === "graph") {

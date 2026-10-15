@@ -260,6 +260,12 @@ export interface SchemaBlock extends BlockBase {
   notes?: SchemaNote[];
   /** Largeur dans le texte, en unites de page (comme ImageBlock.width). Absent = taille naturelle. */
   width?: number;
+  /**
+   * Photo annotee : l'image (fichier de assets/, celui d'un bloc image) en
+   * fond, a sa taille dans la page (unites de page) ; les annotations se
+   * posent dessus. Absent : schema sur fond blanc.
+   */
+  under?: { src: string; w: number; h: number; photo?: string };
 }
 
 export interface SchemaPart {
@@ -280,10 +286,11 @@ export interface SchemaPart {
 /**
  * Annotation : fleche de tension le long d'une piece (`u`, convention
  * recepteur, `flip` l'inverse), fleche de courant sur un fil (`i`, au
- * point x, y, vers `dir`), ou texte libre (`text`).
+ * point x, y, vers `dir`), texte libre (`text`), fleche libre (`arrow`, de
+ * x, y vers x2, y2) ou trait droit (`line`).
  */
 export interface SchemaNote {
-  kind: "u" | "i" | "text";
+  kind: "u" | "i" | "text" | "arrow" | "line";
   part?: string;
   x?: number;
   y?: number;
@@ -291,6 +298,9 @@ export interface SchemaNote {
   flip?: boolean;
   /** Fleche de tension : de l'autre cote de la piece que par defaut. */
   other?: boolean;
+  /** Fleche libre ou trait : son autre bout. */
+  x2?: number;
+  y2?: number;
   label: string;
 }
 

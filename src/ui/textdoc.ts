@@ -98,6 +98,8 @@ export interface DocImages {
   resized: (id: string, width: number, height?: number | null) => void;
   /** Photo calee a gauche (true) ou rendue a sa ligne (false). */
   sided?: (id: string, side: boolean) => void;
+  /** Photo a annoter (fleches, traits, textes par-dessus) : bouton ✎ de la mini-barre. */
+  annotate?: (id: string) => void;
   /**
    * Deplacement explicite d'une photo (monter, descendre, glisser, decaler,
    * aligner, caler a gauche) : `run` le fait ; la page mesure les photos
@@ -1706,6 +1708,9 @@ export class TextDoc {
       align,
       side,
       recrop,
+      this.images?.annotate && !fig.dataset.live
+        ? button("✎", "Annoter : flèches, traits et textes par-dessus la photo", () => { this.selectImage(null); this.images?.annotate?.(id); })
+        : null,
       button("✕", fig.dataset.live ? "Retirer ce bloc de la page" : "Retirer la photo", () => this.removeImage(fig)),
     ));
   }
@@ -2011,6 +2016,24 @@ export class TextDoc {
   }
 
   /** Retire la photo du texte, avec « Annuler » (le fichier reste dans assets/). */
+  /**
+   * Remplace la figure `oldId` (photo ou bloc vivant) par `newId` a la meme
+   * place du texte (photo annotee <-> photo). Rend la nouvelle figure.
+   */
+  swapFigure(oldId: string, newId: string): HTMLElement | null {
+    const old = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(oldId)}"]`);
+    if (!old) return null;
+    this.selectImage(null);
+    const r = document.createRange();
+    r.setStartBefore(old);
+    const fig = this.insertImage(newId, r, true);
+    const next = old.nextSibling;
+    if (next?.nodeType === Node.TEXT_NODE && next.textContent === "\u200b") next.remove();
+    old.remove();
+    this.emit();
+    return fig;
+  }
+
   /** Retire un bloc vivant sans message (schema laisse vide a la fermeture de l'editeur). */
   removeLive(id: string): void {
     const fig = this.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);

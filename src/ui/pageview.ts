@@ -1352,6 +1352,7 @@ export class PageView {
         };
       },
       openLive: (id) => this.openLive(loaded, id),
+      annotate: (id) => void this.annotatePhoto(loaded, id),
       moving: (run) => this.movePhotos(loaded, run),
     }, this.host.links && { ...this.host.links, pageId: () => page.id });
     const readOnly = isFutureVersion(page) || this.readOnly || !!copy;
@@ -3738,7 +3739,8 @@ export class PageView {
     // Schema : dessine depuis le schema lui-meme (pieces, fils, annotations).
     if (b.type === "schema") {
       const node = el("div", { class: "live-schema" });
-      const ready = import("./schema-view").then((m) => m.paintSchema(node, b)).catch(() => undefined);
+      const bg = b.under ? this.host.repo.readAsset(this.notebook, this.divider, b.under.src).catch(() => undefined) : Promise.resolve(undefined);
+      const ready = Promise.all([import("./schema-view"), bg]).then(([m, url]) => m.paintSchema(node, b, url)).catch(() => undefined);
       return { node, ready };
     }
     if (b.type === "calc") {
@@ -3821,10 +3823,23 @@ export class PageView {
     const fig = at.doc.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(block.id)}"]`);
     if (!fig) return;
     const m = await import("./schema-view");
+    const background = block.under
+      ? await this.host.repo.readAsset(this.notebook, this.divider, block.under.src).catch(() => undefined)
+      : undefined;
     m.openSchemaEditor({
-      block, anchor: fig,
+      block, anchor: fig, ...(background ? { background } : {}),
       onChange: () => { at.doc.refreshLive(block.id); this.fitSheet(at); this.queueSave(at); },
       onClose: () => {
+        // Photo annotee sans annotation : la photo redevient normale.
+        const photo = block.under?.photo;
+        if (photo && !(block.notes ?? []).length && !block.parts.length && !block.wires.length
+          && at.page.blocks.some((b) => b.type === "image" && b.id === photo)) {
+          at.doc.swapFigure(block.id, photo);
+          at.page.blocks = at.page.blocks.filter((b) => b !== block);
+          this.fitSheet(at);
+          this.queueSave(at);
+          return;
+        }
         if (!block.parts.length && !block.wires.length && !(block.notes ?? []).length) at.doc.removeLive(block.id);
         at.doc.refreshLive(block.id);
         this.fitSheet(at);
@@ -3845,6 +3860,29 @@ export class PageView {
     toast(r.skipped.length
       ? `Schéma importé ; symboles non repris : ${[...new Set(r.skipped)].join(", ")} (un appui le rouvre pour compléter)`
       : "Schéma importé : un appui le rouvre", r.skipped.length ? "warn" : "info", 7000);
+  }
+
+  /**
+   * Photo du texte a annoter : elle devient un schema dont elle est le fond
+   * (fleches, traits, textes par-dessus), a la meme place et a la meme
+   * taille ; le bloc image reste dans la page (son fichier aussi).
+   */
+  private async annotatePhoto(loaded: LoadedPage, id: string): Promise<void> {
+    if (loaded.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return; }
+    const img = loaded.page.blocks.find((b): b is ImageBlock => b.type === "image" && b.id === id);
+    const fig = loaded.doc.root.querySelector<HTMLElement>(`.doc-img[data-id="${CSS.escape(id)}"]`);
+    if (!img || !fig) return;
+    const k = (loaded.sheet.clientWidth || PAGE_W) / PAGE_W;
+    const pic = fig.querySelector("img");
+    const w = img.width ?? Math.round(fig.getBoundingClientRect().width / k);
+    const ratio = pic && pic.naturalWidth ? pic.naturalHeight / pic.naturalWidth : 0.75;
+    const h = img.height ?? Math.round(w * ratio);
+    const block: SchemaBlock = { id: uuid(), type: "schema", parts: [], wires: [], under: { src: img.src, w, h, photo: id } };
+    loaded.page.blocks.push(block);
+    loaded.doc.swapFigure(id, block.id);
+    this.fitSheet(loaded);
+    this.queueSave(loaded);
+    await this.openSchema(loaded, block);
   }
 
   /** Nouveau schema au curseur du texte (ou sous le dernier contenu), editeur ouvert. */
