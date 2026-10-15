@@ -46,6 +46,8 @@ export interface DxPara {
   shade?: string;
   /** Petit texte gris (legende). */
   caption?: boolean;
+  /** Ligne encadree (conclusion) : bordure tout autour. */
+  boxed?: boolean;
 }
 
 export interface DxDoc {
@@ -182,6 +184,10 @@ class Builder {
       pPr.push(`<w:numPr><w:ilvl w:val="${Math.max(0, Math.min(4, p.list.level))}"/><w:numId w:val="${this.numbering.idFor(p.list)}"/></w:numPr>`);
     } else {
       this.numbering.reset();
+    }
+    if (p.boxed) {
+      const side = (n: string) => `<w:${n} w:val="single" w:sz="8" w:space="4" w:color="auto"/>`;
+      pPr.push(`<w:pBdr>${side("top")}${side("left")}${side("bottom")}${side("right")}</w:pBdr>`);
     }
     if (p.shade) pPr.push(`<w:shd w:val="clear" w:color="auto" w:fill="${p.shade}"/>`);
     if (p.indent) pPr.push(`<w:ind w:left="${Math.round(p.indent)}"/>`);

@@ -323,6 +323,7 @@ export function planToParas(items: readonly PlanItem[], assets: Assets): DxPara[
       else if (f?.style === "ul" || f?.style === "ol") {
         p.list = { ordered: f.style === "ol", level: f.level ?? 0, ...(it.num != null ? { num: it.num } : {}) };
       }
+      if (f?.style === "box") p.boxed = true;
       if (it.shade) p.shade = it.shade;
       out.push(p);
     } else if (it.kind === "ink") {

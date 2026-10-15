@@ -13,6 +13,7 @@
  *   [libellé](cahiers:<pageId>#<blockId> "Maths/Cours/0012") = lien vers
  *   une page (core/links.ts : cible par id de page, chemin lisible en repli),
  *   en debut de ligne (D11) : "# ", "## ", "### " = titres, "- " = puce,
+ *   "> " = ligne encadree (conclusion),
  *   "1. " = liste numerotee, deux espaces devant par niveau de liste.
  * Les caracteres speciaux du texte (\ $ * [ ] `) sont echappes par un
  * antislash, et un debut de ligne qui ressemblerait a un marqueur aussi
@@ -25,7 +26,7 @@ import type { ColorKey } from "../types";
 import { PALETTE } from "../palette";
 
 /** Mise en forme d'une ligne entiere (D11) : titre 1 a 3, puce, numero. */
-export type LineStyle = "h1" | "h2" | "h3" | "ul" | "ol";
+export type LineStyle = "h1" | "h2" | "h3" | "ul" | "ol" | "box";
 
 export interface LineFormat {
   style: LineStyle;
@@ -55,7 +56,7 @@ export type DocToken =
 export const MAX_LIST_LEVEL = 4;
 
 /** Marqueur de debut de ligne : titre (sans retrait), puce ou numero. */
-const MARKER = /^( *)(?:(#{1,3}) |(-) |(\d{1,3})[.)] )/;
+const MARKER = /^( *)(?:(#{1,3}) |(-) |(\d{1,3})[.)] |(>) )/;
 
 /** Marqueur de debut de ligne lu dans le texte, et sa longueur. */
 function matchMarker(s: string): { format: LineFormat; length: number; escapeAt: number } | null {
@@ -67,6 +68,8 @@ function matchMarker(s: string): { format: LineFormat; length: number; escapeAt:
     if (pad) return null;
     return { format: { style: `h${m[2].length}` as LineStyle }, length: m[0].length, escapeAt: 0 };
   }
+  // « > » : ligne encadree (conclusion, resultat), sans retrait.
+  if (m[5]) return pad ? null : { format: { style: "box" }, length: m[0].length, escapeAt: 0 };
   const level = Math.min(MAX_LIST_LEVEL, Math.floor(pad / 2));
   const lvl = level ? { level } : {};
   if (m[3]) return { format: { style: "ul", ...lvl }, length: m[0].length, escapeAt: pad };
@@ -93,6 +96,7 @@ function lineMarker(f: LineFormat, num: number | null): string {
     const pad = "  ".repeat(f.level ?? 0);
     return f.style === "ul" ? `${pad}- ` : `${pad}${num ?? f.num ?? 1}. `;
   }
+  if (f.style === "box") return "> ";
   return `${"#".repeat(Number(f.style[1]))} `;
 }
 

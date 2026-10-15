@@ -1655,3 +1655,5 @@ html[data-theme="dark"] .text-doc .doc-link, html[data-theme="dark"] .review-whe
 .sch-photo .sch-notes, .sch-photo .sch-label { color: #d92d20; }
 .sch-photo .sch-notes { stroke-width: .15; }
 .sch-photo .sch-label { font-weight: 600; }
+/* Ligne encadree (« > », Ctrl+Maj+B) : le cadre suit le texte sans changer la hauteur de ligne (Seyes). */
+.text-doc .dl-box { width: fit-content; max-width: 100%; outline: 1.5px solid currentColor; outline-offset: calc(3px * var(--k, 1)); border-radius: 2px; }

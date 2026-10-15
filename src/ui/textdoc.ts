@@ -3104,12 +3104,28 @@ export class TextDoc {
         if (prev instanceof HTMLElement && prev.classList.contains("eq") && !prev.classList.contains("live")) eq = prev;
       }
     }
-    if (!eq) { toast("Place le curseur juste après une formule (ou sélectionne-la), puis Ctrl+Maj+B", "info", 4000); return false; }
+    // Pas de formule : c'est la ligne du curseur qui s'encadre (conclusion).
+    if (!eq) return this.boxLine();
     // Formule figee : sa source tapee n'est plus relue (elle perdrait le cadre).
     const box = makeEq(toggleBox(eq.dataset.latex ?? ""));
     eq.replaceWith(box);
     this.lastAuto = null;
     this.caretBeside(box, true);
+    this.emit();
+    return true;
+  }
+
+  /** Encadre la ligne du curseur (ou retire le cadre) ; un titre ou une puce devient ligne encadree. */
+  private boxLine(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.root.contains(r.startContainer)) return false;
+    const block = closestLine(r.startContainer, this.root);
+    this.lastLine = null;
+    if (block && lineFormatOfEl(block).style === "box") this.unwrapLine(block, false);
+    else if (block) setLineFormat(block, { style: "box" });
+    else this.wrapLine(r.cloneRange(), { style: "box" });
     this.emit();
     return true;
   }
@@ -4686,7 +4702,7 @@ export function isEditingDoc(target: EventTarget | null): boolean {
 
 /* ---------------- lignes mises en forme (D11) ---------------- */
 
-const LINE_STYLES = new Set<string>(["h1", "h2", "h3", "ul", "ol"]);
+const LINE_STYLES = new Set<string>(["h1", "h2", "h3", "ul", "ol", "box"]);
 
 /**
  * Bloc d'une ligne mise en forme : <div class="dl dl-h1">, ou

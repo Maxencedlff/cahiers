@@ -248,3 +248,12 @@ describe("tailles de texte facon Word", () => {
     expect(serializeDoc(parseDoc("[x]{.s13}"))).toBe("\\[x\\]{.s13}");
   });
 });
+
+describe("ligne encadree (« > », Ctrl+Maj+B)", () => {
+  it("aller-retour, et un « > » tape reste du texte", () => {
+    const t = parseDoc("> Conclusion : stable\nsuite");
+    expect(t.find((x) => x.kind === "line")).toMatchObject({ style: "box" });
+    expect(serializeDoc(t)).toBe("> Conclusion : stable\nsuite");
+    expect(serializeDoc([{ kind: "text", text: "> pas un cadre" }])).toBe("\\> pas un cadre");
+  });
+});
