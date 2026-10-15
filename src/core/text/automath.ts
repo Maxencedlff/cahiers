@@ -784,6 +784,14 @@ class Parser {
         const op = this.bigOp(t);
         if (op) return op;
       }
+      // Transformee de Laplace : « TL^-1(S(p)) », « Lap(f) », « TL[f] » -> L calligraphique.
+      // Seulement colle a ^, ( ou [ : « la TL inverse » reste du texte.
+      const nx = this.toks[this.i + 1];
+      if ((t.s === "TL" || t.s === "Lap") && nx && (nx.s === "^" || nx.s === "(" || nx.s === "[")) {
+        this.i++;
+        this.seenOp = true;
+        return { tex: "\\mathcal{L}", ops: 1, vars: 1 };
+      }
       // « sumF » colle : la somme des F (bilan des forces).
       const sumOf = /^sum([A-Z][A-Za-z0-9]{0,3})$/.exec(t.s);
       if (sumOf) {

@@ -286,6 +286,8 @@ const WORD_SHORTCUTS_OFF = ["or", "and", "not", "xor", "nand", "nor", "iff", "le
 const FIELD_SHORTCUTS = {
   // Derivees en point (mecanique) : « ddot » puis la lettre.
   ddot: "\\ddot{#?}", dot: "\\dot{#?}",
+  // Transformee de Laplace : « Lap » -> L calligraphique (puis ^-1 pour l'inverse).
+  Lap: "\\mathcal{L}",
   eps: "\\varepsilon", pi: "\\pi", inf: "\\infty",
   // Une seule case sous lim (MathLive en met deux, "_ -> _") : "lim_(x->0)" s'y tape.
   lim: "\\lim_{#?}",

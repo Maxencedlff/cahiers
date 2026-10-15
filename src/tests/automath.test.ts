@@ -756,3 +756,11 @@ describe("mecanique : somme des forces, derivees en point, primes", () => {
     expect(findFormulas("la somme des forces")).toEqual([]);
   });
 });
+
+describe("transformee de Laplace tapee", () => {
+  it("TL^-1(S(p)), Lap(f) ; « la TL inverse » reste du texte", () => {
+    expect(findFormulas("s(t) = TL^-1(S(p))").map((f) => f.latex)).toEqual(["s\\left(t\\right) = \\mathcal{L}^{-1}\\left(S\\left(p\\right)\\right)"]);
+    expect(findFormulas("F(p) = Lap(f(t))")[0].latex).toContain("\\mathcal{L}");
+    expect(findFormulas("on applique la TL inverse")).toEqual([]);
+  });
+});
