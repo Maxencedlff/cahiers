@@ -525,9 +525,14 @@ class Parser {
     if (t?.t !== "id" || t.s in BIGOPS) return false;
     const letter = /^[A-Za-z]$/.test(t.s);
     const deriv = /^d[A-Za-zα-ωΔ]/.test(t.s) && this.toks[j + 1]?.s === "/";
+    // « m ddotx(t) », « m dotx » : derivee en point ; « sumF ».
+    if (/^d?dot([A-Za-z]|theta|omega|alpha|phi|varphi)$/.test(t.s) || /^sum[A-Z][A-Za-z0-9]{0,3}$/.test(t.s)) return true;
     if (!letter && !deriv && (stopWord(t.s) || isUnit(t.s) || !validIdent(t.s))) return false;
     const n = this.toks[j + 1];
     if (n?.t === "op" && (n.s === "(" || n.s === "^" || n.s === "_")) return true;
+    // Prime colle a une lettre : « m x''(t) », « k y' ».
+    if (letter && n?.s === "'") return true;
+
     // Derivee : "i = C dv/dt".
     if (n?.t === "op" && n.s === "/" && /^d./.test(t.s) && this.toks[j + 2]?.t === "id" && DIFF.test(this.toks[j + 2].s)) return true;
     const short = letter || isGreek(t.s) || GREEK_SUB.test(t.s) || DELTA.test(t.s) || loneVariable(t.s) || /^j?[A-Z]\d?$/.test(t.s);
@@ -712,7 +717,10 @@ class Parser {
       } else this.i = save2;
       // Sans bornes, seule une integrale qui finit par "dx" en est une.
       if (!bounded && (!diff || !body)) return fail();
-    } else if (!bounded) return fail();
+    } else if (!bounded) {
+      // Somme sans bornes : seulement devant une grandeur seule (« sum F = m a », bilan des forces).
+      if (!(t.s === "sum" && body && body.ops === 0 && body.vars >= 1)) return fail();
+    }
     const vars = 1 + (body?.vars ?? 0);
     return { tex: `${tex}${body ? ` ${body.tex}` : ""}${diff}`, ops: 1 + (body?.ops ?? 0), vars };
   }
@@ -775,6 +783,30 @@ class Parser {
       if (t.s in BIGOPS) {
         const op = this.bigOp(t);
         if (op) return op;
+      }
+      // « sumF » colle : la somme des F (bilan des forces).
+      const sumOf = /^sum([A-Z][A-Za-z0-9]{0,3})$/.exec(t.s);
+      if (sumOf) {
+        this.i++;
+        this.seenOp = true;
+        return { tex: `\\sum ${identTex(sumOf[1])}`, ops: 1, vars: 1 };
+      }
+      // Derivees en point (mecanique) : « dotx » -> x point, « ddotx » -> x deux points ; « ddot(x) » aussi.
+      const dotted = /^(d?dot)([A-Za-z]|theta|omega|alpha|phi|varphi)$/.exec(t.s);
+      if (dotted) {
+        this.i++;
+        this.seenOp = true;
+        return { tex: `\\${dotted[1]}{${identTex(dotted[2])}}`, ops: 1, vars: 1 };
+      }
+      if ((t.s === "dot" || t.s === "ddot") && this.toks[this.i + 1]?.t === "op" && this.toks[this.i + 1].s === "(") {
+        const save = this.i;
+        this.i++;
+        const arg = this.atom();
+        if (arg?.group !== undefined) {
+          this.seenOp = true;
+          return { tex: `\\${t.s}{${arg.group}}`, ops: arg.ops + 1, vars: Math.max(1, arg.vars) };
+        }
+        this.i = save;
       }
       // "inf" (ou "infty") : l'infini, seulement derriere un signe ou une
       // relation ("x -> +inf") ; "borne inf" reste du texte.

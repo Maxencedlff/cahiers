@@ -746,3 +746,13 @@ describe("encadrer une formule (Ctrl+Maj+B)", () => {
     expect(toggleBox("\\boxed{a}+\\boxed{b}")).toBe("\\boxed{\\boxed{a}+\\boxed{b}}");
   });
 });
+
+describe("mecanique : somme des forces, derivees en point, primes", () => {
+  it("sum F, sumF, ddotx, dotx, ddot(x), x''(t)", () => {
+    expect(findFormulas("Alors sum F = m ddotx(t) donc").map((f) => f.latex)).toEqual(["\\sum F = m\\,\\ddot{x}\\left(t\\right)"]);
+    expect(findFormulas("sumF = m x''(t)").map((f) => f.latex)).toEqual(["\\sum F = m\\,x''\\left(t\\right)"]);
+    expect(findFormulas("v = dotx(t)").map((f) => f.latex)).toEqual(["v = \\dot{x}\\left(t\\right)"]);
+    expect(findFormulas("on a ddot(x) = 0").map((f) => f.latex)).toEqual(["\\ddot{x} = 0"]);
+    expect(findFormulas("la somme des forces")).toEqual([]);
+  });
+});

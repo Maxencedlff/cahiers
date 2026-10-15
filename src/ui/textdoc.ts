@@ -280,7 +280,12 @@ const SYMBOL_CHARS: Record<string, string> = {
  * devient ∈ a la fermeture (cleanMathLive), MathLive ne voyant pas l'espace.
  * "inf" : l'infini, comme "infty".
  */
+/** Raccourcis de MathLive retires : des mots qu'on tape dans un texte de formule. */
+const WORD_SHORTCUTS_OFF = ["or", "and", "not", "xor", "nand", "nor", "iff", "le", "ge", "ne", "lt", "gt", "ii", "ee", "oo", "AA", "EE"];
+
 const FIELD_SHORTCUTS = {
+  // Derivees en point (mecanique) : « ddot » puis la lettre.
+  ddot: "\\ddot{#?}", dot: "\\dot{#?}",
   eps: "\\varepsilon", pi: "\\pi", inf: "\\infty",
   // Une seule case sous lim (MathLive en met deux, "_ -> _") : "lim_(x->0)" s'y tape.
   lim: "\\lim_{#?}",
@@ -2728,7 +2733,11 @@ export class TextDoc {
     // Les Alt+lettre sont a l'appli (Alt+P puissance, Alt+V vecteur...).
     mf.keybindings = mf.keybindings.filter((k) => !appAltKey(k.key));
     // Raccourcis en minuscules seulement : "PI" reste P fois I.
-    mf.inlineShortcuts = { ...mf.inlineShortcuts, ...FIELD_SHORTCUTS };
+    // Mots francais ou logiques que MathLive changerait en symbole pendant la
+    // frappe (« Force » devenait F∨ce, « le » ≤) : jamais remplaces.
+    const shortcuts: Record<string, unknown> = { ...mf.inlineShortcuts };
+    for (const w of WORD_SHORTCUTS_OFF) delete shortcuts[w];
+    mf.inlineShortcuts = { ...shortcuts, ...FIELD_SHORTCUTS } as typeof mf.inlineShortcuts;
     this.field = mf;
     this.fieldOrigin = template ? null : { latex: eq.dataset.latex ?? "", src: eq.dataset.src, value: mf.getValue("latex").trim() };
     editingDoc = this;
