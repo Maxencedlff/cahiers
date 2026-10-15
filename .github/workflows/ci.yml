@@ -1,0 +1,19 @@
+# Tests a chaque envoi, sur une machine de GitHub (rien ne tourne sur le PC).
+name: Tests
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # Lockfile ecrit sous Windows : les paquets natifs Linux s'ajoutent a l'installation.
+      - run: npm ci || npm install
+      - run: npx tsc --noEmit -p .
+      - run: npx vitest run
