@@ -252,3 +252,16 @@ describe("compatibilite : un ancien schema se lit tel quel", () => {
     expect(JSON.stringify(old)).toBe(snap);
   });
 });
+
+describe("etiquettes : symboles colles", () => {
+  it("∑, ∞, Ω colles deviennent des commandes LaTeX que KaTeX accepte", async () => {
+    const { labelTex } = await import("../core/schema/label");
+    const katex = (await import("katex")).default;
+    for (const l of ["∑", "∑ e(t)", "Σ", "gain ∞", "R = 10 Ω", "≈ 5 V", "somme ∑ des courants"]) {
+      const tex = labelTex(l);
+      expect(tex, l).not.toBeNull();
+      expect(() => katex.renderToString(tex!, { throwOnError: true }), `${l} -> ${tex}`).not.toThrow();
+    }
+    expect(labelTex("∑")).toContain("\\sum");
+  });
+});

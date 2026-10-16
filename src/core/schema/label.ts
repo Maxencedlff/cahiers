@@ -49,6 +49,29 @@ function texEsc(s: string): string {
   return s.replace(/[\\{}#$%&^_~]/g, (c) => (c === "\\" ? "\\backslash " : `\\${c}`));
 }
 
+/** Symboles colles (∑, ∞, ≈, Ω…) : KaTeX les refuse dans \text, ils passent en formule. */
+const MATH_CHARS: Record<string, string> = {
+  "∑": "\\sum", "∏": "\\prod", "∫": "\\int", "∞": "\\infty", "±": "\\pm", "×": "\\times", "÷": "\\div",
+  "≈": "\\approx", "≤": "\\le", "≥": "\\ge", "≠": "\\ne", "→": "\\to", "⇒": "\\Rightarrow", "⇔": "\\Leftrightarrow",
+  "∂": "\\partial", "·": "\\cdot", "√": "\\surd", "∈": "\\in", "∀": "\\forall", "∃": "\\exists", "°": "^{\\circ}",
+  "Δ": "\\Delta", "δ": "\\delta", "α": "\\alpha", "β": "\\beta", "γ": "\\gamma", "ε": "\\varepsilon", "θ": "\\theta",
+  "λ": "\\lambda", "μ": "\\mu", "π": "\\pi", "ρ": "\\rho", "σ": "\\sigma", "τ": "\\tau", "φ": "\\varphi", "ω": "\\omega", "Ω": "\\Omega",
+};
+const MATH_CHAR_RE = new RegExp(`[${Object.keys(MATH_CHARS).join("")}]`, "g");
+
+/** Texte en \text{…}, les symboles mathematiques colles en commandes LaTeX. */
+function textTex(src: string): string {
+  let out = "", last = 0;
+  for (const m of src.matchAll(MATH_CHAR_RE)) {
+    const i = m.index ?? 0;
+    if (i > last) out += `\\text{${texEsc(src.slice(last, i))}}`;
+    out += `${MATH_CHARS[m[0]]} `;
+    last = i + m[0].length;
+  }
+  if (last < src.length) out += `\\text{${texEsc(src.slice(last))}}`;
+  return out.trim();
+}
+
 /**
  * LaTeX d'une etiquette : formule entiere si elle en est une, sinon mots de
  * phrase en texte et le reste en formule ; null : texte tel quel (reference
@@ -68,11 +91,11 @@ export function labelTex(line: string): string | null {
     if (!run.length) return;
     const src = run.join(" ");
     const f = forceFormula(src);
-    out.push(f ? finish(f) : `\\text{${texEsc(src)}}`);
+    out.push(f ? finish(f) : textTex(src));
     run = [];
   };
   for (const w of words) {
-    if (proseWord(w) || /^[:;,!?]$/.test(w)) { flush(); out.push(`\\text{${texEsc(w)}}`); }
+    if (proseWord(w) || /^[:;,!?]$/.test(w)) { flush(); out.push(textTex(w)); }
     else run.push(w);
   }
   flush();
