@@ -35,7 +35,7 @@ export const KEYPAD: Key[] = [
   { label: "xʸ", insert: "^", family: "fn", second: { label: "ʸ√x", insert: "nthRoot(" } },
   { label: "√", insert: "sqrt(", family: "fn", second: { label: "abs", insert: "abs(" } },
   { label: "log", insert: "log10(", family: "fn", second: { label: "10ˣ", insert: "10^" } },
-  { label: "ln", insert: "log(", family: "fn", second: { label: "eˣ", insert: "exp(" } },
+  { label: "ln", insert: "ln(", family: "fn", second: { label: "eˣ", insert: "exp(" } },
 
   { label: "sin", insert: "sin(", family: "fn", second: { label: "sin⁻¹", insert: "asin(" } },
   { label: "cos", insert: "cos(", family: "fn", second: { label: "cos⁻¹", insert: "acos(" } },
