@@ -1,7 +1,7 @@
 import type { Repo } from "./repo";
 import type { Block, ColorKey, Page } from "../types";
 import { dividerMatches, extractReview, groupReview, type ReviewFilter, type ReviewItem, type ReviewResult, type ReviewSource } from "../review";
-import { docHeadings, docLinks, docTitle, parseDoc, texToPlain, type DocToken } from "../text/doc";
+import { docHeadings, docLinks, docTitle, flattenTables, parseDoc, texToPlain, type DocToken } from "../text/doc";
 import { extractFormulas, type Formula } from "../suggest";
 import { blockLinkRef, parseLinkUrl, type IndexedLink, type LinkAnchor, type LinkPage } from "../links";
 import {
@@ -182,7 +182,10 @@ function indexedLink(ref: { pageId: string; blockId?: string; heading?: string }
 function plainOfText(content: string, blockColor?: ColorKey): { text: string; colors?: Partial<Record<ColorKey, string>> } {
   let text = "";
   const colors: Partial<Record<ColorKey, string>> = {};
-  for (const t of parseDoc(content)) {
+  // Tableaux mis a plat (cases separees par « | »), blocs de code gardes en clair : tout se cherche.
+  const tokens = flattenTables(parseDoc(content).flatMap((t): DocToken[] =>
+    t.kind === "codeblock" ? [{ kind: "text", text: t.text, code: true }, { kind: "br" }] : [t]));
+  for (const t of tokens) {
     // Un lien se cherche par son libelle.
     const piece = t.kind === "br" ? "\n" : t.kind === "math" ? texToPlain(t.latex)
       : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "";

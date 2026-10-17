@@ -308,3 +308,16 @@ describe("reperes « pas compris »", () => {
     expect(idx.flags).toEqual([]);
   });
 });
+
+describe("recherche dans les tableaux et blocs de code", () => {
+  it("le texte et les formules des cases, et le code, sont indexes", async () => {
+    const { searchableText } = await import("../core/storage/search");
+    const content = "Avant\n| Grandeur | Valeur |\n| --- | --- |\n| tension | $V_{be}$ |\n\n```python\nprint(\"bonjour\")\n```\nApres";
+    const txt = searchableText({ id: "t", type: "text", content } as never);
+    expect(txt).toContain("Grandeur");
+    expect(txt).toContain("tension");
+    expect(txt).toContain("Vbe");
+    expect(txt).toContain("bonjour");
+    expect(txt).toContain("Apres");
+  });
+});
