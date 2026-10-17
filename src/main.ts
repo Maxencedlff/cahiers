@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 import { App } from "./ui/app";
 import { detectPlatform } from "./platform";
 import { el, toast, confirmDialog } from "./ui/dom";
+import { Updater } from "./ui/updater";
 
 /**
  * Fermeture de la fenetre (croix, Alt+F4) : on ecrit ce qui attend AVANT de
@@ -52,6 +53,14 @@ async function main() {
     mount.replaceChildren(app.element);
     if (platform.isTauri) await guardClose(app);
     await app.start();
+
+    // Mises a jour : seulement l'appli installee (jamais en mode navigateur),
+    // verification automatique hors developpement (tauri dev).
+    if (platform.isTauri) {
+      const updater = new Updater(app);
+      app.setUpdater(updater);
+      if (!import.meta.env.DEV) updater.checkSoon();
+    }
 
     // Mode navigateur : rappel seulement en developpement (npm run dev) ;
     // le dossier reste lisible dans le detail de l'indicateur d'etat.

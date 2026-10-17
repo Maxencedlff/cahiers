@@ -1,6 +1,6 @@
 [package]
 name = "cahiers"
-version = "0.1.0"
+version = "0.2.0"
 description = "Prise de notes stylet pour etudes d'ingenieur"
 authors = ["Maxence de La Fouchardiere"]
 edition = "2021"
@@ -18,6 +18,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 # Boite « Enregistrer sous » de l'export Word (save_export).
 tauri-plugin-dialog = "2"
+# Mises a jour : verifie latest.json sur cahiers-releases (signature minisign),
+# telecharge, installe ; process relance l'appli ensuite.
+tauri-plugin-updater = "2.14"
+tauri-plugin-process = "2.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"

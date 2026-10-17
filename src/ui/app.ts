@@ -57,9 +57,11 @@ import { loadSettings, saveSettings, type Settings } from "../core/settings";
 import type { LocationApi } from "../core/storage/location";
 import { locationSection, runSwitch, type LocationHost } from "./location";
 import {
-  ctrlCommand, escapeAction, isReloadKey, keyLabel, keysOf, pageLabel, titleOf, type Command,
+  altKeyName, ctrlCommand, escapeAction, isReloadKey, keyLabel, keysOf, pageLabel, titleOf, type Command,
 } from "../core/shortcuts";
 import { showShortcuts } from "./help";
+import type { Updater } from "./updater";
+import { shortVersion } from "../core/update";
 import { icon, widthIcon, type IconName } from "./icons";
 import { applyAppearance, installTooltips, onSystemThemeChange } from "./tooltip";
 import { retoneSurfaces } from "./canvas";
@@ -124,6 +126,9 @@ export class App {
   private settings: Settings;
 
   private screen: Screen = "menu";
+  /** Mises a jour (appli installee seulement, main.ts) ; null en mode navigateur. */
+  private updater: Updater | null = null;
+  private appVersion = "";
   private tabs: Tab[] = [];
   private activeId: string | null = null;
   /** Onglet affiche dans le panneau droit, quand le split est ouvert. */
@@ -479,6 +484,12 @@ export class App {
     calc.setMinTop(where === "float" ? this.tabbar.getBoundingClientRect().bottom + 8 : 8);
     calc.setDetachable(where !== "sheet", where === "float" && this.settings.calcDetached);
     slot.side.classList.toggle("closed", !calc.isVisible || !calc.isDocked);
+  }
+
+  /** Branche les mises a jour : menu ⋯ et Reglages les proposent ensuite. */
+  setUpdater(u: Updater): void {
+    this.updater = u;
+    void u.version().then((v) => { this.appVersion = v; });
   }
 
   async start(): Promise<void> {
@@ -2296,6 +2307,16 @@ export class App {
       "sep",
       { label: "Réglages…", icon: "settings", keys: keysOf("settings"), run: () => void this.openSettings() },
       { label: "Raccourcis clavier", icon: "keyboard", keys: "F1", run: () => showShortcuts() },
+    );
+    const updater = this.updater;
+    if (updater) {
+      entries.push({
+        label: "Rechercher des mises à jour", icon: "download",
+        keys: this.appVersion ? `v${shortVersion(this.appVersion)}` : undefined,
+        run: () => void updater.check(true),
+      });
+    }
+    entries.push(
       "sep",
       { label: "Supprimer la page…", icon: "trash", danger: true, run: () => void view.deleteCurrentPage().then(() => this.refreshSidebarSoon(0)) },
     );
@@ -2398,6 +2419,13 @@ export class App {
         settingRow("Raccourcis clavier", el("button", { onclick: () => showShortcuts() }, "Afficher", el("kbd", {}, "F1")), ""),
         el("h3", { class: "set-h" }, "Emplacement des cahiers"),
         place,
+        ...(this.updater ? [
+          el("h3", { class: "set-h" }, "Mises à jour"),
+          settingRow("Version", el("button", {
+            onclick: () => { void this.updater?.check(true); },
+          }, icon("download", 18), "Rechercher des mises à jour"),
+          this.appVersion ? `Cahiers ${shortVersion(this.appVersion)} installé` : "Cahiers installé"),
+        ] : []),
       );
     };
     // Section a part : elle lit l'emplacement (commande Rust) une fois.
@@ -3125,48 +3153,49 @@ export class App {
     const view = this.focusedTab()?.view;
     // Alt+Maj+P : photos du tableau (Alt+P seul = modele Puissance).
     if (isPhotoImportKey(e)) { void this.importImage(); return true; }
+    // Touche du raccourci : e.key sous Windows (AZERTY compris), touche
+    // physique sur Mac (Option+= tape « ≠ », Option+F « ƒ ») : altKeyName.
+    const k = altKeyName(e);
     // Alt+Maj+= : la formule avant le curseur redevient du texte (Alt+= la remet).
-    if ((e.key === "=" || e.key === "+" || e.code === "Equal") && e.shiftKey) {
+    if ((k === "=" || k === "+") && e.shiftKey) {
       if (inDoc) view?.activeDoc?.toText();
       return true;
     }
     // Alt+= : sur ce qu'on vient de taper, une selection ou un bout redevenu
     // texte : le met en formule ; sinon nouvelle formule, comme l'equation de Word.
-    if ((e.key === "=" || e.code === "Equal") && !e.shiftKey) {
+    if (k === "=" && !e.shiftKey) {
       if (!inDoc) view?.focusText();
       insertMathTemplate("", view?.activeDoc);
       return true;
     }
-    // e.code (touche physique) : sur Mac, Option+lettre donne un autre caractere.
-    const k = /^Key([A-Z])$/.exec(e.code)?.[1].toLowerCase() ?? e.key.toLowerCase();
     const tpl = MATH_TEMPLATES.find((t) => t.key === k);
     if (tpl) {
       if (!inDoc) view?.focusText();
       insertMathTemplate(tpl.insert, view?.activeDoc);
       return true;
     }
-    // Couleurs Alt+1 a 5, dans l'ordre de la palette. e.code : en AZERTY
-    // la rangee du haut donne & e " ' ( sans Maj.
-    const digit = /^Digit([1-5])$/.exec(e.code)?.[1];
+    // Couleurs Alt+1 a 5, dans l'ordre de la palette. En AZERTY la rangee
+    // du haut donne & e " ' ( sans Maj : altKeyName lit alors e.code.
+    const digit = /^[1-5]$/.test(k) && !e.code?.startsWith("Numpad") ? k : null;
     const idx = digit ? PALETTE.findIndex((p) => p.shortcut === digit) : -1;
     if (idx >= 0) { this.pickColor(PALETTE[idx].key); return true; }
-    if (e.code === "Digit0") { this.pickColor(null); return true; }
+    if (k === "0" && e.code === "Digit0") { this.pickColor(null); return true; }
 
     // Alt+G deux fois : gomme entiere ou precise. Alt+A deux fois : lasso
     // ou insertion d'espace.
-    if (e.code === "KeyG" && this.tool === "eraser") {
+    if (k === "g" && this.tool === "eraser") {
       this.setEraserMode(this.eraserMode === "precise" ? "stroke" : "precise");
       return true;
     }
-    if (e.code === "KeyA") {
+    if (k === "a") {
       this.selectTool(this.tool === "lasso" ? "space" : "lasso");
       toast(this.tool === "space" ? "Espace : glisser une ligne vers le bas" : "Lasso : entourer des traits", "info", 1400);
       return true;
     }
     const tools: Record<string, Tool> = {
-      KeyE: "pen", KeyH: "highlighter", KeyG: "eraser", KeyZ: "region", KeyT: "textregion",
+      e: "pen", h: "highlighter", g: "eraser", z: "region", t: "textregion",
     };
-    const t = tools[e.code];
+    const t = tools[k];
     if (t) { this.selectTool(t); return true; }
     return false;
   }

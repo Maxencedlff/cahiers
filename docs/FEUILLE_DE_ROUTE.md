@@ -1,6 +1,6 @@
 # Feuille de route Cahiers
 
-Mise à jour le 17/10/2026. Décisions et idées de Maxence, dans l'ordre prévu.
+Mise à jour le 18/10/2026. Décisions et idées de Maxence, dans l'ordre prévu.
 Rien ici ne remplace la spec (`CLAUDE.md`) : un point qui la contredit attend son accord.
 
 ## 0. Corrections en attente (petites)
@@ -27,8 +27,10 @@ Rien ici ne remplace la spec (`CLAUDE.md`) : un point qui la contredit attend so
 
 ## 3. Distribution
 
-- Mac : `.dmg` signé Developer ID et notarisé (fait, GitHub Actions, 15/10). Raccourcis Alt à adapter (Option tape des caractères sur Mac).
-- Bouton « Mettre à jour » (Tauri updater) : dépôt public `cahiers-releases` à créer (accord en attente).
+- [x] Mac : `.dmg` signé Developer ID et notarisé (GitHub Actions, 15/10).
+- [x] Raccourcis sur Mac (17/10) : Option+touche lue sur la touche physique (Option+= « ≠ » = Alt+=), Cmd vaut Ctrl sauf Cmd+Q/H/W/M laissés à macOS (fermer l'onglet ⌃W, accueil ⌃M), libellés ⌘ ⌥ ⌃. Non essayé sur un vrai Mac.
+- [x] Bouton « Mettre à jour » (Tauri updater, 17/10) : vérification 5 s après le lancement, bandeau « Cahiers X.Y disponible » posé hors frappe, pages écrites avant l'installation, relance ; menu ⋯ et Réglages « Rechercher des mises à jour ». Release publique `Maxencedlff/cahiers-releases` + `latest.json` à chaque tag `v*` (mode d'emploi : `docs/PUBLIER.md`).
+- [ ] Premier vrai cycle : publier v0.2.0 (installée à la main), puis v0.2.1, et vérifier que la 0.2.0 propose et installe la 0.2.1 (Windows, puis Mac).
 - Microsoft Store (Windows, compte développeur particulier gratuit) et Mac App Store (sandbox, deux certificats en plus), une page de confidentialité commune.
 
 ## 4. Partage (bouche-à-oreille)

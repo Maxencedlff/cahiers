@@ -7,6 +7,8 @@
  * rouge reserve a l'effacement (del, clear).
  */
 
+import { usesMacKeys } from "../../core/shortcuts";
+
 export type KeyFamily = "num" | "op" | "fn" | "const" | "del" | "2nd" | "eq";
 
 export interface Key {
@@ -114,8 +116,11 @@ export interface KeyLike {
  * AZERTY : « ^ » est une touche morte (key "Dead", code "BracketLeft") ;
  * AltGr arrive comme Ctrl+Alt et sert a taper [ ] { } sur ce clavier.
  */
-export function mapKey(e: KeyLike): KeyCommand | null {
+export function mapKey(e: KeyLike, mac: boolean = usesMacKeys()): KeyCommand | null {
   if (e.metaKey) return null;
+  // Mac (AZERTY) : Option seule tape [ ] { } | ; les autres touches Option
+  // restent des raccourcis de l'appli (Alt+=, couleurs...).
+  if (mac && e.altKey && !e.ctrlKey && /^[[\]{}|]$/.test(e.key)) return { kind: "insert", text: e.key };
   const altGr = !!e.ctrlKey && !!e.altKey;
   if ((e.ctrlKey || e.altKey) && !altGr) return null;
   if (e.key === "Dead") {

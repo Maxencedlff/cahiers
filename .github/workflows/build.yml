@@ -1,13 +1,32 @@
 # Installateurs Windows, Linux et Mac compiles par GitHub (machines virtuelles).
-# Lance a la main (onglet Actions, « Run workflow ») ou par un tag v* :
-# un build Mac compte 10 fois sur le quota de minutes d'un depot prive.
+# - A la main (onglet Actions, « Run workflow ») : installateurs en artefacts
+#   du workflow, rien n'est publie.
+# - Par un tag v* (git tag v0.2.1 && git push --tags, voir docs/PUBLIER.md) :
+#   meme build, puis release publique vX.Y.Z dans Maxencedlff/cahiers-releases
+#   avec latest.json, lu par le bouton « Mettre a jour » de l'appli.
+# Un build Mac compte 10 fois sur le quota de minutes d'un depot prive.
 name: Installateurs
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
 jobs:
+  # Tag : les trois numeros de version (package.json, tauri.conf.json,
+  # Cargo.toml) doivent etre ceux du tag, avant de payer un build Mac.
+  version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --experimental-strip-types scripts/release.ts check "$GITHUB_REF_NAME"
+
   build:
+    needs: version
+    # Lancement a la main : « version » est sautee, le build part quand meme.
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +38,11 @@ jobs:
           - os: macos-latest
             name: mac
     runs-on: ${{ matrix.os }}
+    env:
+      # Signature des mises a jour (bundle.createUpdaterArtifacts) : sans
+      # elle, `tauri build` s'arrete. Cle privee : ~/.config/cahiers-updater.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -56,6 +80,7 @@ jobs:
           echo "${{ secrets.APPLE_API_KEY_P8 }}" > "$RUNNER_TEMP/AuthKey.p8"
           export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
           npx tauri build --target universal-apple-darwin --bundles app,dmg
+      # Installateurs + artefacts du updater (.sig, Cahiers.app.tar.gz).
       - uses: actions/upload-artifact@v4
         with:
           name: cahiers-${{ matrix.name }}
@@ -65,6 +90,41 @@ jobs:
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.AppImage
             src-tauri/target/release/bundle/**/*.rpm
-            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.sig
             src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/**/*.app.tar.gz
+            src-tauri/target/universal-apple-darwin/release/bundle/**/*.sig
           if-no-files-found: warn
+
+  # Tag seulement, et seulement si les trois builds ont reussi : jamais une
+  # release a moitie (l'appli installee lirait un latest.json incomplet).
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: Fichiers a publier et latest.json
+        run: node --experimental-strip-types scripts/release.ts plan "$GITHUB_REF_NAME" artefacts publier
+      # Depot public : le jeton RELEASES_TOKEN (PAT) peut y publier. gh cree
+      # la release en brouillon, envoie les fichiers, puis la publie : le
+      # latest.json « latest » ne pointe jamais vers une release incomplete.
+      - name: Release dans Maxencedlff/cahiers-releases
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" publier/* \
+            -R Maxencedlff/cahiers-releases \
+            --title "Cahiers $v" \
+            --latest \
+            --notes "Cahiers $v.
+
+          Installer : Windows \`Cahiers_${v}_x64-setup.exe\`, Mac \`Cahiers_${v}_universal.dmg\`, Linux \`.AppImage\` ou \`.deb\`.
+          Déjà installé : l'appli propose « Mettre à jour » toute seule (ou menu ⋯ › Rechercher des mises à jour)."

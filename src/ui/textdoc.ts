@@ -4632,7 +4632,8 @@ export class TextDoc {
       document.execCommand("insertText", false, "\t");
       return;
     }
-    if (e.ctrlKey && !e.altKey) {
+    // Cmd sur Mac comme Ctrl (gras, italique, cadre).
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
       const k = e.key.toLowerCase();
       // Ctrl+Maj+B : encadrer la formule (resultat d'un exercice), pas du gras.
       if (k === "b" && e.shiftKey) { e.preventDefault(); e.stopPropagation(); this.boxFormula(); return; }

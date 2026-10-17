@@ -924,6 +924,10 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // Bouton « Mettre a jour » (ui/updater.ts) : latest.json signe sur le
+        // depot public cahiers-releases, puis relance de l'appli.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Root(Mutex::new(PathBuf::new())))
         .manage(Storage::default())
         .setup(|app| {

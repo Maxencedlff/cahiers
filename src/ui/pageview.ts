@@ -57,7 +57,7 @@ import {
   ZOOM_MAX, ZOOM_MIN, anchorAt, clampZoom, inkDensity, mid, pinchOf, previewTransform,
   scrollToAnchor, stepZoom, wheelFactor, zoomLabel, type Pt,
 } from "../core/zoom";
-import { titleOf } from "../core/shortcuts";
+import { titleOf, typesChar } from "../core/shortcuts";
 import {
   INK_LIMIT, TEXT_LIMIT, canAutoPull, composeFlowText, freeRows, inkExtent, isLongPage, moveFlowBlocks, pageBreaks,
   planFlow, pullGains, pullSelection, selectionSize, type FlowPlan, type FlowSelection,
@@ -1614,8 +1614,8 @@ export class PageView {
     // Avant une frappe : une ligne vide posee sur de l'encre descend sous
     // elle, puis la ligne du curseur est notee (l'encre dessous suivra le
     // texte s'il grandit). En capture : avant TextDoc.
-    const typing = (e: KeyboardEvent) =>
-      e.key.length === 1 && !e.metaKey && (e.ctrlKey === e.altKey); // AltGr = Ctrl+Alt
+    // AltGr = Ctrl+Alt sous Windows ; Option seule sur Mac (typesChar).
+    const typing = (e: KeyboardEvent) => typesChar(e);
     loaded.doc.root.addEventListener("keydown", (e) => {
       if (loaded.readOnly || e.isComposing) return;
       // Ctrl+A : la page (navigateur), puis tout le document si elle a une suite (selectDocument).

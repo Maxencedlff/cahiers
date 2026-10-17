@@ -18,6 +18,7 @@
  */
 import { el, contextMenu, toast } from "./dom";
 import { renderTex } from "./tex";
+import { altKeyName } from "../core/shortcuts";
 import type { SchemaBlock, SchemaPart } from "../core/types";
 import { drawSchema, labelBox, type SchemaDrawing, type SchemaLabel } from "../core/schema/render";
 import {
@@ -641,7 +642,8 @@ export function openSchemaEditor(o: EditorOptions): void {
       return;
     }
     if (e.altKey && !ctrl) {
-      const low = (e.code.startsWith("Key") ? e.code.slice(3) : k).toLowerCase();
+      // Option sur Mac tape un autre caractere : touche physique (altKeyName).
+      const low = altKeyName(e);
       if (low === "u") {
         e.preventDefault();
         const p = target();

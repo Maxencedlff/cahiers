@@ -69,20 +69,86 @@ function ctrl(key: string, shift: boolean, command: Command, label: string, grou
  */
 export function keyLabel(keys: string, mac: boolean = macKeys): string {
   if (!mac) return keys;
+  // Cmd+W, Cmd+M (et Cmd+Tab) restent au systeme : sur Mac ces raccourcis
+  // passent par la touche Controle, ecrite ⌃.
+  const sys = /^Ctrl\+(W|M|Tab)$/.exec(keys);
+  if (sys) return `⌃${sys[1]}`;
   return keys.replace(/(?<![\w])(Ctrl|Maj|Alt)\+/g, (_m, k: string) => (k === "Ctrl" ? "⌘" : k === "Maj" ? "⇧" : "⌥"));
 }
 
-/** Plateforme Apple (macOS, iPadOS) : Cmd a la place de Ctrl. */
+/**
+ * Plateforme Apple (macOS, iPadOS) : Cmd a la place de Ctrl, Option qui tape
+ * des caracteres. `platform` : navigator.userAgentData.platform (« macOS »)
+ * ou, a defaut, navigator.platform (« MacIntel »).
+ */
 export function isApplePlatform(ua: string, platform = ""): boolean {
   return /Mac|iPhone|iPad|iPod/i.test(platform) || /Macintosh|iPhone|iPad|iPod/i.test(ua);
 }
 
-let macKeys = typeof navigator !== "undefined"
-  && isApplePlatform(navigator.userAgent ?? "", (navigator as { platform?: string }).platform ?? "");
+function detectMac(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const nav = navigator as { platform?: string; userAgentData?: { platform?: string } };
+  return isApplePlatform(navigator.userAgent ?? "", nav.userAgentData?.platform || nav.platform || "");
+}
+
+let macKeys = detectMac();
 
 /** Force l'affichage Mac ou PC (tests, reglage). */
 export function setMacKeys(mac: boolean): void { macKeys = mac; }
 export function usesMacKeys(): boolean { return macKeys; }
+
+/* ---------------- Alt (Option sur Mac) ---------------- */
+
+/** Caractere d'une touche physique hors lettres et chiffres (e.code). */
+const CODE_CHARS: Record<string, string> = {
+  Equal: "=", Minus: "-", Comma: ",", Period: ".", Slash: "/", Semicolon: ";", Quote: "'",
+  BracketLeft: "[", BracketRight: "]", Backslash: "\\", Backquote: "`", IntlBackslash: "<",
+  NumpadAdd: "+", NumpadSubtract: "-", NumpadEqual: "=", NumpadMultiply: "*", NumpadDivide: "/",
+};
+
+/**
+ * Touche d'un raccourci Alt, en minuscule : « f », « 1 », « = ».
+ *
+ * Sur Mac, Option tape un autre caractere (Option+F = « ƒ », Option+= = « ≠ »,
+ * Option+E = touche morte) : e.key ne dit plus rien, on lit alors la touche
+ * physique (e.code : KeyF, Digit1, Equal). Sous Windows, Alt+lettre garde sa
+ * lettre dans e.key, celle de la disposition (AZERTY : la touche A donne
+ * « a », alors que son e.code est KeyQ) : une lettre ou un chiffre d'e.key
+ * passe donc avant e.code. La rangee des chiffres en AZERTY (& é " ' ( sans
+ * Maj) passe par e.code (Digit1...).
+ */
+export function altKeyName(e: Pick<KeyLike, "key" | "code">): string {
+  const k = e.key;
+  if (/^[a-z0-9]$/i.test(k)) return k.toLowerCase();
+  const c = e.code ?? "";
+  const letter = /^Key([A-Z])$/.exec(c);
+  if (letter) return letter[1].toLowerCase();
+  const digit = /^(?:Digit|Numpad)([0-9])$/.exec(c);
+  if (digit) return digit[1];
+  if (CODE_CHARS[c]) return CODE_CHARS[c];
+  return k.length === 1 ? k.toLowerCase() : k;
+}
+
+/**
+ * La touche tape un caractere (et pas un raccourci) : sans modificateur, ou
+ * AltGr (arrive comme Ctrl+Alt sous Windows) ; sur Mac, Option seule tape
+ * aussi des caracteres ([ ] { } | en AZERTY Mac). Cmd jamais.
+ */
+export function typesChar(e: KeyLike, mac: boolean = macKeys): boolean {
+  if (e.key.length !== 1 || e.metaKey) return false;
+  if (e.ctrlKey === e.altKey) return true;
+  return mac && e.altKey && !e.ctrlKey;
+}
+
+/**
+ * Cmd+Q, Cmd+H, Cmd+W, Cmd+M appartiennent a macOS (quitter, masquer,
+ * fermer la fenetre, reduire) : l'appli ne les prend pas. Fermer l'onglet et
+ * l'accueil passent sur Mac par la touche Controle (⌃W, ⌃M).
+ */
+export function isMacSystemKey(e: KeyLike, mac: boolean = macKeys): boolean {
+  return mac && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+    && ["q", "h", "w", "m"].includes(e.key.toLowerCase());
+}
 
 export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("f", true, "flag", "Pas compris : repère sur la page (« Annuler » dans le message)", "Pendant le cours", true),
@@ -178,11 +244,13 @@ export const SHORTCUTS: readonly Shortcut[] = [
 /**
  * Commande Ctrl d'une touche, ou null. AltGr arrive comme Ctrl+Alt sous
  * Windows : ces touches tapent des caracteres (\ @ [ en AZERTY), elles ne
- * declenchent jamais de commande.
+ * declenchent jamais de commande. Sur Mac, Cmd vaut Ctrl (isMacSystemKey a part).
  */
-export function ctrlCommand(e: KeyLike): Command | null {
+export function ctrlCommand(e: KeyLike, mac: boolean = macKeys): Command | null {
   if (e.key === "F1" && !e.ctrlKey && !e.altKey && !e.metaKey) return "help";
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return null;
+  // Sur Mac, Cmd fait office de Ctrl, sauf les touches du systeme.
+  if (isMacSystemKey(e, mac)) return null;
   const k = e.key.toLowerCase();
   // « / » demande Maj en AZERTY (touche « : ») ; pave numerique aussi.
   if (k === "/") return "help";
