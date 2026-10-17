@@ -114,6 +114,8 @@ export function estimateSpans(lines: readonly DocLine[], opts: PlanOptions = {})
       if (t.kind === "text") chars += t.text.length;
       else if (t.kind === "math") { chars += texToPlain(t.latex).length; if (TALL_TEX.test(t.latex)) tall = true; }
       else if (t.kind === "image") blockH = Math.max(blockH, opts.blockHeight?.(t.id) ?? 480);
+      else if (t.kind === "table") blockH = Math.max(blockH, t.rows.length * (LINE + 1));
+      else if (t.kind === "codeblock") blockH = Math.max(blockH, (t.text.split("\n").length + 1) * LINE * 0.75);
     }
     const indent = f && (f.style === "ul" || f.style === "ol") ? ((f.level ?? 0) + 1) * 1.5 * TEXT_FONT : 0;
     rows = Math.max(rows, Math.ceil((chars * TEXT_FONT * 0.5) / (avail - indent)) || 1);
@@ -318,6 +320,16 @@ export function planToParas(items: readonly PlanItem[], assets: Assets): DxPara[
   for (const it of items) {
     if (it.kind === "line") {
       const f = it.line.format;
+      const tb = it.line.tokens[0];
+      if (tb?.kind === "table") {
+        out.push({ runs: [], table: tb.rows.map((r) => r.map((c) => tokenRuns(c, assets, it.color))) });
+        continue;
+      }
+      // Bloc de code : Consolas sur fond gris, une ligne Word par ligne de code (sauts dans le paragraphe).
+      if (tb?.kind === "codeblock") {
+        out.push({ runs: [{ kind: "text", text: tb.text || " ", code: true }], shade: "F3F4F6" });
+        continue;
+      }
       const p: DxPara = { runs: tokenRuns(it.line.tokens, assets, it.color) };
       if (f?.style === "h1" || f?.style === "h2" || f?.style === "h3") p.heading = Number(f.style[1]) as 1 | 2 | 3;
       else if (f?.style === "ul" || f?.style === "ol") {

@@ -14,7 +14,12 @@
  *   une page (core/links.ts : cible par id de page, chemin lisible en repli),
  *   en debut de ligne (D11) : "# ", "## ", "### " = titres, "- " = puce,
  *   "> " = ligne encadree (conclusion),
- *   "1. " = liste numerotee, deux espaces devant par niveau de liste.
+ *   "1. " = liste numerotee, deux espaces devant par niveau de liste,
+ *   "| a | b |" + "| --- | --- |" + lignes "| … |" = tableau (jeton `table`,
+ *   un "|" du texte d'une case ecrit "\|", une ligne de texte qui commence
+ *   par "|" ecrite "\|"),
+ *   "```lang" … "```" = bloc de code (jeton `codeblock`, texte brut ; une
+ *   ligne de texte "```" est toujours ecrite echappee, jamais lue en bloc).
  * Les caracteres speciaux du texte (\ $ * [ ] `) sont echappes par un
  * antislash, et un debut de ligne qui ressemblerait a un marqueur aussi
  * ("\# ", "\- ", "1\. ") : il reste du texte.
@@ -50,7 +55,19 @@ export type DocToken =
    */
   | { kind: "link"; label: string; href: string; hint?: string }
   | { kind: "br" }
-  | ({ kind: "line" } & LineFormat);
+  | ({ kind: "line" } & LineFormat)
+  /**
+   * Tableau (toujours seul sur sa ligne) : lignes de cases, chaque case =
+   * texte et formules sur une ligne (ni saut, ni photo, ni tableau). Disque :
+   * tableau « pipe » lisible (`| a | b |`, puis `| --- | --- |`).
+   */
+  | { kind: "table"; rows: DocToken[][][] }
+  /**
+   * Bloc de code (toujours seul sur ses lignes), texte brut colore a
+   * l'affichage selon `lang` (core/text/codehl.ts). Disque : ```lang, le
+   * code tel quel, puis ``` (plus de ` si le code contient une telle ligne).
+   */
+  | { kind: "codeblock"; lang: string; text: string };
 
 /** Profondeur maximale d'une liste (Tab). */
 export const MAX_LIST_LEVEL = 4;
@@ -106,9 +123,17 @@ export interface DocLine { format: LineFormat | null; tokens: DocToken[] }
 /** Le texte ligne par ligne (les `br` separent, ils ne figurent pas). */
 export function docLines(tokens: DocToken[]): DocLine[] {
   const lines: DocLine[] = [{ format: null, tokens: [] }];
+  // Juste apres un tableau : ce qui suit (hors saut) commence une ligne.
+  let afterTable = false;
   for (const t of tokens) {
     let cur = lines[lines.length - 1];
-    if (t.kind === "br") { lines.push({ format: null, tokens: [] }); continue; }
+    if (t.kind === "br") { lines.push({ format: null, tokens: [] }); afterTable = false; continue; }
+    const own = t.kind === "table" || t.kind === "codeblock";
+    if (afterTable || own) {
+      if (cur.tokens.length || cur.format) { cur = { format: null, tokens: [] }; lines.push(cur); }
+      afterTable = own;
+      if (own) { cur.tokens.push(t); continue; }
+    }
     if (t.kind === "line") {
       // Mise en forme au milieu d'une ligne : elle commence une ligne.
       if (cur.tokens.length || cur.format) { cur = { format: null, tokens: [] }; lines.push(cur); }
@@ -222,8 +247,13 @@ export function serializeDoc(tokens: DocToken[]): string {
   const lines = docLines(normalizeTokens(tokens));
   const nums = listNumbers(lines.map((l) => l.format));
   return lines.map((line, k) => {
+    const table = line.tokens.find((t) => t.kind === "table" || t.kind === "codeblock");
+    if (table?.kind === "table") return serializeTable(table.rows);
+    if (table?.kind === "codeblock") return serializeCode(table.lang, table.text);
     const body = serializeLine(line.tokens);
     if (line.format) return lineMarker(line.format, nums[k]) + body;
+    // Une ligne de texte qui commence par « | » ne devient jamais un tableau.
+    if (body.startsWith("|")) return `\\${body}`;
     // Texte qui ressemblerait a un marqueur : echappe, il reste du texte.
     const m = matchMarker(body);
     return m ? `${body.slice(0, m.escapeAt)}\\${body.slice(m.escapeAt)}` : body;
@@ -250,7 +280,7 @@ function serializePlain(tokens: DocToken[]): string {
   let out = "";
   for (const t of tokens) {
     if (t.kind === "br") { out += "\n"; continue; }
-    if (t.kind === "line") continue;
+    if (t.kind === "line" || t.kind === "table" || t.kind === "codeblock") continue;
     if (t.kind === "image") { out += `${IMG_OPEN}${t.id})`; continue; }
     if (t.kind === "link") {
       // href deja encode par core/links.ts : ni blanc, ni parenthese, ni guillemet.
@@ -291,6 +321,24 @@ function parseFrom(src: string, lineStart: boolean): DocToken[] {
 
   for (let i = 0; i < src.length; i++) {
     if (i === 0 ? lineStart : src[i - 1] === "\n") {
+      if (src.startsWith("```", i)) {
+        const cb = codeAt(src, i);
+        if (cb) {
+          flush();
+          out.push(cb.token);
+          i = cb.end - 1;
+          continue;
+        }
+      }
+      if (src[i] === "|") {
+        const tb = tableAt(src, i);
+        if (tb) {
+          flush();
+          out.push(tb.token);
+          i = tb.end - 1;
+          continue;
+        }
+      }
       const m = matchMarker(src.slice(i, i + 16));
       if (m) {
         flush();
@@ -421,6 +469,152 @@ function colorGroup(src: string, start: number): { innerEnd: number; end: number
   return null;
 }
 
+/* ---------------- tableaux ---------------- */
+
+/** Ligne de separation sous l'en-tete : « | --- | :---: | ». */
+const TABLE_SEP = /^\|(?:\s*:?-{3,}:?\s*\|)+\s*$/;
+
+/** Tableau vide de `rows` × `cols` cases. */
+export function emptyTable(rows: number, cols: number): Extract<DocToken, { kind: "table" }> {
+  return { kind: "table", rows: Array.from({ length: Math.max(1, rows) }, () => Array.from({ length: Math.max(1, cols) }, () => [])) };
+}
+
+/** Case propre : texte et formules sur une ligne (un saut devient une espace). */
+function normalizeCell(cell: DocToken[]): DocToken[] {
+  const flat = cell.flatMap((t): DocToken[] => {
+    if (t.kind === "br") return [{ kind: "text", text: " " }];
+    if (t.kind === "text") return [{ ...t, text: t.text.replace(/\n/g, " ") }];
+    return t.kind === "math" || t.kind === "link" ? [t] : [];
+  });
+  const out = normalizeTokens(flat);
+  // Blancs du bord : le format pipe les retire a la lecture, on les retire tout de suite.
+  const first = out[0];
+  if (first?.kind === "text") out[0] = { ...first, text: first.text.replace(/^\s+/, "") };
+  const last = out[out.length - 1];
+  if (last?.kind === "text") out[out.length - 1] = { ...last, text: last.text.replace(/\s+$/, "") };
+  return out.filter((t) => t.kind !== "text" || t.text);
+}
+
+/**
+ * Parcourt une ligne ecrite en sautant les caracteres echappes, les
+ * formules $…$ et le code `…` ; `bar(i)` pour chaque « | » nu.
+ */
+function scanBars(s: string, bar: (i: number) => void): void {
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "$" || c === "`") {
+      let k = i + 1;
+      while (k < s.length && s[k] !== c) k += s[k] === "\\" ? 2 : 1;
+      if (k < s.length) i = k;
+      continue;
+    }
+    if (c === "|") bar(i);
+  }
+}
+
+/** Cases d'une ligne « | a | b | » (texte brut de chaque case, blancs retires). */
+function splitRow(line: string): string[] {
+  const bars: number[] = [];
+  scanBars(line, (i) => bars.push(i));
+  if (bars[0] !== 0) return [];
+  const cells: string[] = [];
+  for (let k = 0; k < bars.length; k++) {
+    const end = k + 1 < bars.length ? bars[k + 1] : line.length;
+    const cell = line.slice(bars[k] + 1, end);
+    if (k + 1 === bars.length && !cell.trim()) break;
+    cells.push(cell.trim());
+  }
+  return cells;
+}
+
+/** Tableau pipe qui commence en `start` (debut de ligne), ou null. */
+function tableAt(src: string, start: number): { token: DocToken; end: number } | null {
+  const lineEnd = (from: number) => { const e = src.indexOf("\n", from); return e < 0 ? src.length : e; };
+  const e0 = lineEnd(start);
+  if (e0 >= src.length) return null;
+  const e1 = lineEnd(e0 + 1);
+  const head = splitRow(src.slice(start, e0));
+  const sep = src.slice(e0 + 1, e1);
+  if (!head.length || !TABLE_SEP.test(sep) || splitRow(sep).length !== head.length) return null;
+  const rows = [head];
+  let end = e1;
+  while (end < src.length && src[end + 1] === "|") {
+    const e = lineEnd(end + 1);
+    const cells = splitRow(src.slice(end + 1, e));
+    if (!cells.length) break;
+    rows.push(cells);
+    end = e;
+  }
+  const token: DocToken = { kind: "table", rows: rows.map((r) => r.map((c) => normalizeCell(parseFrom(c, false)))) };
+  return { token: normalizeTokens([token])[0] ?? token, end };
+}
+
+/** Une case ecrite : comme une ligne, avec ses « | » de texte echappes. */
+function serializeCell(cell: DocToken[]): string {
+  const s = serializeLine(normalizeCell(cell));
+  const bars: number[] = [];
+  scanBars(s, (i) => bars.push(i));
+  let out = s;
+  for (const i of bars.reverse()) out = `${out.slice(0, i)}\\${out.slice(i)}`;
+  return out;
+}
+
+/** Tableau ecrit : en-tete (1re ligne), separation, puis les autres lignes. */
+function serializeTable(rows: DocToken[][][]): string {
+  const cols = Math.max(1, ...rows.map((r) => r.length));
+  const line = (r: DocToken[][]) => `| ${Array.from({ length: cols }, (_, k) => serializeCell(r[k] ?? [])).join(" | ")} |`;
+  return [line(rows[0] ?? []), `|${" --- |".repeat(cols)}`, ...rows.slice(1).map(line)].join("\n");
+}
+
+/* ---------------- blocs de code ---------------- */
+
+/** Bloc ```lang … ``` ouvert en `start` (debut de ligne), ou null (pas de fin : du texte). */
+function codeAt(src: string, start: number): { token: DocToken; end: number } | null {
+  const m = /^(`{3,})([\w+#.-]*)[ \t]*\n/.exec(src.slice(start, start + 80));
+  if (!m) return null;
+  const fence = m[1];
+  const bodyStart = start + m[0].length;
+  // Fin : une ligne faite d'autant de ` (ou plus), seule. Code vide : la ligne juste apres.
+  for (let at = bodyStart; at <= src.length;) {
+    const e = src.indexOf("\n", at);
+    const lineEnd = e < 0 ? src.length : e;
+    const line = src.slice(at, lineEnd);
+    if (line.startsWith(fence) && /^`+[ \t]*$/.test(line)) {
+      const text = at > bodyStart ? src.slice(bodyStart, at - 1) : "";
+      return { token: { kind: "codeblock", lang: m[2], text }, end: lineEnd };
+    }
+    if (e < 0) break;
+    at = e + 1;
+  }
+  return null;
+}
+
+/** Bloc de code ecrit : ``` assez longs pour ne jamais etre pris dans le code. */
+function serializeCode(lang: string, text: string): string {
+  let fence = "```";
+  while (text.split("\n").some((l) => l.startsWith(fence))) fence += "`";
+  return `${fence}${lang}\n${text}\n${fence}`;
+}
+
+/**
+ * Tableaux mis a plat : chaque ligne du tableau devient une ligne de texte,
+ * cases separees par « | » (revision, suggestions : ce qui est ecrit dans
+ * un tableau compte comme le reste).
+ */
+export function flattenTables(tokens: DocToken[]): DocToken[] {
+  return tokens.flatMap((t): DocToken[] => t.kind === "codeblock" ? [{ kind: "br" }] : t.kind !== "table" ? [t]
+    : t.rows.flatMap((r): DocToken[] => [
+      ...r.flatMap((c, i): DocToken[] => (i ? [{ kind: "text", text: " | " }, ...c] : c)),
+      { kind: "br" },
+    ]));
+}
+
+/** Texte d'une case : formules relues par `math`, liens par leur libelle. */
+export function cellText(cell: DocToken[], math: (latex: string) => string = texToPlain): string {
+  return cell.map((t) => (t.kind === "math" ? math(t.latex) : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "")).join("");
+}
+
 /** Fusionne les textes voisins de meme style, retire les textes et formules vides. */
 export function normalizeTokens(tokens: DocToken[]): DocToken[] {
   const out: DocToken[] = [];
@@ -447,6 +641,17 @@ export function normalizeTokens(tokens: DocToken[]): DocToken[] {
       continue;
     }
     if (t.kind === "line") { out.push({ kind: "line", ...lineFormatOf(t) }); continue; }
+    if (t.kind === "table") {
+      const rows = t.rows.filter((r) => r.length).map((r) => r.map(normalizeCell));
+      if (!rows.length) continue;
+      const cols = Math.max(...rows.map((r) => r.length));
+      out.push({ kind: "table", rows: rows.map((r) => [...r, ...Array.from({ length: cols - r.length }, () => [])]) });
+      continue;
+    }
+    if (t.kind === "codeblock") {
+      out.push({ kind: "codeblock", lang: t.lang.trim(), text: t.text.replace(/\r\n?/g, "\n") });
+      continue;
+    }
     if (t.kind === "link") {
       if (!t.href) continue;
       out.push({ kind: "link", label: t.label, href: t.href, ...(t.hint ? { hint: t.hint } : {}) });
@@ -478,7 +683,9 @@ export function docImageIds(src: string): string[] {
 export function docPlainText(src: string): string {
   return parseDoc(src).map((t) =>
     t.kind === "br" ? "\n" : t.kind === "math" ? t.latex : t.kind === "text" ? t.text
-      : t.kind === "link" ? t.label : "").join("");
+      : t.kind === "link" ? t.label
+      : t.kind === "table" ? t.rows.map((r) => r.map((c) => cellText(c, (l) => l)).join(" | ")).join("\n")
+      : t.kind === "codeblock" ? t.text : "").join("");
 }
 
 /**
@@ -587,21 +794,28 @@ export function pastedMath(src: string): DocToken[] | null {
 export function docClipboardText(tokens: DocToken[], math: (latex: string) => string = (l) => `$${l}$`): string {
   const lines = docLines(tokens);
   const nums = listNumbers(lines.map((l) => l.format));
+  // Tableau : une ligne par rangee, cases separees par des tabulations (Excel, Word).
   return lines.map((line, k) => (line.format ? lineMarker(line.format, nums[k]) : "") + line.tokens.map((t) =>
-    t.kind === "math" ? math(t.latex) : t.kind === "text" ? t.text : t.kind === "link" ? t.label : "").join("")).join("\n");
+    t.kind === "math" ? math(t.latex) : t.kind === "text" ? t.text : t.kind === "link" ? t.label
+      : t.kind === "table" ? t.rows.map((r) => r.map((c) => cellText(c, math)).join("\t")).join("\n")
+      : t.kind === "codeblock" ? t.text : "").join("")).join("\n");
 }
 
 /**
  * Lignes d'un morceau copie, pour le HTML du presse-papiers : texte et
  * formules a part, marqueur de titre ou de puce compris.
  */
-export function docClipboardLines(tokens: DocToken[]): { marker: string; parts: ({ text: string } | { latex: string })[] }[] {
+export type ClipPart = { text: string } | { latex: string };
+export function docClipboardLines(tokens: DocToken[]): { marker: string; parts: ClipPart[]; table?: ClipPart[][][]; code?: string }[] {
   const lines = docLines(tokens);
   const nums = listNumbers(lines.map((l) => l.format));
+  const partsOf = (list: DocToken[]): ClipPart[] => list.flatMap((t): ClipPart[] =>
+    t.kind === "math" ? [{ latex: t.latex }] : t.kind === "text" ? [{ text: t.text }] : t.kind === "link" ? [{ text: t.label }] : []);
   return lines.map((line, k) => ({
+    ...(line.tokens[0]?.kind === "table" ? { table: line.tokens[0].rows.map((r) => r.map(partsOf)) } : {}),
+    ...(line.tokens[0]?.kind === "codeblock" ? { code: line.tokens[0].text } : {}),
     marker: line.format ? lineMarker(line.format, nums[k]) : "",
-    parts: line.tokens.flatMap((t): ({ text: string } | { latex: string })[] =>
-      t.kind === "math" ? [{ latex: t.latex }] : t.kind === "text" ? [{ text: t.text }] : t.kind === "link" ? [{ text: t.label }] : []),
+    parts: partsOf(line.tokens),
   }));
 }
 

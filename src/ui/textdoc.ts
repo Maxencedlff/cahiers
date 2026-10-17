@@ -5,7 +5,7 @@ import { askText, el, toast } from "./dom";
 import { inkCssColor } from "../core/theme";
 import type { ColorKey } from "../core/types";
 import {
-  docClipboardLines, docClipboardText, frenchSpaceAtEnd, pastedMath, docLines, listNumbers, markerStyle, FONT_SIZES, MAX_LIST_LEVEL, NORMAL_SIZE, normalizeTokens, parseDoc, serializeDoc,
+  docClipboardLines, docClipboardText, emptyTable, frenchSpaceAtEnd, pastedMath, docLines, listNumbers, markerStyle, FONT_SIZES, MAX_LIST_LEVEL, NORMAL_SIZE, normalizeTokens, parseDoc, serializeDoc,
   texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
@@ -21,6 +21,9 @@ import { PAGE_W } from "../core/ink/sheet";
 import { BLOCK_MAX_H } from "../core/paginate";
 import { cleanHint, linkUrl, parseLinkMarkdown, pagePathOf, type LinkCandidate } from "../core/links";
 import { pickLink } from "./linkpicker";
+import { buildTable, disposeCells, edgeCell, focusCell, readTable, tableKey, type TableHost } from "./doctable";
+import { buildCode, focusCode, type CodeHost } from "./doccode";
+import { HINT_PAUSE_MS, matrixShortcut, shortcutHint, type ShortcutHint } from "../core/text/hint";
 
 // Polices chargees par fonts.css (embarquees par Vite), aucun son : l'app
 // fonctionne hors ligne et en amphi.
@@ -246,6 +249,9 @@ export function setAutoMath(on: boolean): void { autoMath = on; }
  * en rouge Vz, Vbe, malloc... et la page n'a plus l'air d'un document propre.
  */
 let spellcheckOn = false;
+/** Bulle d'aide aux raccourcis (« ome » → ω, core/text/hint.ts) ; Reglages « Aide aux raccourcis ». */
+let hintsOn = true;
+export function setShortcutHints(on: boolean): void { hintsOn = on; }
 export function setSpellcheck(on: boolean): void {
   spellcheckOn = on;
   document.querySelectorAll<HTMLElement>(".text-doc").forEach((d) => { d.spellcheck = on; });
@@ -371,12 +377,24 @@ export class TextDoc {
   /** Taille choisie sans selection, a cet endroit : la frappe suivante la garde. */
   keepSize: { node: Node; offset: number } | null = null;
 
+  /**
+   * Noeud de CE texte : dans `root`, mais pas dans un tableau ni un bloc de
+   * code pose dedans (`.doc-island` : chaque case est un texte a elle,
+   * src/ui/doctable.ts ; le code a sa zone de texte, src/ui/doccode.ts).
+   */
+  owns(n: Node | null | undefined): boolean {
+    if (!n || !this.root.contains(n)) return false;
+    const e = n instanceof Element ? n : n.parentElement;
+    const t = e?.closest(".doc-island");
+    return !t || !this.root.contains(t);
+  }
+
   /** Ecouteur pose sur `document` : retire par dispose(), sinon chaque page vue reste en memoire. */
   private onSelectionChange = (): void => {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return;
     const r = sel.getRangeAt(0);
-    if (this.root.contains(r.startContainer)) {
+    if (this.owns(r.startContainer)) {
       this.savedRange = r.cloneRange();
       lastDoc = this;
       // Taille de frappe = celle de l'endroit ou l'on se place (comme Word) ;
@@ -390,7 +408,7 @@ export class TextDoc {
     this.paintColorTag();
     this.markSelectedEqs(sel.isCollapsed ? null : r);
     // Curseur deplace : la suggestion grisee ne vaut plus.
-    const g = this.ghostAt;
+    const g = this.ghostAt ?? this.hintAt;
     if (g && !(sel.isCollapsed && r.startContainer === g.node && r.startOffset === g.offset)) this.hideGhost();
   };
 
@@ -406,6 +424,14 @@ export class TextDoc {
   /** Curseur et suggestion montres. */
   private ghostAt: { node: Text; offset: number; insert: string; replace: number } | null = null;
   private ghostRaf = 0;
+  /**
+   * Bulle d'aide aux raccourcis (core/text/hint.ts) : une seule bulle a la
+   * fois avec la suggestion grisee, qui passe avant. Tab ou → l'accepte.
+   */
+  private hintAt: { node: Text; offset: number; hint: ShortcutHint } | null = null;
+  private hintTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Derniere touche pressee (performance.now()) : la pause de frappe qui permet une bulle sur « lim ». */
+  private typedAt = 0;
 
   /** Suggestion recalculee a la prochaine image (apres la frappe et ses remplacements). */
   private scheduleGhost(): void {
@@ -414,25 +440,25 @@ export class TextDoc {
     this.ghostRaf = requestAnimationFrame(() => this.updateGhost());
   }
 
-  private updateGhost(): void {
+  private updateGhost(paused = false): void {
     this.hideGhost();
     if (!this.suggester || this.field || this.root.contentEditable === "false") return;
     const sel = document.getSelection();
     if (!sel?.rangeCount || !sel.isCollapsed) return;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return;
+    if (node.nodeType !== Node.TEXT_NODE || !this.owns(node)) return;
     // Seulement en fin de ligne : rien d'autre que du blanc apres le curseur.
     const after = document.createRange();
     after.setStart(node, r.startOffset);
     after.setEnd(this.root, this.root.childNodes.length);
     const rest = after.toString();
     const eol = rest.indexOf("\n");
-    if ((eol < 0 ? rest : rest.slice(0, eol)).replace(/[\s\u200b]/g, "")) return;
-    if (eol < 0 && after.cloneContents().querySelector(".eq, .doc-img")) return;
+    const atEnd = !(eol < 0 ? rest : rest.slice(0, eol)).replace(/[\s\u200b]/g, "")
+      && !(eol < 0 && after.cloneContents().querySelector(".eq, .doc-img"));
     const line = this.lineAt(node as Text, r.startOffset);
-    const s = this.suggester(line.full, line.full.includes("=") ? this.prevLinePlain(r) : "");
-    if (!s) return;
+    const s = atEnd ? this.suggester(line.full, line.full.includes("=") ? this.prevLinePlain(r) : "") : null;
+    if (!s) { this.showHint(node as Text, r, rest, paused); return; }
     const rect = caretRect(r, this.root);
     const host = this.root.parentElement;
     if (!rect || !host) return;
@@ -484,8 +510,8 @@ export class TextDoc {
   calcSource(): string | null {
     if (this.field) return texToPlain(this.field.getValue("latex")) || null;
     const sel = document.getSelection();
-    const r = sel?.rangeCount && this.root.contains(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0) : this.savedRange;
-    if (!r || !this.root.contains(r.startContainer)) return null;
+    const r = sel?.rangeCount && this.owns(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0) : this.savedRange;
+    if (!r || !this.owns(r.startContainer)) return null;
     const before = document.createRange();
     before.setStart(this.root, 0);
     before.setEnd(r.startContainer, r.startOffset);
@@ -504,6 +530,97 @@ export class TextDoc {
     cancelAnimationFrame(this.ghostRaf);
     this.ghostAt = null;
     this.ghost?.remove();
+    this.hintAt = null;
+    if (this.hintTimer) { clearTimeout(this.hintTimer); this.hintTimer = null; }
+    this.ghost?.classList.remove("text-hint");
+  }
+
+  /**
+   * Bulle d'aide aux raccourcis : debut d'un mot-raccourci juste avant le
+   * curseur (« ome » → ω). Debut d'un mot francais courant (« lim » de
+   * limite) : seulement apres une pause de frappe (`paused`).
+   */
+  private showHint(node: Text, r: Range, rest: string, paused: boolean): void {
+    if (!hintsOn || node.parentElement?.closest(".eq, .raw, code, a")) return;
+    const before = (node.data ?? "").slice(0, r.startOffset).replace(/\u200b/g, "");
+    const h = shortcutHint(before.slice(before.lastIndexOf("\n") + 1), rest.replace(/^\u200b+/, ""));
+    if (!h) return;
+    const idle = performance.now() - this.typedAt;
+    if (h.delay && !paused && idle < HINT_PAUSE_MS) {
+      this.hintTimer = setTimeout(() => { this.hintTimer = null; this.updateGhost(true); }, HINT_PAUSE_MS - idle);
+      return;
+    }
+    const rect = caretRect(r, this.root);
+    const host = this.root.parentElement;
+    if (!rect || !host) return;
+    const g = this.ghost ?? el("div", { class: "text-ghost", "aria-hidden": "true" });
+    this.ghost = g;
+    g.classList.add("text-hint");
+    g.classList.remove("below");
+    const eq = el("span", { class: "text-ghost-eq" });
+    const html = katexHtml(h.show);
+    if (html) eq.innerHTML = html; else eq.textContent = h.show;
+    g.replaceChildren(eq, el("span", { class: "text-ghost-key" }, "Tab"));
+    const cs = getComputedStyle(this.root);
+    g.style.font = "";
+    g.style.fontFamily = cs.fontFamily;
+    g.style.fontSize = `calc(${cs.fontSize} * .9)`;
+    g.style.lineHeight = "";
+    g.style.minHeight = "";
+    if (!g.isConnected) host.append(g);
+    const hr = host.getBoundingClientRect();
+    // Au-dessus du mot, sans cacher la ligne qu'on tape.
+    const left = Math.min(rect.right - hr.left + 2, host.clientWidth - g.offsetWidth - 4);
+    g.style.left = `${Math.round(Math.max(0, left))}px`;
+    // Au-dessus de la feuille : sous la ligne.
+    const above = rect.top - hr.top - g.offsetHeight - 2;
+    g.style.top = `${Math.round(above >= 0 ? above : rect.bottom - hr.top + 2)}px`;
+    this.hintAt = { node, offset: r.startOffset, hint: h };
+  }
+
+  /** « mat2x2 », « mat3x3 », « mat2x3 » juste avant le curseur : la matrice vide, ouverte a la premiere case. */
+  private matrixAtCaret(): boolean {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed || this.field) return false;
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (!(node instanceof Text) || !this.owns(node) || node.parentElement?.closest(".eq, .raw, code, a")) return false;
+    const h = shortcutHint(node.data.slice(0, r.startOffset).replace(/\u200b/g, ""), node.data.slice(r.startOffset).replace(/^\u200b+/, ""));
+    const m = h?.math ? matrixShortcut(h.typed) : null;
+    if (!h || !m?.complete) return false;
+    this.hintAt = { node, offset: r.startOffset, hint: h };
+    return this.acceptHint();
+  }
+
+  /**
+   * Tab ou → sur la bulle : les lettres tapees remplacees par le resultat,
+   * comme une frappe (Ctrl+Z rend les lettres) ; une matrice ouvre sa
+   * formule, case a case.
+   */
+  private acceptHint(): boolean {
+    const at = this.hintAt;
+    this.hideGhost();
+    if (!at || !at.node.isConnected) return false;
+    const { node, offset, hint } = at;
+    const text = node.data.slice(0, offset);
+    // Lettres tapees, \u200b invisibles compris.
+    let i = offset, n = 0;
+    while (i > 0 && n < hint.typed.length) { i--; if (text[i] !== "\u200b") n++; }
+    if (text.slice(i, offset).replace(/\u200b/g, "") !== hint.typed) return false;
+    const r = document.createRange();
+    r.setStart(node, i);
+    r.setEnd(node, offset);
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(r);
+    if (hint.math) {
+      if (!document.execCommand("delete")) r.deleteContents();
+      this.insertMath(hint.math);
+    } else {
+      document.execCommand("insertText", false, hint.insert);
+    }
+    this.emit();
+    return true;
   }
 
   /**
@@ -557,7 +674,7 @@ export class TextDoc {
    * partaient avec le copier.
    */
   private markSelectedEqs(r: Range | null): void {
-    const inside = r && this.root.contains(r.commonAncestorContainer) ? r : null;
+    const inside = r && this.owns(r.commonAncestorContainer) ? r : null;
     if (!inside && !this.hasSelEq) return;
     let any = false;
     for (const eq of this.root.querySelectorAll<HTMLElement>(".eq")) {
@@ -575,6 +692,7 @@ export class TextDoc {
    * changement de page laissait en memoire la page, son canvas et ses traits.
    */
   dispose(): void {
+    disposeCells(this.root);
     this.hideGhost();
     this.colorTag?.remove();
     document.removeEventListener("selectionchange", this.onSelectionChange);
@@ -588,20 +706,27 @@ export class TextDoc {
     if (editingDoc === this) editingDoc = null;
   }
 
+  /** Ecouteur du texte : ce qui arrive dans une case d'un tableau pose dedans ne le concerne pas. */
+  private listen<K extends keyof HTMLElementEventMap>(type: K, fn: (e: HTMLElementEventMap[K]) => void): void {
+    this.root.addEventListener(type, (e) => { if (this.owns(e.target as Node)) fn(e); });
+  }
+
   constructor(
     content: string,
     private onChange: (content: string) => void,
     private images?: DocImages,
     private links?: DocLinks,
+    /** `cell` : case d'un tableau (une seule ligne, ni titre ni liste, Tab/Entree au tableau). */
+    private readonly opts: { cell?: boolean } = {},
   ) {
     this.root = el("div", {
-      class: "text-doc",
+      class: opts.cell ? "text-doc cell-doc" : "text-doc",
       contenteditable: "true",
       spellcheck: spellcheckOn ? "true" : "false",
       lang: "fr",
     });
     this.setContent(content);
-    this.root.addEventListener("input", (e) => {
+    this.listen("input", (e) => {
       if (this.quiet) return;
       const ie = e as InputEvent;
       // Fraction en cours de frappe : ce qui vient d'etre tape la prolonge.
@@ -614,7 +739,7 @@ export class TextDoc {
       // reselectionne "->", la frappe suivante l'effacerait. Curseur apres.
       if (ie.inputType === "historyUndo") {
         const sel = document.getSelection();
-        if (sel?.rangeCount && !sel.isCollapsed && this.root.contains(sel.anchorNode)) sel.collapseToEnd();
+        if (sel?.rangeCount && !sel.isCollapsed && this.owns(sel.anchorNode)) sel.collapseToEnd();
       }
       // Seule l'espace qui a declenche la mise en forme la laisse annulable.
       if (this.lastAuto) {
@@ -629,7 +754,7 @@ export class TextDoc {
       else if (!ie.isComposing) this.hideGhost();
       this.emit();
     });
-    this.root.addEventListener("compositionend", (e) => {
+    this.listen("compositionend", (e) => {
       if (this.quiet || this.field) return;
       const data = e.data ?? "";
       if (this.live) { this.absorbLive(); this.emit(); return; }
@@ -639,53 +764,53 @@ export class TextDoc {
       this.emit();
     });
     // "[[" : selecteur de lien (core/links.ts), avant la frappe en couleur.
-    this.root.addEventListener("beforeinput", (e) => {
+    this.listen("beforeinput", (e) => {
       if (this.field || this.live || e.inputType !== "insertText" || e.data !== "[" || !this.links) return;
       if (this.openPicker()) { e.preventDefault(); e.stopImmediatePropagation(); }
     });
     // Frappe dans la couleur choisie : si le curseur n'est pas deja dans un
     // texte de cette couleur, le caractere part dans un nouveau segment.
-    this.root.addEventListener("beforeinput", (e) => {
+    this.listen("beforeinput", (e) => {
       if (this.field || e.inputType !== "insertText" || !e.data) return;
       const sel = document.getSelection();
       if (!sel?.rangeCount) return;
       const range = sel.getRangeAt(0);
-      if (!this.root.contains(range.startContainer)) return;
+      if (!this.owns(range.startContainer)) return;
       if (colorAt(range.startContainer, this.root) === typingColor && sizeAt(range.startContainer, this.root) === typingSize) return;
       e.preventDefault();
       insertColored(range, e.data);
       this.emit();
     });
-    this.root.addEventListener("keydown", (e) => this.onKey(e));
+    this.listen("keydown", (e) => this.onKey(e));
     // Un clic ailleurs : la derniere mise en forme n'est plus annulable.
-    this.root.addEventListener("pointerdown", () => {
+    this.listen("pointerdown", () => {
       if (this.live) this.endLive("pause");
       this.lastAuto = null; this.lastLine = null; this.hideGhost();
     });
-    this.root.addEventListener("focusout", () => {
+    this.listen("focusout", () => {
       this.hideGhost();
       this.colorTag?.remove();
       if (this.live) this.endLive("pause");
     });
-    this.root.addEventListener("compositionstart", () => this.hideGhost());
-    this.root.addEventListener("focusin", () => { lastDoc = this; });
-    this.root.addEventListener("click", (e) => {
+    this.listen("compositionstart", () => this.hideGhost());
+    this.listen("focusin", () => { lastDoc = this; });
+    this.listen("click", (e) => {
       const link = (e.target as HTMLElement).closest?.(".doc-link");
-      if (link instanceof HTMLElement && this.root.contains(link)) {
+      if (link instanceof HTMLElement && this.owns(link)) {
         e.preventDefault();
         this.followLink(link);
         return;
       }
       const eq = (e.target as HTMLElement).closest?.(".eq");
-      if (eq instanceof HTMLElement && this.root.contains(eq)) this.editEq(eq, { x: e.clientX, y: e.clientY });
+      if (eq instanceof HTMLElement && this.owns(eq)) this.editEq(eq, { x: e.clientX, y: e.clientY });
     });
     // Lien au stylet ou au doigt : un appui le suit, sans laisser d'encre
     // (le stylet ne part pas a la page). Le doigt qui glisse fait defiler.
-    this.root.addEventListener("pointerdown", (e) => this.onLinkDown(e));
+    this.listen("pointerdown", (e) => this.onLinkDown(e));
     // Clic droit (ou appui long) sur un lien : renommer son libelle.
-    this.root.addEventListener("contextmenu", (e) => {
+    this.listen("contextmenu", (e) => {
       const link = (e.target as HTMLElement).closest?.(".doc-link");
-      if (!(link instanceof HTMLElement) || !this.root.contains(link)) return;
+      if (!(link instanceof HTMLElement) || !this.owns(link)) return;
       e.preventDefault();
       void this.renameLink(link);
     });
@@ -694,31 +819,31 @@ export class TextDoc {
     // dans tauri.conf.json, sinon Tauri garde le depot pour lui) : pose la
     // ou on le lache. Les photos deja dans le texte se deplacent par
     // pointer events (voir makeImage), plus par glisser-deposer HTML5.
-    this.root.addEventListener("dragover", (e) => {
+    this.listen("dragover", (e) => {
       if (!e.dataTransfer?.types.includes("Files") || !this.images?.addFile) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
     });
-    this.root.addEventListener("drop", (e) => {
+    this.listen("drop", (e) => {
       if (!e.dataTransfer?.types.includes("Files") || !this.images?.addFile) return;
       e.preventDefault();
       e.stopPropagation();
       const files = imageFiles(e.dataTransfer);
       if (!files.length) { toast("Seules les images se déposent dans la page (PNG, JPEG, WebP).", "warn"); return; }
       const range = document.caretRangeFromPoint(e.clientX, e.clientY);
-      void this.addFiles(files, range && this.root.contains(range.startContainer) ? range : null);
+      void this.addFiles(files, range && this.owns(range.startContainer) ? range : null);
     });
     // Photo selectionnee : un appui ailleurs la deselectionne.
     document.addEventListener("pointerdown", this.onOutsideDown, { capture: true });
     // Copier, couper : le morceau part avec ses formules (qui ne sont pas
     // du texte selectionnable) dans un format interne, et en $LaTeX$ pour
     // les autres logiciels. Sans cela un Ctrl+X, Ctrl+V les perdait.
-    this.root.addEventListener("copy", (e) => this.onCopy(e, false));
-    this.root.addEventListener("cut", (e) => this.onCopy(e, true));
+    this.listen("copy", (e) => this.onCopy(e, false));
+    this.listen("cut", (e) => this.onCopy(e, true));
     // Coller : un morceau copie ici revient tel quel ; d'ailleurs, du texte
     // brut, pour qu'un copier-coller depuis le web n'amene pas ses polices et
     // ses couleurs dans le cahier.
-    this.root.addEventListener("paste", (e) => {
+    this.listen("paste", (e) => {
       if (this.field) return;
       e.preventDefault();
       if (this.live) this.endLive("pause");
@@ -727,11 +852,11 @@ export class TextDoc {
       const clipText = (dt?.getData("text/plain") ?? "").trim();
       if (PHOTO_CLIP.test(clipText) && this.images?.pasteClip) {
         const sel = document.getSelection();
-        const r = sel?.rangeCount && this.root.contains(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0).cloneRange() : null;
+        const r = sel?.rangeCount && this.owns(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0).cloneRange() : null;
         if (r) liftToRoot(r, this.root, 1);
         void this.images.pasteClip(clipText).then((id) => {
           if (!id || !this.root.isConnected) return;
-          const fig = this.insertImage(id, r && this.root.contains(r.startContainer) ? r : null);
+          const fig = this.insertImage(id, r && this.owns(r.startContainer) ? r : null);
           this.caretAfter(fig);
           fig.scrollIntoView({ block: "nearest" });
         });
@@ -744,8 +869,8 @@ export class TextDoc {
       if (files.length && this.images?.addFile && !dt?.getData(CLIP_TYPE) && !dt?.getData("text/plain").trim()) {
         const sel = document.getSelection();
         const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
-        if (r && this.root.contains(r.startContainer)) r.deleteContents();
-        void this.addFiles(files, r && this.root.contains(r.startContainer) ? r.cloneRange() : null);
+        if (r && this.owns(r.startContainer)) r.deleteContents();
+        void this.addFiles(files, r && this.owns(r.startContainer) ? r.cloneRange() : null);
         return;
       }
       const internal = dt?.getData(CLIP_TYPE) || docFromHtml(dt?.getData("text/html") ?? "");
@@ -780,7 +905,7 @@ export class TextDoc {
       this.idleTimer = setTimeout(() => {
         this.idleTimer = null;
         const sel = document.getSelection();
-        if (this.field || this.live || !sel?.rangeCount || !this.root.contains(sel.getRangeAt(0).startContainer)) return;
+        if (this.field || this.live || !sel?.rangeCount || !this.owns(sel.getRangeAt(0).startContainer)) return;
         const made = this.convertLine("pause");
         if (made.length) this.lastAuto = { eqs: made, expectSpace: false, atCaret: this.madeAtCaret, pause: true };
         this.scheduleGhost();
@@ -799,7 +924,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (!(node instanceof Text) || !this.root.contains(node) || (colorAt(node, this.root) === typingColor && sizeAt(node, this.root) === typingSize)) return;
+    if (!(node instanceof Text) || !this.owns(node) || (colorAt(node, this.root) === typingColor && sizeAt(node, this.root) === typingSize)) return;
     if (node.parentElement?.closest("code, .eq")) return;
     const off = r.startOffset;
     if (off < data.length || node.data.slice(off - data.length, off) !== data) return;
@@ -818,7 +943,7 @@ export class TextDoc {
     const sel = document.getSelection();
     const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
     const entry = typingColor ? PALETTE.find((p) => p.key === typingColor) : undefined;
-    const show = !!entry && !!host && !!r && sel!.isCollapsed && this.root.contains(r.startContainer)
+    const show = !!entry && !!host && !!r && sel!.isCollapsed && this.owns(r.startContainer)
       && this.root.contentEditable !== "false" && document.activeElement === this.root;
     let rect = show ? caretRect(r!, this.root) : null;
     // Page vide : la premiere ligne.
@@ -1016,6 +1141,7 @@ export class TextDoc {
     this.live = null;
     this.lastAuto = null;
     this.lastLine = null;
+    disposeCells(this.root);
     this.root.replaceChildren();
     const tokens = parseDoc(content);
     this.root.append(this.buildNodes(tokens));
@@ -1033,7 +1159,19 @@ export class TextDoc {
     // termine lui-meme ; le saut qui la finit n'est pas ecrit.
     let block: HTMLElement | null = null;
     let lastOut: Node | null = null;
+    // Saut qui finit la ligne d'un tableau : le tableau (un bloc) la finit deja.
+    let skipBr = false;
     tokens.forEach((t, k) => {
+      if (skipBr) { skipBr = false; if (t.kind === "br") return; }
+      if (t.kind === "table" || t.kind === "codeblock") {
+        if (block) { ensurePlaceholder(block); block = null; }
+        // Puis l'ancre : la ligne qui suit le tableau (le curseur s'y pose).
+        const table = t.kind === "table" ? this.makeTable(t.rows) : buildCode(t.lang, t.text, this.codeHost());
+        frag.append(table, anchor());
+        lastOut = table;
+        skipBr = tokens[k + 1]?.kind === "br";
+        return;
+      }
       const into: Node = block ?? frag;
       if (t.kind === "line") {
         block = makeLine(t);
@@ -1045,7 +1183,7 @@ export class TextDoc {
         if (block) { ensurePlaceholder(block); block = null; return; }
         // Saut invisible juste avant un bloc (fin d'une ligne de texte) :
         // inutile, et Suppr en fin de ligne n'aurait rien fait a l'ecran.
-        if (tokens[k + 1]?.kind === "line" && lastOut && lastOut.nodeName !== "BR" && !isLine(lastOut)) return;
+        if ((tokens[k + 1]?.kind === "line" || tokens[k + 1]?.kind === "table" || tokens[k + 1]?.kind === "codeblock") && lastOut && lastOut.nodeName !== "BR" && !isLine(lastOut)) return;
         lastOut = el("br");
         frag.append(lastOut);
         return;
@@ -1101,6 +1239,19 @@ export class TextDoc {
           continue;
         }
         if (!(child instanceof HTMLElement)) continue;
+        if (child.classList.contains("doc-table")) {
+          // Tableau : seul sur sa ligne, relu case par case (chaque case est un texte a elle).
+          if (!endsLine(out)) out.push({ kind: "br" });
+          out.push({ kind: "table", rows: readTable(child, (cell) => normalizeTokens(this.readNodes(cell))) });
+          out.push({ kind: "br" });
+          continue;
+        }
+        if (child.classList.contains("doc-code")) {
+          if (!endsLine(out)) out.push({ kind: "br" });
+          out.push({ kind: "codeblock", lang: child.dataset.lang ?? "", text: child.dataset.code ?? "" });
+          out.push({ kind: "br" });
+          continue;
+        }
         if (child.classList.contains("doc-img")) {
           out.push({ kind: "image", id: child.dataset.id ?? "" });
           continue;
@@ -1153,7 +1304,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || sel.isCollapsed) return;
     const range = sel.getRangeAt(0);
-    if (!this.root.contains(range.commonAncestorContainer)) return;
+    if (!this.owns(range.commonAncestorContainer)) return;
     // Selection dans un gras ou une couleur : le morceau les garde.
     const tokens = normalizeTokens(this.readNodes(range.cloneContents(), styleAt(range.commonAncestorContainer, this.root)));
     if (!tokens.length) return;
@@ -1179,10 +1330,15 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return;
     const range = sel.getRangeAt(0);
-    if (!this.root.contains(range.startContainer)) return;
+    if (!this.owns(range.startContainer)) return;
     // Une photo d'une autre page n'existe pas ici : on ne colle pas un trou.
     // Dans un titre ou une puce, les lignes collees restent du texte.
     const inLine = !!closestLine(range.startContainer, this.root);
+    // Dans une case de tableau : une seule ligne, sans photo ni tableau.
+    if (this.opts.cell) {
+      tokens = tokens.flatMap((t): DocToken[] => (t.kind === "br" ? [{ kind: "text", text: " " }]
+        : t.kind === "line" || t.kind === "table" || t.kind === "codeblock" || t.kind === "image" ? [] : [t]));
+    }
     const usable = tokens.filter((t) => (t.kind !== "image" || this.canPlace(t.id)) && !(inLine && t.kind === "line"));
     if (!usable.length) return;
     this.lastAuto = null;
@@ -1209,6 +1365,7 @@ export class TextDoc {
 
   /** Colle du texte brut, une ligne apres l'autre (jamais de <div>). */
   private insertPlain(text: string): void {
+    if (this.opts.cell) text = text.replace(/\s*\n\s*/g, " ");
     this.quiet = true;
     try {
       text.split("\n").forEach((line, i) => {
@@ -1228,7 +1385,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return;
     const range = sel.getRangeAt(0);
-    if (!this.root.contains(range.startContainer)) return;
+    if (!this.owns(range.startContainer)) return;
     if (colorAt(range.startContainer, this.root) === typingColor && sizeAt(range.startContainer, this.root) === typingSize
       && document.execCommand("insertText", false, text)) return;
     insertColored(range, text);
@@ -1291,7 +1448,7 @@ export class TextDoc {
     this.root.focus({ preventScroll: true });
     const sel = document.getSelection();
     if (!sel) return;
-    if (this.savedRange && this.root.contains(this.savedRange.startContainer)) {
+    if (this.savedRange && this.owns(this.savedRange.startContainer)) {
       sel.removeAllRanges();
       sel.addRange(this.savedRange);
       return;
@@ -1330,7 +1487,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || sel.isCollapsed) return;
     const range = sel.getRangeAt(0);
-    if (!this.root.contains(range.commonAncestorContainer)) return;
+    if (!this.owns(range.commonAncestorContainer)) return;
     const frag = range.extractContents();
     // Les anciennes couleurs de la selection s'effacent devant la nouvelle.
     frag.querySelectorAll(".tc").forEach((c) => c.replaceWith(...Array.from(c.childNodes)));
@@ -1349,7 +1506,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || sel.isCollapsed) return;
     const range = sel.getRangeAt(0);
-    if (!this.root.contains(range.commonAncestorContainer)) return;
+    if (!this.owns(range.commonAncestorContainer)) return;
     const frag = range.extractContents();
     frag.querySelectorAll(".tz").forEach((c) => c.replaceWith(...Array.from(c.childNodes)));
     const span = sizeSpan(size, frag);
@@ -1372,7 +1529,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed || !this.links) return false;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    if (node.nodeType !== Node.TEXT_NODE || !this.owns(node)) return false;
     const before = (node.textContent ?? "").slice(0, r.startOffset);
     if (!before.endsWith("[")) return false;
     // Retire le premier "[" (annulable comme une frappe).
@@ -1390,7 +1547,7 @@ export class TextDoc {
     void pickLink(rect, links.candidates, links.pageId?.()).then((res) => {
       this.root.focus({ preventScroll: true });
       const s = document.getSelection();
-      if (s && this.root.contains(at.startContainer)) { s.removeAllRanges(); s.addRange(at); }
+      if (s && this.owns(at.startContainer)) { s.removeAllRanges(); s.addRange(at); }
       if (res.kind === "pick") {
         const c = res.candidate;
         this.insertLink({ label: c.label, href: linkUrl(c.ref), hint: cleanHint(pagePathOf(c.spot)) });
@@ -1416,7 +1573,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return null;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer)) return null;
+    if (!this.owns(r.startContainer)) return null;
     for (const forward of [false, true]) {
       const n = neighbour(r, forward);
       if (n instanceof HTMLElement && n.classList.contains("doc-link")) return n;
@@ -1441,7 +1598,7 @@ export class TextDoc {
    */
   private onLinkDown(e: PointerEvent): void {
     const link = (e.target as HTMLElement).closest?.(".doc-link");
-    if (!(link instanceof HTMLElement) || !this.root.contains(link)) return;
+    if (!(link instanceof HTMLElement) || !this.owns(link)) return;
     // Souris : le clic suit le lien (ecouteur click), quel que soit l'outil.
     if (e.pointerType === "mouse") { if (e.button === 0) e.stopImmediatePropagation(); return; }
     if (e.pointerType === "pen") { e.preventDefault(); e.stopImmediatePropagation(); }
@@ -1645,7 +1802,7 @@ export class TextDoc {
 
   /** Appui court du stylet sur un bloc vivant (PageView) : comme un appui sans glisser. */
   tapFigure(fig: HTMLElement): void {
-    if (this.root.contains(fig)) this.tapImage(fig);
+    if (this.owns(fig)) this.tapImage(fig);
   }
 
   /** Appui sans glisser sur une photo (selection) ou un bloc vivant (selection + calculatrice). */
@@ -1715,7 +1872,7 @@ export class TextDoc {
     if (!fig) return;
     fig.classList.add("selected");
     // Le clavier suit : Suppr et Echap agissent sur la photo.
-    if (!this.root.contains(document.activeElement)) this.root.focus({ preventScroll: true });
+    if (!this.owns(document.activeElement)) this.root.focus({ preventScroll: true });
     const button = (label: string, title: string, run: () => void) => {
       const b = el("button", { type: "button", title, "aria-label": title }, label);
       b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); });
@@ -1842,7 +1999,7 @@ export class TextDoc {
    */
   private dropRangeAt(x: number, y: number, fig: HTMLElement): Range | null {
     const r = document.caretRangeFromPoint(x, y);
-    if (!r || !this.root.contains(r.startContainer) || fig.contains(r.startContainer)) return null;
+    if (!r || !this.owns(r.startContainer) || fig.contains(r.startContainer)) return null;
     const units = lineUnits(this.root).filter((u) => u.node !== fig);
     if (!units.length) { r.setStart(this.root, this.root.childNodes.length); r.collapse(true); return r; }
     // Premier element a partir du point vise (recherche dichotomique).
@@ -2119,7 +2276,7 @@ export class TextDoc {
       range = r;
     }
     // Comme dans Word : la frappe reprend sous l'image posee.
-    if (last && this.root.contains(document.activeElement ?? null)) {
+    if (last && this.owns(document.activeElement ?? null)) {
       const next = last.nextSibling;
       const sel = document.getSelection();
       const r = document.createRange();
@@ -2158,7 +2315,7 @@ export class TextDoc {
     if (this.field) this.commit(null);
     const fig = this.makeImage(id);
     const r = at ?? (noCaret ? null : this.savedRange);
-    if (r && this.root.contains(r.startContainer)) {
+    if (r && this.owns(r.startContainer)) {
       r.collapse(true);
       r.insertNode(fig);
     } else {
@@ -2180,7 +2337,7 @@ export class TextDoc {
    * au passage dans la calculatrice (son recepteur prend la selection).
    */
   hasCaret(): boolean {
-    return lastDoc === this && !!this.savedRange && this.root.contains(this.savedRange.startContainer);
+    return lastDoc === this && !!this.savedRange && this.owns(this.savedRange.startContainer);
   }
 
   /** Curseur garde apres `node` : l'envoi suivant se pose derriere, sans voler la selection. */
@@ -2200,7 +2357,7 @@ export class TextDoc {
   insertLive(id: string, atCaret: boolean): HTMLElement {
     if (this.field) this.commit(null);
     if (this.live) this.endLive(null);
-    const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
+    const r = atCaret && this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
     if (r) liftToRoot(r, this.root, 1);
     const fig = this.insertImage(id, r ?? undefined, true);
     this.caretAfter(fig);
@@ -2218,7 +2375,7 @@ export class TextDoc {
     if (this.live) this.endLive(null);
     this.lastAuto = null;
     const eq = makeEq(latex);
-    const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
+    const r = atCaret && this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
     if (r) {
       r.deleteContents();
       r.collapse(true);
@@ -2256,7 +2413,7 @@ export class TextDoc {
     this.lastAuto = null;
     const frag = this.buildNodes(parseDoc(md));
     const tail = anchor();
-    const r = atCaret && this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
+    const r = atCaret && this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange.cloneRange() : null;
     if (r) {
       r.collapse(true);
       r.insertNode(tail);
@@ -2289,8 +2446,8 @@ export class TextDoc {
   private caretRange(end = true): Range | null {
     const sel = document.getSelection();
     const live = sel?.rangeCount ? sel.getRangeAt(0) : null;
-    const r = live && this.root.contains(live.startContainer) ? live.cloneRange()
-      : this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange()
+    const r = live && this.owns(live.startContainer) ? live.cloneRange()
+      : this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange.cloneRange()
       : null;
     r?.collapse(!end);
     return r;
@@ -2301,7 +2458,7 @@ export class TextDoc {
    * fin de la selection (ce qui suit bouge si le texte grandit).
    */
   caretRow(end = true): { top: number; bottom: number } | null {
-    if (this.field && this.root.contains(this.field)) {
+    if (this.field && this.owns(this.field)) {
       const f = this.field.getBoundingClientRect();
       return { top: f.top, bottom: f.bottom };
     }
@@ -2314,7 +2471,7 @@ export class TextDoc {
   caretLineEmpty(): boolean {
     if (this.field) return false;
     const sel = document.getSelection();
-    if (sel?.rangeCount && !sel.isCollapsed && this.root.contains(sel.anchorNode)) return false;
+    if (sel?.rangeCount && !sel.isCollapsed && this.owns(sel.anchorNode)) return false;
     const r = this.caretRange();
     if (!r) return false;
     const box: Node = closestLine(r.startContainer, this.root) ?? this.root;
@@ -2403,7 +2560,7 @@ export class TextDoc {
   /** Curseur pose (selection et curseur garde), sans defilement. */
   private setCaret(r: Range): void {
     const sel = document.getSelection();
-    if (sel && (document.activeElement === this.root || this.root.contains(sel.anchorNode))) {
+    if (sel && (document.activeElement === this.root || this.owns(sel.anchorNode))) {
       sel.removeAllRanges();
       sel.addRange(r);
     }
@@ -2426,7 +2583,7 @@ export class TextDoc {
     const r = this.toEnd(at);
     let caret = false;
     const c = this.caretRange();
-    if (c && this.root.contains(c.startContainer) && r.isPointInRange(c.startContainer, c.startOffset)) {
+    if (c && this.owns(c.startContainer) && r.isPointInRange(c.startContainer, c.startOffset)) {
       c.insertNode(document.createTextNode(marker));
       caret = true;
     }
@@ -2452,7 +2609,7 @@ export class TextDoc {
       while (w.lastChild()) n = w.currentNode;
       for (n = w.currentNode; n && n !== this.root; n = w.previousNode()) {
         const atom = n.parentElement?.closest(".eq, .doc-img, math-field");
-        if (atom && this.root.contains(atom)) return atom;
+        if (atom && this.owns(atom)) return atom;
         if (n.nodeType === Node.TEXT_NODE) {
           if ((n.textContent ?? "").replace(/\u200b/g, "")) return n;
           continue;
@@ -2472,7 +2629,7 @@ export class TextDoc {
   /** Le curseur est-il a `at` ou plus loin dans le texte ? */
   caretFrom(at: Range): boolean {
     const c = this.caretRange();
-    return !!c && this.root.contains(c.startContainer) && this.toEnd(at).isPointInRange(c.startContainer, c.startOffset);
+    return !!c && this.owns(c.startContainer) && this.toEnd(at).isPointInRange(c.startContainer, c.startOffset);
   }
 
   /** Fin du texte a partir de `at`, au format du disque, sans rien retirer. */
@@ -2482,6 +2639,203 @@ export class TextDoc {
 
   /** Formule en edition ou fraction en cours de frappe : la pagination n'y touche pas. */
   get busy(): boolean { return !!this.field || !!this.live; }
+
+  /* ---------------- tableaux (src/ui/doctable.ts) ---------------- */
+
+  /** Case d'un tableau : ses touches (Tab, Entree, fleches au bord), posees par le tableau. */
+  cellKey: ((e: KeyboardEvent) => boolean) | null = null;
+  private tableHostObj: TableHost | null = null;
+
+  /** Formules de la ligne du curseur mises en forme, comme a l'Entree (on quitte une case). */
+  finishLine(): void {
+    if (this.field) return;
+    if (this.live) this.endLive(null);
+    if (autoMath) this.convertLine("final");
+    this.emit();
+  }
+
+  /** Case de tableau de ce texte ou se trouve le clavier, sinon null. */
+  get activeCell(): TextDoc | null {
+    return lastDoc && lastDoc !== this && lastDoc.root.isConnected && this.root.contains(lastDoc.root) ? lastDoc : null;
+  }
+
+  private makeTable(rows: DocToken[][][]): HTMLElement {
+    return buildTable(rows.map((r) => r.map((c) => serializeDoc(c))), this.tableHost());
+  }
+
+  private tableHost(): TableHost {
+    this.tableHostObj ??= {
+      cell: (content) => {
+        const d = new TextDoc(content, () => this.emit(), undefined, this.links, { cell: true });
+        d.suggester = (line, prev) => this.suggester?.(line, prev) ?? null;
+        d.cellKey = (e) => tableKey(e, d.root);
+        return d;
+      },
+      changed: () => this.emit(),
+      leave: (wrap, after) => this.leaveTable(wrap, after),
+      remove: (wrap) => this.removeTable(wrap),
+    };
+    return this.tableHostObj;
+  }
+
+  /** Curseur rendu au texte, juste avant le tableau (fin de la ligne d'avant) ou juste apres. */
+  private leaveTable(wrap: HTMLElement, after: boolean): void {
+    if (!this.owns(wrap.parentNode)) return;
+    const r = document.createRange();
+    if (after) {
+      let a = wrap.nextSibling;
+      if (!(a instanceof Text)) { a = anchor(); wrap.after(a); }
+      const t = a as Text;
+      r.setStart(t, t.data.startsWith("\u200b") ? 1 : 0);
+    } else {
+      let b = wrap.previousSibling;
+      if (!(b instanceof Text)) { b = anchor(); wrap.before(b); }
+      r.setStart(b, (b as Text).data.length);
+    }
+    r.collapse(true);
+    this.root.focus({ preventScroll: true });
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(r);
+  }
+
+  /** Tableau retire du texte (« Annuler » 8 s le remet, cases comprises). */
+  private removeTable(wrap: HTMLElement, message = "Tableau supprimé"): void {
+    if (!this.owns(wrap.parentNode)) return;
+    const prev = wrap.previousSibling;
+    // Le tableau finissait la ligne d'avant : un saut la finit a sa place.
+    const needBr = !!prev && prev.nodeName !== "BR" && !isLine(prev) && !(prev instanceof Text && /\n\u200b*$/.test(prev.data));
+    const stand: ChildNode = needBr ? el("br") : document.createTextNode("");
+    wrap.replaceWith(stand);
+    const r = document.createRange();
+    r.setStartAfter(stand);
+    r.collapse(true);
+    this.root.focus({ preventScroll: true });
+    const sel = document.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(r);
+    this.emit();
+    toast(message, "info", 8000, {
+      label: "Annuler",
+      run: () => {
+        if (!stand.isConnected || !this.root.isConnected) return;
+        stand.replaceWith(wrap);
+        this.emit();
+      },
+    });
+    setTimeout(() => { if (!wrap.isConnected) disposeCells(wrap); }, 10000);
+  }
+
+  /**
+   * Tableau colle au curseur : juste avant (debut de la ligne qui le suit,
+   * `forward` faux) ou juste apres (fin de la ligne qui le precede).
+   */
+  private islandBeside(forward: boolean): HTMLElement | null {
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return null;
+    const r = sel.getRangeAt(0);
+    if (!this.owns(r.startContainer) || closestLine(r.startContainer, this.root)) return null;
+    if (forward) {
+      const end = lineEnd(this.root, r);
+      return isEmptyRange(end.range) && isIsland(end.stop) ? end.stop : null;
+    }
+    const start = lineStart(this.root, r);
+    if (!isEmptyRange(start)) return null;
+    const before = start.startContainer === this.root ? this.root.childNodes[start.startOffset - 1] : null;
+    return isIsland(before) ? before : null;
+  }
+
+  /**
+   * Nouveau tableau vide (`rows` × `cols`) au curseur, sur sa propre ligne
+   * (dans un titre ou une puce : sous la ligne), sinon a la fin du texte.
+   * Le curseur part dans la premiere case. Rend le tableau, ou null.
+   */
+  insertTable(rows = 2, cols = 2): HTMLElement | null {
+    if (this.opts.cell || this.root.contentEditable === "false") return null;
+    if (this.field) this.commit(null);
+    if (this.live) this.endLive(null);
+    const sel = document.getSelection();
+    const cur = sel?.rangeCount && this.owns(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0)
+      : this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange : null;
+    const wrap = this.makeTable(emptyTable(rows, cols).rows);
+    if (cur) {
+      const r = cur.cloneRange();
+      r.collapse(true);
+      const block = closestLine(r.startContainer, this.root);
+      if (block) r.setStartAfter(block);
+      else liftToRoot(r, this.root, 1);
+      r.collapse(true);
+      r.insertNode(wrap);
+    } else {
+      this.root.append(wrap);
+    }
+    const next = wrap.nextSibling;
+    if (next instanceof Text && next.data === "") next.remove();
+    if (!(wrap.nextSibling instanceof Text)) wrap.after(anchor());
+    this.emit();
+    const first = edgeCell(wrap, false);
+    if (first) focusCell(first, false);
+    return wrap;
+  }
+
+  /* ---------------- blocs de code (src/ui/doccode.ts) ---------------- */
+
+  private codeHostObj: CodeHost | null = null;
+
+  private codeHost(): CodeHost {
+    this.codeHostObj ??= {
+      changed: () => this.emit(),
+      leave: (wrap, after) => this.leaveTable(wrap, after),
+      remove: (wrap) => this.removeTable(wrap, "Bloc de code retiré"),
+    };
+    return this.codeHostObj;
+  }
+
+  /** Ligne « ``` » ou « ```lang » tapee, curseur au bout : elle devient un bloc de code vide. */
+  private fenceToCode(): boolean {
+    if (this.opts.cell) return false;
+    const sel = document.getSelection();
+    if (!sel?.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    if (!this.owns(r.startContainer) || closestLine(r.startContainer, this.root)) return false;
+    if (!isEmptyRange(lineEnd(this.root, r).range)) return false;
+    const start = lineStart(this.root, r);
+    if (start.cloneContents().querySelector(".eq, .doc-img, .doc-island, code, math-field")) return false;
+    const m = /^```([\w+#.-]*)$/.exec(start.toString().replace(/\u200b/g, "").trim());
+    if (!m) return false;
+    start.deleteContents();
+    this.placeCode(m[1], start);
+    return true;
+  }
+
+  /** Bloc de code vide pose a `at` (deja hors de toute ligne mise en forme), clavier dedans. */
+  private placeCode(lang: string, at: Range | null): HTMLElement {
+    const wrap = buildCode(lang, "", this.codeHost());
+    if (at) { at.collapse(true); at.insertNode(wrap); } else this.root.append(wrap);
+    const next = wrap.nextSibling;
+    if (next instanceof Text && next.data === "") next.remove();
+    if (!(wrap.nextSibling instanceof Text)) wrap.after(anchor());
+    this.emit();
+    focusCode(wrap, false);
+    return wrap;
+  }
+
+  /** Nouveau bloc de code au curseur (menu « Bloc de code »), sinon a la fin du texte. */
+  insertCode(lang = ""): HTMLElement | null {
+    if (this.opts.cell || this.root.contentEditable === "false") return null;
+    if (this.field) this.commit(null);
+    if (this.live) this.endLive(null);
+    const sel = document.getSelection();
+    const cur = sel?.rangeCount && this.owns(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0)
+      : this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange : null;
+    if (!cur) return this.placeCode(lang, null);
+    const r = cur.cloneRange();
+    r.collapse(true);
+    const block = closestLine(r.startContainer, this.root);
+    if (block) r.setStartAfter(block);
+    else liftToRoot(r, this.root, 1);
+    return this.placeCode(lang, r);
+  }
 
   /**
    * Remontee de la suite (PageView.autoPull) : `md` ajoute a la fin du
@@ -2587,7 +2941,7 @@ export class TextDoc {
       if (left <= len) {
         // Dans une formule ou un bloc : juste apres lui.
         const atom = n.parentElement?.closest(".eq, .doc-img");
-        if (atom && this.root.contains(atom) && atom !== this.root) r.setStartAfter(atom);
+        if (atom && this.owns(atom) && atom !== this.root) r.setStartAfter(atom);
         else r.setStart(n, left);
         placed = true;
         break;
@@ -2623,7 +2977,7 @@ export class TextDoc {
     const below = !this.root.textContent?.trim() || clientY > all.getBoundingClientRect().bottom;
     const range = below ? null : document.caretRangeFromPoint(clientX, clientY);
     const fig = this.makeImage(id);
-    if (range && this.root.contains(range.startContainer)) {
+    if (range && this.owns(range.startContainer)) {
       range.insertNode(fig);
     } else {
       this.root.append(fig);
@@ -2726,7 +3080,7 @@ export class TextDoc {
     // formule elle-meme au milieu. Jamais de copie du champ MathLive (le
     // cloner construirait un second champ, non monte).
     const mf = this.field;
-    if (mf && this.root.contains(mf)) {
+    if (mf && this.owns(mf)) {
       const rect = mf.getBoundingClientRect();
       const head = document.createRange();
       head.setStart(this.root, 0);
@@ -2742,8 +3096,8 @@ export class TextDoc {
     }
     const sel = document.getSelection();
     const live = sel?.rangeCount ? sel.getRangeAt(0) : null;
-    const caret = live && this.root.contains(live.startContainer) ? live.cloneRange()
-      : this.savedRange && this.root.contains(this.savedRange.startContainer) ? this.savedRange.cloneRange()
+    const caret = live && this.owns(live.startContainer) ? live.cloneRange()
+      : this.savedRange && this.owns(this.savedRange.startContainer) ? this.savedRange.cloneRange()
       : null;
     if (!caret) return null;
     caret.collapse(false);
@@ -2770,7 +3124,7 @@ export class TextDoc {
   textLineAt(clientX: number, clientY: number): string | null {
     if (this.field) return null; // formule ouverte : pas de copie du champ
     const r = document.caretRangeFromPoint(clientX, clientY);
-    if (!r || !this.root.contains(r.startContainer)) return null;
+    if (!r || !this.owns(r.startContainer)) return null;
     const rect = caretRect(r, this.root);
     if (!rect || clientY < rect.top - 6 || clientY > rect.bottom + 6) return null;
     const head = document.createRange();
@@ -3046,7 +3400,7 @@ export class TextDoc {
     this.root.focus({ preventScroll: true });
     const sel = document.getSelection();
     let range = sel?.rangeCount ? sel.getRangeAt(0) : null;
-    if (!range || !this.root.contains(range.startContainer)) {
+    if (!range || !this.owns(range.startContainer)) {
       this.focus();
       range = sel?.rangeCount ? sel.getRangeAt(0) : null;
       if (!range) return;
@@ -3144,7 +3498,7 @@ export class TextDoc {
       while (prev && prev.nodeType === Node.TEXT_NODE && !(prev.textContent ?? "").replace(/\u200b/g, "")) prev = prev.previousSibling;
       if (prev instanceof HTMLElement && prev.classList.contains("raw")) raw = prev;
     }
-    if (raw && this.root.contains(raw)) {
+    if (raw && this.owns(raw)) {
       const src = (raw.textContent ?? "").replace(/\u200b/g, "");
       const latex = forceFormula(src);
       if (!latex) return false;
@@ -3184,7 +3538,7 @@ export class TextDoc {
     if (!eq) {
       const sel = document.getSelection();
       const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
-      if (r && this.root.contains(r.startContainer) && r.collapsed) {
+      if (r && this.owns(r.startContainer) && r.collapsed) {
         let prev: Node | null = r.startContainer.nodeType === Node.TEXT_NODE
           ? ((r.startContainer.textContent ?? "").slice(0, r.startOffset).replace(/[\u200b\s]/g, "") ? null : r.startContainer.previousSibling)
           : r.startContainer.childNodes[r.startOffset - 1] ?? null;
@@ -3209,7 +3563,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer)) return false;
+    if (!this.owns(r.startContainer)) return false;
     const block = closestLine(r.startContainer, this.root);
     this.lastLine = null;
     if (block && lineFormatOfEl(block).style === "box") this.unwrapLine(block, false);
@@ -3224,7 +3578,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer)) return false;
+    if (!this.owns(r.startContainer)) return false;
     let eq: HTMLElement | null = null;
     if (!r.collapsed) {
       const inside = r.cloneContents().querySelectorAll(".eq");
@@ -3263,7 +3617,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    if (node.nodeType !== Node.TEXT_NODE || !this.owns(node)) return false;
     // Dans une commande (`code`) : "->" ou "pi" restent tels quels.
     if (node.parentElement?.closest("code")) return false;
     const text = node.textContent ?? "";
@@ -3302,7 +3656,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (!(node instanceof Text) || !this.root.contains(node)) return false;
+    if (!(node instanceof Text) || !this.owns(node)) return false;
     if (node.parentElement?.closest(".eq, code")) return false;
     const text = node.data, end = r.startOffset - 1;
     if (text[end] !== "`") return false;
@@ -3407,7 +3761,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return [];
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return [];
+    if (node.nodeType !== Node.TEXT_NODE || !this.owns(node)) return [];
     if (node.parentElement?.closest(".eq, .raw, code")) return [];
     const after = (node.textContent ?? "").slice(r.startOffset);
     // Curseur au milieu d'un mot ("Vatt" corrige en "Vbatt") : on attend.
@@ -3504,7 +3858,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
     const node = r.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE || !this.root.contains(node)) return false;
+    if (node.nodeType !== Node.TEXT_NODE || !this.owns(node)) return false;
     if (node.parentElement?.closest(".eq, .raw, code")) return false;
     const after = (node.textContent ?? "").slice(r.startOffset);
     if (/^[\p{L}\p{N}]/u.test(after.replace(/^\u200b+/, ""))) return false;
@@ -3566,7 +3920,7 @@ export class TextDoc {
     if (!sel?.rangeCount || !sel.isCollapsed) return;
     const node = sel.getRangeAt(0).startContainer;
     const raw = (node.nodeType === Node.TEXT_NODE ? node.parentElement : node as HTMLElement)?.closest<HTMLElement>(".raw");
-    if (!raw || !this.root.contains(raw) || raw.querySelector(".eq")) return;
+    if (!raw || !this.owns(raw) || raw.querySelector(".eq")) return;
     const text = raw.textContent ?? "";
     const refused = raw.dataset.refused;
     if (refused !== undefined && text === refused) return;
@@ -3591,7 +3945,7 @@ export class TextDoc {
       const prev = node.childNodes[r.startOffset - 1];
       if (prev instanceof HTMLElement && prev.classList.contains("raw")) raw = prev;
     }
-    if (!raw || !this.root.contains(raw)) return;
+    if (!raw || !this.owns(raw)) return;
     if ((raw.textContent ?? "") !== (raw.dataset.refused ?? raw.textContent)) return;
     let next = raw.nextSibling;
     if (!(next instanceof Text)) {
@@ -3647,7 +4001,7 @@ export class TextDoc {
     // taper. Retour arriere efface la derniere lettre, comme sans elle ; la
     // formule redevient du texte normal, remis en forme a la prochaine pause.
     const q = last.eqs[last.eqs.length - 1];
-    if (backspace && last.pause && last.atCaret && q && this.root.contains(q) && !last.greek) {
+    if (backspace && last.pause && last.atCaret && q && this.owns(q) && !last.greek) {
       const src = q.dataset.src ?? "";
       const t = document.createTextNode(src.slice(0, -1));
       dropAnchorAfter(q);
@@ -3659,11 +4013,11 @@ export class TextDoc {
     let done = false;
     let lastRaw: HTMLElement | null = null;
     const g = last.greek;
-    if (last.eqs.length && (!backspace || last.atCaret) && last.eqs.every((q) => this.root.contains(q))) {
+    if (last.eqs.length && (!backspace || last.atCaret) && last.eqs.every((q) => this.owns(q))) {
       last.eqs.forEach((q, i) => {
         let src = q.dataset.src ?? "";
         // La lettre grecque finissait la formule : on rend aussi le mot tape.
-        if (g && i === last.eqs.length - 1 && !this.root.contains(g.node) && src.endsWith(g.char)) {
+        if (g && i === last.eqs.length - 1 && !this.owns(g.node) && src.endsWith(g.char)) {
           src = src.slice(0, -1) + g.word;
         }
         dropAnchorAfter(q);
@@ -3687,7 +4041,7 @@ export class TextDoc {
       }
     }
     // "π " redevient "pi ", le curseur reste apres l'espace.
-    if (g && this.root.contains(g.node) && (g.node.textContent ?? "").slice(g.at - 1, g.at) === g.char) {
+    if (g && this.owns(g.node) && (g.node.textContent ?? "").slice(g.at - 1, g.at) === g.char) {
       const sel = document.getSelection();
       const caret = sel?.rangeCount && sel.getRangeAt(0).startContainer === g.node ? sel.getRangeAt(0).startOffset : null;
       const text = g.node.textContent ?? "";
@@ -3730,7 +4084,7 @@ export class TextDoc {
    */
   private tidyLines(): void {
     const sel = document.getSelection();
-    const caret = sel?.rangeCount && this.root.contains(sel.anchorNode)
+    const caret = sel?.rangeCount && this.owns(sel.anchorNode)
       ? { node: sel.getRangeAt(0).startContainer, offset: sel.getRangeAt(0).startOffset } : null;
     let moved = false;
     for (const span of Array.from(this.root.querySelectorAll<HTMLElement>("span[style]:not([class]), font"))) {
@@ -3742,7 +4096,7 @@ export class TextDoc {
     for (const block of Array.from(this.root.querySelectorAll<HTMLElement>(".dl"))) {
       // Bloc dans un bloc (collage) : il passe apres son parent.
       const outer = block.parentElement?.closest(".dl");
-      if (outer && this.root.contains(outer)) { outer.after(block); moved = true; }
+      if (outer && this.owns(outer)) { outer.after(block); moved = true; }
       for (let guard = 0; guard < 50; guard++) {
         const cut = innerBreak(block);
         if (!cut) break;
@@ -3762,7 +4116,7 @@ export class TextDoc {
         moved = true;
       }
     }
-    if (moved && caret && sel && caret.node.isConnected && this.root.contains(caret.node)) {
+    if (moved && caret && sel && caret.node.isConnected && this.owns(caret.node)) {
       const len = caret.node.nodeType === Node.TEXT_NODE ? (caret.node.textContent ?? "").length : caret.node.childNodes.length;
       sel.collapse(caret.node, Math.min(caret.offset, len));
     }
@@ -3835,7 +4189,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer)) return false;
+    if (!this.owns(r.startContainer)) return false;
     if (r.startContainer.parentElement?.closest(".eq, .raw, code")) return false;
     const inLine = closestLine(r.startContainer, this.root);
     if (inLine) return this.listToHeading(inLine, r);
@@ -3874,7 +4228,7 @@ export class TextDoc {
     this.lastAuto = null;
     this.lastLine = {
       undo: () => {
-        if (!this.root.contains(block)) return false;
+        if (!this.owns(block)) return false;
         setLineFormat(block, before);
         dropPlaceholder(block);
         block.prepend(document.createTextNode(`${typed} `));
@@ -3922,7 +4276,7 @@ export class TextDoc {
 
   /** Ctrl+Z juste apres une mise en forme par l'Espace : le marqueur tape revient. */
   private unmark(block: HTMLElement, marker: string): boolean {
-    if (!this.root.contains(block)) return false;
+    if (!this.owns(block)) return false;
     const at = this.unwrapLine(block, false);
     const text = document.createTextNode(marker);
     at.insertNode(text);
@@ -3936,7 +4290,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer) || closestLine(r.startContainer, this.root)) return false;
+    if (!this.owns(r.startContainer) || closestLine(r.startContainer, this.root)) return false;
     this.wrapLine(r.cloneRange(), format);
     this.emit();
     return true;
@@ -3986,7 +4340,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || !sel.isCollapsed) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer)) return false;
+    if (!this.owns(r.startContainer)) return false;
     const block = closestLine(r.startContainer, this.root);
     if (!forward) {
       const start = lineStart(block ?? this.root, r);
@@ -4069,7 +4423,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount) return false;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.startContainer)) return false;
+    if (!this.owns(r.startContainer)) return false;
     const blocks = Array.from(this.root.querySelectorAll<HTMLElement>(".dl-li"))
       .filter((b) => r.intersectsNode(b) || b.contains(r.startContainer));
     if (!blocks.length) return false;
@@ -4109,6 +4463,19 @@ export class TextDoc {
       if (!this.live.eq.isConnected) this.live = null;
       else if (this.liveKey(e)) return;
     }
+    this.typedAt = performance.now();
+    // Bulle d'aide aux raccourcis : Tab ou Fleche droite la pose, Echap l'oublie, le reste aussi.
+    if (this.hintAt && !["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) {
+      const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
+      if ((e.key === "Tab" || e.key === "ArrowRight") && plain) {
+        if (this.acceptHint()) { e.preventDefault(); e.stopPropagation(); return; }
+      } else if (e.key === "Escape") {
+        this.hideGhost();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      } else this.hideGhost();
+    }
     // Suggestion grisee : Fleche droite la pose, Echap l'oublie, le reste aussi.
     if (this.ghostAt && !["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) {
       const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
@@ -4120,6 +4487,18 @@ export class TextDoc {
         e.stopPropagation();
         return;
       } else this.hideGhost();
+    }
+    // Case d'un tableau : Tab, Entree, fleches au bord, Echap (src/ui/doctable.ts).
+    if (this.cellKey?.(e)) { e.preventDefault(); e.stopPropagation(); return; }
+    // Texte de la page juste avant/apres un tableau : Retour arriere ou Suppr
+    // entre dans la case voisine au lieu d'effacer tout le tableau.
+    if (!this.opts.cell && (e.key === "Backspace" || e.key === "Delete" || e.key === "ArrowLeft" || e.key === "ArrowRight")
+      && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      const forward = e.key === "Delete" || e.key === "ArrowRight";
+      const island = this.islandBeside(forward);
+      if (island?.classList.contains("doc-code")) { e.preventDefault(); focusCode(island, !forward); return; }
+      const cell = island && edgeCell(island, !forward);
+      if (cell) { e.preventDefault(); focusCell(cell, !forward); return; }
     }
     // Photo selectionnee : Suppr la retire, Echap la deselectionne, toute
     // autre touche rend la main au texte.
@@ -4179,9 +4558,12 @@ export class TextDoc {
     // et se relit sans surprise. Seuls les titres et les puces ont un bloc.
     if (e.key === "Enter") {
       e.preventDefault();
+      if (this.opts.cell) return;
       // Formule selectionnee (Maj+fleche) : Entree l'ouvre pour la corriger.
       const picked = !e.shiftKey && !e.ctrlKey && !e.altKey ? this.selectedEq() : null;
       if (picked) { this.editEq(picked, "end"); return; }
+      // « ``` » ou « ```python » seul sur sa ligne : bloc de code.
+      if (!e.shiftKey && !e.ctrlKey && !e.altKey && this.fenceToCode()) return;
       if (autoMath) this.convertLine("final");
       this.newLine();
       // La couleur de frappe vaut pour la ligne : la suivante repart en noir.
@@ -4189,7 +4571,7 @@ export class TextDoc {
       return;
     }
     // Debut de ligne "# ", "- ", "1. " : titre ou liste (D11).
-    if (e.key === " " && !e.ctrlKey && !e.altKey && !e.metaKey && this.autoLine()) {
+    if (e.key === " " && !e.ctrlKey && !e.altKey && !e.metaKey && !this.opts.cell && this.autoLine()) {
       e.preventDefault();
       return;
     }
@@ -4209,6 +4591,11 @@ export class TextDoc {
     // et le curseur au denominateur. On voit ou l'on ecrit.
     if (e.key === "/" && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey) {
       if (this.slashToFraction()) { e.preventDefault(); return; }
+    }
+    // « mat2x3 » puis Espace : matrice vide a remplir (cases au Tab).
+    if (e.key === " " && autoMath && !e.ctrlKey && !e.altKey && !e.metaKey && this.matrixAtCaret()) {
+      e.preventDefault();
+      return;
     }
     // Espace : la formule qu'on vient de finir se met en forme. Une
     // variable seule en fin de ligne attend le mot suivant ("iD" puis "=").
@@ -4264,7 +4651,7 @@ export class TextDoc {
       at.setStart(sel.focusNode, sel.focusOffset);
       at.collapse(true);
       const eq = neighbour(at, fwd);
-      if (!(eq instanceof HTMLElement && eq.classList.contains("eq") && this.root.contains(eq))) return;
+      if (!(eq instanceof HTMLElement && eq.classList.contains("eq") && this.owns(eq))) return;
       e.preventDefault();
       if (!e.shiftKey && !eq.classList.contains("live") && !eq.closest(".raw") && eq.dataset.latex !== undefined) {
         this.editEq(eq, fwd ? "start" : "end");
@@ -4281,7 +4668,7 @@ export class TextDoc {
     const sel = document.getSelection();
     if (!sel?.rangeCount || sel.isCollapsed) return null;
     const r = sel.getRangeAt(0);
-    if (!this.root.contains(r.commonAncestorContainer)) return null;
+    if (!this.owns(r.commonAncestorContainer)) return null;
     const eqs = Array.from(this.root.querySelectorAll<HTMLElement>(".eq")).filter((q) => r.intersectsNode(q));
     if (eqs.length !== 1) return null;
     const frag = r.cloneContents();
@@ -4649,17 +5036,23 @@ function prevInLine(n: Node, root: HTMLElement): Node | null {
 /** HTML du presse-papiers : texte echappe, formules en MathML, une ligne par <div>. */
 function clipboardHtml(tokens: DocToken[], doc: string): string {
   const esc = (t: string): string => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const lines = docClipboardLines(tokens).map((line) => esc(line.marker) + line.parts.map((p) => {
+  const part = (p: { text: string } | { latex: string }): string => {
     if ("text" in p) return esc(p.text);
     try {
       return katex.renderToString(p.latex, { output: "mathml", throwOnError: false });
     } catch {
       return esc(texToPlain(p.latex));
     }
-  }).join(""));
+  };
+  // Tableau : un vrai tableau HTML (Word, un mail le collent en tableau).
+  const td = "border:1px solid #888;padding:2px 6px";
+  const lines = docClipboardLines(tokens).map((line) => (line.table
+    ? `<table style="border-collapse:collapse">${line.table.map((r) => `<tr>${r.map((c) => `<td style="${td}">${c.map(part).join("")}</td>`).join("")}</tr>`).join("")}</table>`
+    : line.code !== undefined ? `<pre style="font-family:Consolas,monospace;background:#f3f4f6;padding:4px 8px">${esc(line.code)}</pre>`
+    : esc(line.marker) + line.parts.map(part).join("")));
   const holder = document.createElement("div");
   holder.dataset.cahiers = doc;
-  holder.innerHTML = lines.map((l) => `<div>${l || "<br>"}</div>`).join("");
+  holder.innerHTML = lines.map((l) => (l.startsWith("<table") || l.startsWith("<pre") ? l : `<div>${l || "<br>"}</div>`)).join("");
   return holder.outerHTML;
 }
 
@@ -4948,6 +5341,11 @@ function isLine(n: Node | null | undefined): boolean {
   return n instanceof HTMLElement && n.classList.contains("dl");
 }
 
+/** Tableau pose dans le texte (src/ui/doctable.ts) : un bloc qui finit sa ligne. */
+function isIsland(n: Node | null | undefined): n is HTMLElement {
+  return n instanceof HTMLElement && n.classList.contains("doc-island");
+}
+
 /** Bloc de ligne qui contient ce noeud, s'il y en a un. */
 function closestLine(node: Node, root: HTMLElement): HTMLElement | null {
   const e = node instanceof HTMLElement ? node : node.parentElement;
@@ -4980,7 +5378,7 @@ function lastContent(n: Node): Node | null {
 
 /** Contenu d'une ligne non terminee (ni saut, ni bloc, ni texte fini par "\n"). */
 function isInline(n: Node): boolean {
-  if (n.nodeName === "BR" || isLine(n)) return false;
+  if (n.nodeName === "BR" || isLine(n) || isIsland(n)) return false;
   return !(n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").replace(/\u200b+$/, "").endsWith("\n"));
 }
 
@@ -4998,7 +5396,7 @@ function endsLine(out: DocToken[]): boolean {
 /** Rien de visible dans ce morceau (ancres et sauts de fin mis a part). */
 function isEmptyRange(r: Range): boolean {
   if (r.toString().replace(/\u200b/g, "")) return false;
-  return !r.cloneContents().querySelector(".eq, .doc-img, math-field");
+  return !r.cloneContents().querySelector(".eq, .doc-img, .doc-island, math-field");
 }
 
 /** Une ligne vide garde sa hauteur : un <br> dedans, comme Word et Chrome. */
@@ -5038,7 +5436,7 @@ function lineStart(box: Node, r: Range): Range {
     n = top.previousSibling;
   }
   for (; n; n = n.previousSibling) {
-    if (n.nodeName === "BR" || isLine(n)) { out.setStartAfter(n); return out; }
+    if (n.nodeName === "BR" || isLine(n) || isIsland(n)) { out.setStartAfter(n); return out; }
     if (n.nodeType === Node.TEXT_NODE) {
       const nl = (n.textContent ?? "").lastIndexOf("\n");
       if (nl >= 0) { out.setStart(n, nl + 1); return out; }
@@ -5076,7 +5474,7 @@ function lineEnd(box: Node, r: Range): LineEnd {
     n = top.nextSibling;
   }
   for (; n; n = n.nextSibling) {
-    if (n.nodeName === "BR" || isLine(n)) { range.setEndBefore(n); return { range, stop: n, nl: null, at: 0 }; }
+    if (n.nodeName === "BR" || isLine(n) || isIsland(n)) { range.setEndBefore(n); return { range, stop: n, nl: null, at: 0 }; }
     if (n.nodeType === Node.TEXT_NODE) {
       const i = (n.textContent ?? "").indexOf("\n");
       if (i >= 0) return cut(n as Text, i);

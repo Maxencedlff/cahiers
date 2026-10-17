@@ -12,9 +12,9 @@ const LETTERED = KEYS.filter((k) => SYMBOLS[k].letter);
 const ALLOWED_TAGS = new Set(["path", "line", "circle", "rect", "polyline"]);
 
 describe("table des symboles", () => {
-  it("27 symboles (26 lettres + circuit ouvert), cle coherente, grille de 10 px", () => {
+  it("28 symboles (26 lettres + circuit ouvert + gain), cle coherente, grille de 10 px", () => {
     expect(GRID).toBe(10);
-    expect(KEYS.length).toBe(27);
+    expect(KEYS.length).toBe(28);
     expect(LETTERED.length).toBe(26);
     expect(symbolByLetter("O")?.key).toBe("X");
     for (const k of KEYS) expect(SYMBOLS[k].key).toBe(k);
@@ -121,7 +121,7 @@ describe("symbolByLetter", () => {
     expect(symbolByLetter("R")?.key).toBe("Pot");
     expect(symbolByLetter("Z")?.key).toBe("Dz");
     expect(symbolByLetter("L")?.key).toBe("L");
-    expect(symbolByLetter("G")?.key).toBe("G");
+    expect(symbolByLetter("G")?.key).toBe("Gain");
   });
   it("hors table", () => {
     expect(symbolByLetter("")).toBeUndefined();

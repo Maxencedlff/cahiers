@@ -47,6 +47,7 @@ async function main() {
     const app = new App(
       platform.fs, platform.rootLabel, platform.presence,
       platform.ocr, platform.keys, platform.saveKeys,
+      platform.location, platform.isTauri,
     );
     mount.replaceChildren(app.element);
     if (platform.isTauri) await guardClose(app);

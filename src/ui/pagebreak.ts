@@ -11,8 +11,8 @@
  */
 import { groupRows, type Row, type Span } from "../core/paginate";
 
-/** Element mesure en entier : formule, photo, bloc vivant, champ MathLive. */
-const ATOM = ".eq, .doc-img, math-field";
+/** Element mesure en entier : formule, photo, bloc vivant, tableau, bloc de code, champ MathLive. */
+const ATOM = ".eq, .doc-img, .doc-island, math-field";
 /** Titres : leur boite fait leur hauteur de lignes (texte plus petit que la boite). */
 const HEADING = ".dl-h1, .dl-h2, .dl-h3";
 

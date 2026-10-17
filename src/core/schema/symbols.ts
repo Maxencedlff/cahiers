@@ -18,6 +18,9 @@
  *   y Vm (voltmetre)            h Am (amperemetre)        x Lamp (lampe : cercle + croix)
  *   f F (fusible)               w Pot (potentiometre, w = curseur)
  *   b B (bloc)                  s S (sommateur)
+ * Schemas-blocs : Maj+G = Gain (triangle, sans lettre a lui), Maj+B = bloc
+ * integrateur (un bloc B dont la valeur est « ∫dt », `PRESETS`). Le bloc et
+ * le gain s'allongent selon leur texte (`SchemaPart.w`, `symbolFor`).
  * Maj+lettre : variante quand elle existe (Maj+C = Cp, Maj+Q = Qp, Maj+M = Mp,
  * Maj+V = Vm, Maj+A = Am, Maj+R = Pot, Maj+O = X circuit ouvert : deux bornes
  * non reliees, sans lettre a lui), sinon le meme symbole qu'en minuscule
@@ -41,7 +44,7 @@
 
 export type SymKey =
   | "R" | "C" | "Cp" | "L" | "D" | "Dz" | "LED" | "K" | "V" | "Vdc" | "I" | "G" | "O" | "A"
-  | "Q" | "Qp" | "M" | "Mp" | "T" | "Vm" | "Am" | "Lamp" | "F" | "Pot" | "B" | "S" | "X";
+  | "Q" | "Qp" | "M" | "Mp" | "T" | "Vm" | "Am" | "Lamp" | "F" | "Pot" | "B" | "S" | "X" | "Gain";
 
 export interface Port { name: string; x: number; y: number }
 
@@ -232,6 +235,11 @@ const BODY_T =
 
 const BODY_B = rect(0, 0, 6, 4);
 
+/** Gain (schema-bloc) : triangle, entree au milieu du cote gauche, sortie a la pointe. */
+function gainBody(w: number): string {
+  return path(`M0 0.2 L0 3.8 L${n(w)} 2 Z`);
+}
+
 const BODY_S = (() => {
   const k = Math.SQRT1_2;
   return circle(1, 1, 1) + line(1 - k, 1 - k, 1 + k, 1 + k) + line(1 - k, 1 + k, 1 + k, 1 - k);
@@ -328,6 +336,14 @@ export const SYMBOLS: Record<SymKey, SymbolDef> = {
     body: BODY_B,
     labelAt: { x: 3, y: 2, anchor: "middle" },
   },
+  Gain: {
+    key: "Gain", label: "Gain", letter: "", w: 4, h: 4,
+    ports: [{ name: "in", x: 0, y: 2 }, { name: "out", x: 4, y: 2 }],
+    through: ["in", "out"],
+    body: gainBody(4),
+    // Texte vers la partie large du triangle (centre de gravite a w/3).
+    labelAt: { x: 1.6, y: 2, anchor: "middle" },
+  },
   S: {
     key: "S", label: "Sommateur", letter: "s", w: 2, h: 2,
     ports: [
@@ -344,8 +360,59 @@ const BY_LETTER = new Map<string, SymbolDef>(Object.values(SYMBOLS).filter((d) =
 
 /** Maj+lettre : variante du symbole de la lettre minuscule. */
 const SHIFT_VARIANT: Partial<Record<string, SymKey>> = {
-  c: "Cp", q: "Qp", m: "Mp", v: "Vm", a: "Am", r: "Pot", o: "X",
+  c: "Cp", q: "Qp", m: "Mp", v: "Vm", a: "Am", r: "Pot", o: "X", g: "Gain",
 };
+
+/** Maj+lettre qui pose un symbole deja rempli (bloc integrateur). */
+export const PRESETS: Partial<Record<string, { sym: SymKey; value: string; label: string }>> = {
+  B: { sym: "B", value: "∫dt", label: "Intégrateur" },
+};
+
+/** Symbole pre-rempli d'une touche (Maj+B : integrateur), sinon rien. */
+export function presetByKey(key: string): { sym: SymKey; value: string; label: string } | undefined {
+  return key.length === 1 ? PRESETS[key] : undefined;
+}
+
+/* ---------------- symboles a longueur variable (bloc, gain) ---------------- */
+
+/** Symboles qui s'allongent selon leur texte (largeur `SchemaPart.w`). */
+export const STRETCH = new Set<SymKey>(["B", "Gain"]);
+
+const stretched = new Map<string, SymbolDef>();
+
+/**
+ * Definition d'un symbole a la largeur `w` (bloc, gain) : boite, borne de
+ * sortie, dessin et place du texte suivent. Sans `w` (ancien bloc) ou pour
+ * les autres symboles : la definition de la table.
+ */
+export function symbolFor(key: SymKey, w?: number): SymbolDef {
+  const d = SYMBOLS[key];
+  if (!w || w === d.w || !STRETCH.has(key) || !Number.isInteger(w) || w < 2) return d;
+  const k = `${key}:${w}`;
+  let s = stretched.get(k);
+  if (!s) {
+    s = {
+      ...d, w,
+      ports: d.ports.map((p) => (p.name === "out" ? { ...p, x: w } : { ...p })),
+      body: key === "Gain" ? gainBody(w) : rect(0, 0, w, d.h),
+      labelAt: { ...d.labelAt, x: key === "Gain" ? Math.round(w * 0.4 * 100) / 100 : w / 2 },
+    };
+    stretched.set(k, s);
+  }
+  return s;
+}
+
+/**
+ * Largeur (cases, entiere) d'un bloc ou d'un gain pour que son texte tienne
+ * dedans ; `textW` = encombrement estime du texte en cases. Bloc : au moins
+ * 4, texte + une case de chaque cote. Gain : le texte, centre a 0,4 w, tient
+ * dans la hauteur du triangle (au moins 4).
+ */
+export function fitWidth(key: SymKey, textW: number): number {
+  if (key === "Gain") return Math.max(4, Math.ceil(textW * 2.1 - 1e-9));
+  if (key === "B") return Math.max(4, Math.ceil(textW + 1.6 - 1e-9));
+  return SYMBOLS[key].w;
+}
 
 /**
  * Symbole pose par une touche. Minuscule : le symbole de la lettre. Majuscule :
@@ -384,8 +451,8 @@ export function rotatePoint(x: number, y: number, rot: Rot, w: number, h: number
  * haut-gauche de sa boite tournee. Miroir = symetrie gauche-droite a rot 0,
  * appliquee avant la rotation.
  */
-export function portsAt(key: SymKey, x: number, y: number, rot: Rot, mirror = false): Port[] {
-  const d = SYMBOLS[key];
+export function portsAt(key: SymKey, x: number, y: number, rot: Rot, mirror = false, w?: number): Port[] {
+  const d = symbolFor(key, w);
   return d.ports.map((p) => {
     const px = mirror ? d.w - p.x : p.x;
     const r = rotatePoint(px, p.y, rot, d.w, d.h);

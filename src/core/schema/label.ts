@@ -36,13 +36,18 @@ function prepare(line: string): string {
   return line
     // « Δi_L » : la lettre grecque collee a la grandeur.
     .replace(new RegExp(`([${GREEK}])(?=[A-Za-z])`, "g"), "$1 ")
+    // « 2mω_0 » : la lettre grecque collee derriere un facteur (pas Ω ni µ : « 10 kΩ » est une unite).
+    .replace(/([A-Za-z0-9])(?=[δαβγεθλπρστφωΔ])/g, "$1 ")
     // « i_L max » -> « i_Lmax » (relu i_{L max}).
     .replace(new RegExp(`(_[A-Za-z0-9]+) (${SUB_WORDS})\\b`, "g"), "$1$2");
 }
 
 /** Indice « Lmax » : un petit espace avant max, min, moy, eff. */
 function finish(tex: string): string {
-  return tex.replace(/_\{([A-Za-z0-9]+?)(max|min|moy|eff)\}/g, (_m, a: string, b: string) => `_{${a}\\,${b}}`);
+  return tex
+    // « 2 m ω_0 » : m suivi d'un autre facteur est une grandeur, pas le metre.
+    .replace(/\\mathrm\{([a-zA-Z])\}(?=\\,\s*(?:\\[a-zA-Z]+|[a-zA-Z]))/g, "$1")
+    .replace(/_\{([A-Za-z0-9]+?)(max|min|moy|eff)\}/g, (_m, a: string, b: string) => `_{${a}\\,${b}}`);
 }
 
 function texEsc(s: string): string {

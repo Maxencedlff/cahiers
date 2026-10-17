@@ -11,6 +11,7 @@ import { dividerLabel, leafName, openableDividers, type DividerNode } from "../c
 import type { Spot } from "../core/position";
 import type { ColorKey } from "../core/types";
 import { notebookSquare, pageThumb } from "./sidebar";
+import { isFirstRun } from "../core/storage/location";
 
 export interface MenuHost {
   repo: Repo;
@@ -36,6 +37,19 @@ export interface MenuHost {
   adoptNotebook?: (dir: string, title: string, color: string) => Promise<void>;
   /** Rend ces dossiers aux « Autres dossiers » (leur cahier.json part a la corbeille). */
   unmarkNotebooks?: (dirs: string[]) => Promise<void>;
+  /** Lien discret du premier lancement : ranger les cahiers dans un dossier synchronise. */
+  useSyncFolder?: () => void;
+}
+
+/** Premier lancement deja accueilli sur cette machine (dialogue ouvert une fois). */
+const WELCOME_KEY = "cahiers.welcome.v1";
+
+function welcomed(): boolean {
+  try { return localStorage.getItem(WELCOME_KEY) === "1"; } catch { return true; }
+}
+
+function markWelcomed(): void {
+  try { localStorage.setItem(WELCOME_KEY, "1"); } catch { /* stockage indisponible */ }
 }
 
 /** L'accueil, ce qu'il fait du clavier, et ce que la barre laterale montre. */
@@ -106,6 +120,16 @@ export async function buildMenu(host: MenuHost): Promise<MenuScreen> {
   const inner = el("div", { class: "screen-inner home" });
   const screen = el("div", { class: "screen menu-screen" }, inner);
   const usedColors = notebooks.map((n) => n.meta.color);
+
+  // Premier lancement (rien que Vrac, vide) : creer sa premiere matiere,
+  // directement, sans dossier a choisir (decision du 16/10/2026).
+  if (isFirstRun(notebooks, others, VRAC)) {
+    inner.append(welcomeBlock(host, usedColors));
+    if (!welcomed()) {
+      markWelcomed();
+      setTimeout(() => { if (inner.isConnected) void newNotebook(host, usedColors); }, 0);
+    }
+  }
 
   // « Reprendre » : derniere position, un clic (ou Entree).
   const resume = resumeSpot(host, notebooks);
@@ -227,6 +251,22 @@ export async function buildMenu(host: MenuHost): Promise<MenuScreen> {
   };
 
   return { root: screen, onKey, notebooks, flagCount: flags.length };
+}
+
+/** Accueil du premier lancement : « Créer une matière », et le lien vers un dossier synchronise. */
+function welcomeBlock(host: MenuHost, usedColors: string[]): HTMLElement {
+  return el("div", { class: "welcome" },
+    el("h2", { class: "home-h1" }, "Bienvenue dans Cahiers"),
+    el("p", { class: "muted" },
+      "Une matière = un cahier, avec ses intercalaires (Cours, TD, TP…). Tout est rangé dans l'appli, rien à configurer."),
+    el("div", { class: "welcome-actions" },
+      el("button", { class: "primary welcome-create", onclick: () => void newNotebook(host, usedColors) },
+        icon("plus", 18), "Créer une matière"),
+      host.useSyncFolder
+        ? el("button", { class: "ghost welcome-sync small", onclick: () => host.useSyncFolder!() },
+          "Utiliser un dossier synchronisé (OneDrive, iCloud Drive…)")
+        : null),
+  );
 }
 
 /**

@@ -16,7 +16,7 @@ export type Command =
   | "closeTab" | "nextTab" | "prevTab" | "split" | "swap" | "closeSplit"
   | "exportPage" | "exportAll" | "help" | "zoomIn" | "zoomOut" | "zoomReset"
   | "copy" | "cut" | "paste" | "sendCalc" | "newDivider" | "review" | "exportWord" | "exportWordAll" | "importPdf" | "viewMode"
-  | "maths" | "theme" | "solveCalc" | "settings" | "sidebar" | "schema";
+  | "maths" | "theme" | "solveCalc" | "settings" | "sidebar" | "schema" | "table";
 
 export type Group = "Pendant le cours" | "Pages et intercalaires" | "Outils et couleurs" | "Formules" | "Fenêtres";
 
@@ -91,6 +91,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   ctrl("z", true, "redo", "Rétablir", "Pendant le cours"),
   ctrl("l", false, "calc", "Calculatrice", "Pendant le cours", true),
   ctrl("h", true, "schema", "Insérer un schéma (électrique ou schéma-bloc) au curseur : flèches = fil, lettre = composant, Échap = fermer", "Pendant le cours", true),
+  ctrl("g", true, "table", "Insérer un tableau au curseur : Tab case suivante (dans la dernière : nouvelle ligne), Maj+Tab précédente, Entrée case du dessous, Échap sortir", "Pendant le cours"),
+  { keys: "``` puis Entrée", label: "Bloc de code (```python, ```c… : coloration) ; Tab = 4 espaces, Échap ou Ctrl+Entrée pour en sortir", group: "Pendant le cours" },
   ctrl("l", true, "sendCalc", "Envoyer le dernier résultat de la calculatrice dans la page (au curseur du texte, sinon en bas)", "Pendant le cours"),
   ctrl("f", false, "search", "Rechercher dans tous les cahiers (aussi Ctrl+K)", "Pendant le cours", true),
   ctrl("k", false, "search", "Rechercher (comme Ctrl+F)", "Pendant le cours"),

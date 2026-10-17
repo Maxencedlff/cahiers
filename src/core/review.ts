@@ -12,7 +12,7 @@
 
 import type { Block, ColorKey, Page, Stroke } from "./types";
 import { PALETTE } from "./palette";
-import { parseDoc, texToPlain } from "./text/doc";
+import { flattenTables, parseDoc, texToPlain } from "./text/doc";
 import { cachedBounds, unionBounds, type Bounds } from "./ink/stroke";
 
 /** Les 5 couleurs filtrables, dans l'ordre de la palette. */
@@ -142,8 +142,8 @@ export function textRuns(content: string, blockColor?: ColorKey): { color: Color
     run = null;
     pendingBr = 0;
   };
-  for (const t of parseDoc(content)) {
-    if (t.kind === "line") continue;
+  for (const t of flattenTables(parseDoc(content))) {
+    if (t.kind === "line" || t.kind === "table" || t.kind === "codeblock") continue;
     if (t.kind === "br") { if (run) pendingBr++; continue; }
     if (t.kind === "image" || t.kind === "link") { close(); continue; }
     const c = t.color ?? blockColor;

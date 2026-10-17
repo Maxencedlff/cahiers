@@ -12,7 +12,8 @@
  * dernier noeud, Tab choisit une borne libre et Entree la relie.
  */
 import type { SchemaBlock, SchemaNote, SchemaPart } from "../types";
-import { SYMBOLS, portsAt, symbolByLetter, type Port, type SymKey } from "./symbols";
+import { SYMBOLS, STRETCH, fitWidth, portsAt, symbolByLetter, symbolFor, type Port, type SymKey } from "./symbols";
+import { labelWidth } from "./label";
 
 export interface Pt { x: number; y: number }
 export type Dir = "right" | "left" | "up" | "down";
@@ -54,19 +55,19 @@ function isSym(k: string): k is SymKey { return Object.prototype.hasOwnProperty.
 /** Bornes d'une piece posee, en coordonnees de grille. */
 export function partPorts(p: SchemaPart): Port[] {
   if (!isSym(p.sym)) return [];
-  return portsAt(p.sym, p.x, p.y, p.rot ?? 0, p.mirror);
+  return portsAt(p.sym, p.x, p.y, p.rot ?? 0, p.mirror, p.w);
 }
 
 /** Boite d'une piece posee (dimensions tournees). */
 export function partBox(p: SchemaPart): { x: number; y: number; w: number; h: number } {
-  const d = isSym(p.sym) ? SYMBOLS[p.sym] : { w: 2, h: 2 };
+  const d = isSym(p.sym) ? symbolFor(p.sym, p.w) : { w: 2, h: 2 };
   const turned = (p.rot ?? 0) % 180 !== 0;
   return { x: p.x, y: p.y, w: turned ? d.h : d.w, h: turned ? d.w : d.h };
 }
 
 /** Coin haut-gauche ou poser `sym` pour que sa borne `port` tombe sur `at`. */
-export function placeFor(sym: SymKey, port: string, at: Pt, rot: Rot, mirror?: boolean): Pt {
-  const p = portsAt(sym, 0, 0, rot, mirror).find((q) => q.name === port);
+export function placeFor(sym: SymKey, port: string, at: Pt, rot: Rot, mirror?: boolean, w?: number): Pt {
+  const p = portsAt(sym, 0, 0, rot, mirror, w).find((q) => q.name === port);
   return p ? { x: at.x - p.x, y: at.y - p.y } : { x: at.x, y: at.y };
 }
 
@@ -327,8 +328,9 @@ export function wireAt(s: SchemaBlock, p: { x: number; y: number }, tol = 0.4): 
  * piece le recouvre, ses deux bouts arrivent sur ses bornes. Rend la piece,
  * ou null si le segment est trop court ou si ce n'est pas un dipole.
  */
-export function insertOnWire(s: SchemaBlock, sym: SymKey, wire: number, seg: number, near: Pt): SchemaPart | null {
-  const def = SYMBOLS[sym];
+export function insertOnWire(s: SchemaBlock, sym: SymKey, wire: number, seg: number, near: Pt, width?: number): SchemaPart | null {
+  // Bloc ou gain : `width` = sa largeur (texte deja connu), sinon celle du symbole.
+  const def = symbolFor(sym, width);
   if (!def.through) return null;
   const pts = wirePts(s.wires[wire]);
   const a = pts[seg], b = pts[seg + 1];
@@ -345,7 +347,8 @@ export function insertOnWire(s: SchemaBlock, sym: SymKey, wire: number, seg: num
   const start = { x: a.x + step.x * off, y: a.y + step.y * off };
   const end = { x: start.x + step.x * def.w, y: start.y + step.y * def.w };
   const o = orientFor(sym, dir);
-  const part = addPart(s, sym, placeFor(sym, o.entry, start, o.rot), o.rot);
+  const part = addPart(s, sym, placeFor(sym, o.entry, start, o.rot, false, def.w), o.rot);
+  if (def.w !== SYMBOLS[sym].w) part.w = def.w;
   s.wires.splice(wire, 1);
   addWire(s, [...pts.slice(0, seg + 1), start]);
   addWire(s, [end, ...pts.slice(seg + 1)]);
@@ -419,7 +422,7 @@ export function toggleOpen(s: SchemaBlock, id: string): boolean {
     delete part.was;
     return true;
   }
-  if (!isSym(part.sym) || !SYMBOLS[part.sym].through || SYMBOLS[part.sym].w !== 4) return false;
+  if (!isSym(part.sym) || SYMBOLS[part.sym].through?.[0] !== "a" || SYMBOLS[part.sym].w !== 4) return false;
   part.was = part.sym;
   part.sym = "X";
   return true;
@@ -606,6 +609,244 @@ export function pasteGroup(s: SchemaBlock, g: Pick<SchemaBlock, "parts" | "wires
     (s.notes ??= []).push(n);
   }
   return out;
+}
+
+/* ---------------- schemas-blocs : bloc a la taille du texte, signes, retours ---------------- */
+
+/** Encombrement du texte d'un bloc ou d'un gain, en cases (comme les etiquettes : 0,95 case de haut). */
+function valueTextW(v: string | undefined): number {
+  return labelWidth(v ?? "") * 0.95;
+}
+
+/** Point decale de `d` cases dans le sens `v`. */
+function along(p: Pt, v: Pt, d: number): Pt { return { x: p.x + v.x * d, y: p.y + v.y * d }; }
+
+/**
+ * Bloc ou gain mis a la largeur `w` (cases) : sa borne d'entree ne bouge
+ * pas, la sortie avance (ou recule). Pour garder la place, tout ce qui est
+ * au-dela de l'ancienne sortie (pieces, fils, annotations) glisse d'autant,
+ * comme on insere des colonnes ; un retour qui enjambe le bloc s'allonge.
+ * Retrecir ne se fait que si la bande liberee est vide. Rend l'ancienne et
+ * la nouvelle place de la sortie (le curseur clavier la suit), ou null.
+ */
+export function stretchPart(s: SchemaBlock, id: string, w: number): { from: Pt; to: Pt } | null {
+  const part = s.parts.find((p) => p.id === id);
+  if (!part || !isSym(part.sym) || !STRETCH.has(part.sym)) return null;
+  const sym = part.sym;
+  const oldW = part.w ?? SYMBOLS[sym].w;
+  if (w === oldW || w < 2) return null;
+  const before = partPorts(part);
+  const inB = before.find((q) => q.name === "in")!, outB = before.find((q) => q.name === "out")!;
+  const dir = { x: Math.sign(outB.x - inB.x), y: Math.sign(outB.y - inB.y) };
+  const delta = w - oldW;
+  const shift = along({ x: 0, y: 0 }, dir, delta);
+  // Coordonnee le long du sens de la sortie : « au-dela » = au moins l'ancienne sortie.
+  const key = (p: Pt) => p.x * dir.x + p.y * dir.y;
+  const edge = key(outB);
+  const others = s.parts.filter((p) => p !== part);
+  const beyond = (p: Pt) => key(p) >= edge - 1e-9;
+  const boxLo = (q: SchemaPart) => { const b = partBox(q); return Math.min(key({ x: b.x, y: b.y }), key({ x: b.x + b.w, y: b.y + b.h })); };
+  const boxHi = (q: SchemaPart) => { const b = partBox(q); return Math.max(key({ x: b.x, y: b.y }), key({ x: b.x + b.w, y: b.y + b.h })); };
+  // Une piece a cheval sur l'ancienne sortie : on ne peut pas inserer de colonnes proprement.
+  let room = !others.some((q) => boxLo(q) < edge - 1e-9 && partPorts(q).some((r) => beyond(r)));
+  if (delta < 0) {
+    // Retrecir : rien entre la nouvelle et l'ancienne sortie.
+    const lo = edge + delta;
+    const inBand = (v: number) => v > lo + 1e-9 && v < edge - 1e-9;
+    const busy = s.wires.some((wi) => wirePts(wi).some((p) => inBand(key(p)) && !(p.y === outB.y && p.x === outB.x)))
+      || others.some((q) => boxHi(q) > lo + 1e-9 && boxLo(q) < edge - 1e-9)
+      || (s.notes ?? []).some((n) => (n.x !== undefined && n.y !== undefined && inBand(key({ x: n.x, y: n.y }))) || (n.x2 !== undefined && n.y2 !== undefined && inBand(key({ x: n.x2, y: n.y2 }))));
+    if (busy || !room) return null;
+  }
+  // Nouvelle largeur, l'entree reste a sa place.
+  part.w = w;
+  if (w === SYMBOLS[sym].w) delete part.w;
+  const inA = partPorts(part).find((q) => q.name === "in")!;
+  part.x += inB.x - inA.x;
+  part.y += inB.y - inA.y;
+  const after = partPorts(part);
+  const outA = after.find((q) => q.name === "out")!;
+  if (room) {
+    for (const q of others) if (boxLo(q) >= edge - 1e-9) { q.x += shift.x; q.y += shift.y; }
+    for (const wi of s.wires) {
+      const p = wirePts(wi).map((q) => (beyond(q) ? { x: q.x + shift.x, y: q.y + shift.y } : q));
+      wi.pts = flat(simplify(p));
+    }
+    for (const n of s.notes ?? []) {
+      if (n.x !== undefined && n.y !== undefined && beyond({ x: n.x, y: n.y })) { n.x += shift.x; n.y += shift.y; }
+      if (n.x2 !== undefined && n.y2 !== undefined && beyond({ x: n.x2, y: n.y2 })) { n.x2 += shift.x; n.y2 += shift.y; }
+    }
+    s.wires = s.wires.filter((wi) => wi.pts.length >= 4);
+  } else {
+    reattach(s, before, after);
+  }
+  return { from: { x: outB.x, y: outB.y }, to: { x: outA.x, y: outA.y } };
+}
+
+/**
+ * Valeur d'une piece (vide : retiree). Bloc et gain : leur largeur suit le
+ * texte (`fitWidth`), voir `stretchPart`. Rend le deplacement de la sortie.
+ */
+export function setPartValue(s: SchemaBlock, id: string, value: string): { from: Pt; to: Pt } | null {
+  const part = s.parts.find((p) => p.id === id);
+  if (!part) return null;
+  const v = value.trim();
+  if (v) part.value = v; else delete part.value;
+  if (!isSym(part.sym) || !STRETCH.has(part.sym)) return null;
+  return stretchPart(s, id, fitWidth(part.sym, valueTextW(part.value)));
+}
+
+/** Entrees d'un sommateur, dans l'ordre de sa valeur (« +-- » : in, in2, in3). */
+export const SUM_INPUTS = ["in", "in2", "in3"] as const;
+
+/** Bornes du sommateur ou arrive un fil. */
+export function sumConnected(s: SchemaBlock, part: SchemaPart): Set<string> {
+  const out = new Set<string>();
+  for (const q of partPorts(part)) {
+    if (!(SUM_INPUTS as readonly string[]).includes(q.name)) continue;
+    if (s.wires.some((w) => { const p = wirePts(w); return p.length >= 2 && (samePt(p[0], q) || samePt(p[p.length - 1], q)); })) out.add(q.name);
+  }
+  return out;
+}
+
+/**
+ * Signe de chaque entree d'un sommateur : celui de sa valeur s'il est donne
+ * (« +- », « +-- »), sinon + a gauche (in) et − sur les autres (un retour
+ * arrive presque toujours par le haut ou par le bas).
+ */
+export function sumSigns(part: SchemaPart): Record<string, "+" | "−"> {
+  const v = (part.value ?? "").replace(/\s/g, "").replace(/−/g, "-");
+  const out: Record<string, "+" | "−"> = {};
+  SUM_INPUTS.forEach((name, i) => {
+    out[name] = v[i] === "-" ? "−" : v[i] === "+" ? "+" : name === "in" ? "+" : "−";
+  });
+  return out;
+}
+
+/** Un clic sur un signe du sommateur : + devient −, − devient +. */
+export function toggleSign(s: SchemaBlock, id: string, port: string): boolean {
+  const part = s.parts.find((p) => p.id === id);
+  const i = (SUM_INPUTS as readonly string[]).indexOf(port);
+  if (!part || part.sym !== "S" || i < 0) return false;
+  const signs = sumSigns(part);
+  signs[port] = signs[port] === "+" ? "−" : "+";
+  part.value = SUM_INPUTS.map((n) => (signs[n] === "+" ? "+" : "-")).join("");
+  return true;
+}
+
+/** Sens vers l'exterieur d'une borne (du centre de la piece vers elle), sur un axe. */
+export function portOutward(part: SchemaPart, port: Pt): Pt {
+  const b = partBox(part);
+  const dx = port.x - (b.x + b.w / 2), dy = port.y - (b.y + b.h / 2);
+  if (Math.abs(dx) >= Math.abs(dy)) return { x: Math.sign(dx) || 1, y: 0 };
+  return { x: 0, y: Math.sign(dy) || 1 };
+}
+
+/** Piece et borne posees exactement en `p`. */
+export function portAt(s: SchemaBlock, p: Pt): { part: SchemaPart; port: Port } | null {
+  for (const part of s.parts) for (const port of partPorts(part)) if (samePt(port, p)) return { part, port };
+  return null;
+}
+
+/** Borne libre la plus proche de `g` (a `tol` cases pres), pour aimanter la fin d'un fil. */
+export function freePortNear(s: SchemaBlock, g: { x: number; y: number }, tol = 0.9): Pt | null {
+  let best: Pt | null = null, bd = tol;
+  for (const f of freePorts(s)) {
+    const d = Math.hypot(f.port.x - g.x, f.port.y - g.y);
+    if (d <= bd) { bd = d; best = { x: f.port.x, y: f.port.y }; }
+  }
+  return best;
+}
+
+const BLOCK_SYMS = new Set(["B", "Gain", "S"]);
+
+/** Borne d'entree d'un schema-bloc (bloc, gain, sommateur) en `p`. */
+export function blockInputAt(s: SchemaBlock, p: Pt): boolean {
+  const hit = portAt(s, p);
+  return !!hit && BLOCK_SYMS.has(hit.part.sym) && hit.port.name !== "out";
+}
+
+/** Le segment passe-t-il dans la boite elargie de `pad` (pad < 0 : interieur strict) ? */
+function segCrossesBox(a: Pt, b: Pt, r: { x: number; y: number; w: number; h: number }, pad = -0.05): boolean {
+  const x0 = r.x - pad, x1 = r.x + r.w + pad, y0 = r.y - pad, y1 = r.y + r.h + pad;
+  if (a.y === b.y) return a.y > y0 && a.y < y1 && Math.max(a.x, b.x) > x0 && Math.min(a.x, b.x) < x1;
+  if (a.x === b.x) return a.x > x0 && a.x < x1 && Math.max(a.y, b.y) > y0 && Math.min(a.y, b.y) < y1;
+  return false;
+}
+
+/** Longueur commune d'un segment avec les fils deja poses (deux fils l'un sur l'autre : illisible). */
+function overlapLen(s: SchemaBlock, a: Pt, b: Pt): number {
+  let o = 0;
+  for (const [c, d] of segments(s)) {
+    if (a.y === b.y && c.y === d.y && c.y === a.y) {
+      o += Math.max(0, Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x)) - Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x)));
+    } else if (a.x === b.x && c.x === d.x && c.x === a.x) {
+      o += Math.max(0, Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y)) - Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y)));
+    }
+  }
+  return o;
+}
+
+/**
+ * Fil a angles droits de `from` vers `to` qui contourne les pieces : sort
+ * d'une borne dans son sens, arrive sur une borne par son cote (entree − du
+ * bas d'un sommateur : par le bas), et passe par-dessous ou par-dessus ce
+ * qui se trouve entre les deux (boucle de retour), a 3 cases du bord pour
+ * qu'un gain tienne ensuite sur le retour. Le chemin le plus court sans
+ * traverser de piece ni longer un autre fil est choisi.
+ */
+export function routeAround(s: SchemaBlock, from0: Pt, to0: Pt): Pt[] {
+  const from = { x: from0.x, y: from0.y }, to = { x: to0.x, y: to0.y };
+  const src = portAt(s, from), dst = portAt(s, to);
+  const u = src ? portOutward(src.part, src.port) : null;
+  const v = dst ? portOutward(dst.part, dst.port) : null;
+  const a1 = u ? along(from, u, 1) : from;
+  const b1 = v ? along(to, v, 1) : to;
+  const boxes = s.parts.map(partBox);
+  // Ni dans une piece, ni a moins d'une case de son bord (sauf la borne de depart ou d'arrivee).
+  const PAD = 0.9;
+  const own = s.parts.map((p) => p === src?.part || p === dst?.part);
+  const hits = (p: Pt, q: Pt) => boxes.some((b, i) => {
+    if (own[i] && (samePt(p, from) || samePt(q, from) || samePt(p, to) || samePt(q, to))) return segCrossesBox(p, q, b);
+    return segCrossesBox(p, q, b, PAD);
+  });
+  const cands: Pt[][] = [];
+  const mid = (pts: Pt[]) => cands.push(simplify([from, ...pts, to]));
+  mid([a1, { x: b1.x, y: a1.y }, b1]);
+  mid([a1, { x: a1.x, y: b1.y }, b1]);
+  // Par-dessous / par-dessus tout ce qui est entre les deux (pieces et fils).
+  const xa = Math.min(a1.x, b1.x), xb = Math.max(a1.x, b1.x);
+  let lo = Math.min(from.y, to.y), hi = Math.max(from.y, to.y);
+  for (const b of boxes) if (b.x < xb + 0.5 && b.x + b.w > xa - 0.5) { lo = Math.min(lo, b.y); hi = Math.max(hi, b.y + b.h); }
+  for (const [c, d] of segments(s)) {
+    if (c.y === d.y && Math.max(c.x, d.x) > xa && Math.min(c.x, d.x) < xb) { lo = Math.min(lo, c.y); hi = Math.max(hi, c.y); }
+  }
+  for (const y of [hi + 3, lo - 3]) mid([a1, { x: a1.x, y }, { x: b1.x, y }, b1]);
+  // Idem a gauche / a droite (retour vertical).
+  const ya = Math.min(a1.y, b1.y), yb = Math.max(a1.y, b1.y);
+  let l = Math.min(from.x, to.x), r = Math.max(from.x, to.x);
+  for (const b of boxes) if (b.y < yb + 0.5 && b.y + b.h > ya - 0.5) { l = Math.min(l, b.x); r = Math.max(r, b.x + b.w); }
+  for (const x of [r + 3, l - 3]) mid([a1, { x, y: a1.y }, { x, y: b1.y }, b1]);
+  let best: Pt[] = routeOrtho(from, to), bestScore = Infinity;
+  for (const c of cands) {
+    let len = 0, bad = false, over = 0;
+    for (let i = 0; i + 1 < c.length; i++) {
+      const p = c[i], q = c[i + 1];
+      if (p.x !== q.x && p.y !== q.y) { bad = true; break; }
+      len += Math.abs(q.x - p.x) + Math.abs(q.y - p.y);
+      if (hits(p, q)) { bad = true; break; }
+      over += overlapLen(s, p, q);
+      // Pas de demi-tour sur soi-meme.
+      if (i > 0) {
+        const o = c[i - 1];
+        if ((o.x - p.x) * (q.x - p.x) + (o.y - p.y) * (q.y - p.y) > 0) { bad = true; break; }
+      }
+    }
+    if (bad) continue;
+    const score = len + 4 * (c.length - 2) + 50 * over;
+    if (score < bestScore) { bestScore = score; best = c; }
+  }
+  return best;
 }
 
 /* ---------------- dimensions ---------------- */

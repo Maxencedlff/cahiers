@@ -1710,7 +1710,7 @@ export function latexToSource(tex: string): string | null {
 
 /** Lettre grecque tapee en toutes lettres, hors formule ("pi" -> π). */
 // Pas "Pi" (Raspberry Pi). "lambda" oui : dans du code (entre `), rien n'est remplace.
-const GREEK_WORDS: Record<string, string> = {
+export const GREEK_WORDS: Readonly<Record<string, string>> = {
   alpha: "α", beta: "β", gamma: "γ", delta: "δ", eps: "ε", epsilon: "ε",
   eta: "η", theta: "θ", lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", kappa: "κ", zeta: "ζ", chi: "χ", psi: "ψ",
   pi: "π", rho: "ρ", sigma: "σ",

@@ -5,8 +5,8 @@
  * formules (KaTeX) a leur place. Unites : grille (symbols.ts GRID).
  */
 import type { SchemaBlock, SchemaNote, SchemaPart } from "../types";
-import { SYMBOLS, rotatePoint, type SymKey } from "./symbols";
-import { DIRS, junctions, partBox, partPorts, schemaBounds, segments, wirePts, type Dir, type Pt } from "./model";
+import { SYMBOLS, rotatePoint, symbolFor, type SymKey } from "./symbols";
+import { DIRS, junctions, partBox, partPorts, portOutward, schemaBounds, segments, sumConnected, sumSigns, wirePts, type Dir, type Pt } from "./model";
 import { labelWidth } from "./label";
 
 export interface SchemaLabel {
@@ -25,6 +25,8 @@ export interface SchemaLabel {
   auto?: boolean;
   /** Sens ou l'ecarter d'abord (vers l'exterieur de ce qu'elle nomme). */
   away?: Pt;
+  /** Signe d'une entree de sommateur (borne in, in2, in3) : un clic le change. */
+  sign?: string;
 }
 
 /** Boite estimee d'une etiquette, en cases (le texte fait 0,95 case). */
@@ -52,7 +54,7 @@ function isSym(k: string): k is SymKey { return Object.prototype.hasOwnProperty.
 /** Transformation SVG d'une piece : miroir (avant), rotation horaire, puis position. */
 export function partTransform(p: SchemaPart): string {
   if (!isSym(p.sym)) return `translate(${p.x} ${p.y})`;
-  const { w, h } = SYMBOLS[p.sym];
+  const { w, h } = symbolFor(p.sym, p.w);
   const rot = p.rot ?? 0;
   const m = rot === 90 ? `matrix(0 1 -1 0 ${h} 0)` : rot === 180 ? `matrix(-1 0 0 -1 ${w} ${h})`
     : rot === 270 ? `matrix(0 -1 1 0 0 ${w})` : "";
@@ -99,19 +101,21 @@ function partLabels(p: SchemaPart): SchemaLabel[] {
   // Sommateur : sa valeur est le jeu de signes, dessine a ses entrees.
   const name = p.name?.trim(), value = p.value?.trim() && p.sym !== "S" ? valueText(p.sym, p.value) : undefined;
   if (!name && !value) return [];
-  const d = SYMBOLS[p.sym];
+  const d = symbolFor(p.sym, p.w);
   // Le texte ne tourne pas avec la piece : un dipole trace vers la gauche
   // (rot 180) garde son nom au-dessus, vers le haut (270) a droite comme vers le bas.
-  const rot = (p.rot === 180 && d.through ? 0 : p.rot === 270 && d.through ? 90 : p.rot ?? 0) as 0 | 90 | 180 | 270;
+  // Gain : le texte reste dans la partie large du triangle, donc il le suit.
+  const keep = !!d.through && p.sym !== "Gain";
+  const rot = (p.rot === 180 && keep ? 0 : p.rot === 270 && keep ? 90 : p.rot ?? 0) as 0 | 90 | 180 | 270;
   const lx = p.mirror ? d.w - d.labelAt.x : d.labelAt.x;
   const r = rotatePoint(lx, d.labelAt.y, rot, d.w, d.h);
+  // Bloc, gain : le texte au centre, une seule etiquette.
+  const centered = d.labelAt.anchor === "middle" && d.labelAt.y > 0 && d.labelAt.y < d.h;
   // Piece verticale : l'etiquette passe a cote, alignee sur le bord.
   let anchor = d.labelAt.anchor;
-  if (rot === 90) anchor = "start";
-  else if (rot === 270) anchor = "end";
+  if (rot === 90 && !centered) anchor = "start";
+  else if (rot === 270 && !centered) anchor = "end";
   const at = { x: p.x + r.x, y: p.y + r.y };
-  // Bloc, sommateur : le texte au centre, une seule etiquette.
-  const centered = d.labelAt.anchor === "middle" && d.labelAt.y > 0 && d.labelAt.y < d.h;
   const out = { x: rot === 90 ? 1 : rot === 270 ? -1 : 0, y: rot === 0 || rot === 180 ? (r.y < d.h / 2 ? -1 : 1) : 0 };
   if (rot % 180 !== 0 || centered || !name || !value) {
     return [{ ...at, anchor, lines: [name, value].filter((x): x is string => !!x), part: p.id, field: name ? "name" : "value", auto: !centered, away: out }];
@@ -190,6 +194,17 @@ function current(n: SchemaNote, index: number): { svg: string; label: SchemaLabe
 
 /** Bornes d'entree des schemas-blocs : un fil qui y arrive porte une fleche. */
 const BLOCK_INPUTS = new Set(["in", "in2", "in3"]);
+/** Pieces des schemas-blocs (fleches aux entrees). */
+const BLOCK_PARTS = new Set(["B", "S", "Gain"]);
+
+/** Pointe pleine posee en `tip`, le fil arrivant de `from`. */
+function headAt(tip: Pt, from: Pt, cls: string): string {
+  const dx = Math.sign(tip.x - from.x), dy = Math.sign(tip.y - from.y);
+  const tail = { x: tip.x - dx * 0.55, y: tip.y - dy * 0.55 };
+  const h = 0.25;
+  const pts = dx ? `${tip.x},${tip.y} ${tail.x},${tail.y - h} ${tail.x},${tail.y + h}` : `${tip.x},${tip.y} ${tail.x - h},${tail.y} ${tail.x + h},${tail.y}`;
+  return `<polygon class="${cls}" points="${pts}" fill="currentColor" stroke="none"/>`;
+}
 
 /**
  * Schemas-blocs : fleche au bout de chaque fil qui entre dans un bloc ou un
@@ -207,33 +222,43 @@ function blockDecorations(s: SchemaBlock): { svg: string[]; labels: SchemaLabel[
     ends.set(`${p[0].x},${p[0].y}`, p[1]);
     ends.set(`${p[p.length - 1].x},${p[p.length - 1].y}`, p[p.length - 2]);
   }
+  const outs = new Set<string>();
   for (const part of s.parts) {
-    if (part.sym !== "B" && part.sym !== "S") continue;
+    if (!BLOCK_PARTS.has(part.sym)) continue;
     const ports = partPorts(part);
-    const connected = new Set<string>();
     for (const q of ports) {
+      if (q.name === "out") { outs.add(`${q.x},${q.y}`); continue; }
       if (!BLOCK_INPUTS.has(q.name)) continue;
       const from = ends.get(`${q.x},${q.y}`);
       if (!from) continue;
-      connected.add(q.name);
       // Pointe juste avant la borne, dans le sens du fil.
-      const dx = Math.sign(q.x - from.x), dy = Math.sign(q.y - from.y);
-      const tip = { x: q.x, y: q.y }, tail = { x: q.x - dx * 0.55, y: q.y - dy * 0.55 };
-      const h = 0.25;
-      const pts = dx ? `${tip.x},${tip.y} ${tail.x},${tail.y - h} ${tail.x},${tail.y + h}` : `${tip.x},${tip.y} ${tail.x - h},${tail.y} ${tail.x + h},${tail.y}`;
-      svg.push(`<polygon class="sch-in" points="${pts}" fill="currentColor" stroke="none"/>`);
+      svg.push(headAt(q, from, "sch-in"));
     }
     if (part.sym === "S") {
-      const signs = (part.value ?? "").replace(/\s/g, "").replace(/−/g, "-");
-      const order = ["in", "in2", "in3"];
+      const connected = sumConnected(s, part);
+      const signs = sumSigns(part);
       for (const q of ports) {
-        const i = order.indexOf(q.name);
-        if (i < 0 || (q.name !== "in" && !connected.has(q.name))) continue;
-        const sign = signs[i] === "-" ? "−" : signs[i] === "+" ? "+" : q.name === "in" ? "+" : "−";
-        const off = q.name === "in" ? { x: -0.55, y: -0.6 } : q.name === "in2" ? { x: -0.6, y: 0.55 } : { x: -0.6, y: -0.55 };
-        labels.push({ x: q.x + off.x, y: q.y + off.y, anchor: "middle", lines: [sign], part: part.id });
+        if (!BLOCK_INPUTS.has(q.name) || (q.name !== "in" && !connected.has(q.name))) continue;
+        // Pres de l'entree, cote amont du fil, decale sur le cote (+ en haut a gauche, − en bas a gauche...).
+        const v = portOutward(part, q);
+        const side = v.x ? { x: 0, y: -1 } : { x: -1, y: 0 };
+        labels.push({ x: q.x + v.x * 0.55 + side.x * 0.6, y: q.y + v.y * 0.55 + side.y * 0.6, anchor: "middle", lines: [signs[q.name]], part: part.id, sign: q.name });
       }
     }
+  }
+  // Sortie d'un schema-bloc : le fil qui en part et finit en l'air porte une fleche au bout (« y(t) → »).
+  const touched = (p: Pt) => s.parts.some((q) => partPorts(q).some((r) => r.x === p.x && r.y === p.y))
+    || segments(s).some(([a, b]) => (a.x === b.x ? p.x === a.x && p.y >= Math.min(a.y, b.y) && p.y <= Math.max(a.y, b.y) : p.y === a.y && p.x >= Math.min(a.x, b.x) && p.x <= Math.max(a.x, b.x)) && !(a.x === p.x && a.y === p.y) && !(b.x === p.x && b.y === p.y))
+    || s.wires.filter((w) => { const q = wirePts(w); return q.length >= 2 && [q[0], q[q.length - 1]].some((e) => e.x === p.x && e.y === p.y); }).length > 1;
+  // Un fil qui porte deja une fleche de courant (schema fait a la main) n'en recoit pas d'autre.
+  const onWire = (p: Pt[], n: SchemaNote) => n.kind === "i" && n.x !== undefined && n.y !== undefined
+    && p.some((q, i) => i > 0 && (q.x === p[i - 1].x ? n.x === q.x && n.y! >= Math.min(q.y, p[i - 1].y) && n.y! <= Math.max(q.y, p[i - 1].y) : n.y === q.y && n.x! >= Math.min(q.x, p[i - 1].x) && n.x! <= Math.max(q.x, p[i - 1].x)));
+  for (const w of s.wires) {
+    const p = wirePts(w);
+    if (p.length < 2 || (s.notes ?? []).some((n) => onWire(p, n))) continue;
+    const a = p[0], b = p[p.length - 1];
+    if (outs.has(`${a.x},${a.y}`) && !touched(b)) svg.push(headAt(b, p[p.length - 2], "sch-out"));
+    else if (outs.has(`${b.x},${b.y}`) && !touched(a)) svg.push(headAt(a, p[1], "sch-out"));
   }
   return { svg, labels };
 }
@@ -275,7 +300,7 @@ function segHitsBox(a: Pt, b: Pt, r: Box): boolean {
 function coreBox(p: SchemaPart): Box {
   const b = partBox(p);
   const d = isSym(p.sym) ? SYMBOLS[p.sym] : null;
-  if (d?.through && d.w === 4) {
+  if (d?.through?.[0] === "a" && d.w === 4) {
     return b.w > b.h ? { x: b.x + 1, y: b.y + 0.3, w: 2, h: b.h - 0.6 } : { x: b.x + 0.3, y: b.y + 1, w: b.w - 0.6, h: 2 };
   }
   return { x: b.x + 0.15, y: b.y + 0.15, w: b.w - 0.3, h: b.h - 0.3 };
@@ -332,7 +357,7 @@ export function drawSchema(s: SchemaBlock): SchemaDrawing {
   out.push("</g>");
   for (const p of s.parts) {
     if (!isSym(p.sym)) continue;
-    out.push(`<g class="sch-part" data-part="${esc(p.id)}" transform="${partTransform(p)}" fill="none" stroke="currentColor" stroke-width="${STROKE}" stroke-linecap="round" stroke-linejoin="round">${SYMBOLS[p.sym].body}</g>`);
+    out.push(`<g class="sch-part" data-part="${esc(p.id)}" transform="${partTransform(p)}" fill="none" stroke="currentColor" stroke-width="${STROKE}" stroke-linecap="round" stroke-linejoin="round">${symbolFor(p.sym, p.w).body}</g>`);
     labels.push(...partLabels(p));
   }
   const deco = blockDecorations(s);

@@ -25,10 +25,11 @@ import {
   freePorts, insertOnWire, mirrorPart, moveGroup, moveNote, movePart, newTurtle, partAt, partBox, partPorts, partsIn, pasteGroup,
   rotatePart, routeOrtho, schemaBounds, shortPart, toggleOpen, turtleConnect, turtleJump, turtleMove,
   turtleNextFree, turtleNode, turtlePlace, wireAt, wirePts, DIRS, type Dir, type Pt, type Rect, type Turtle,
+  blockInputAt, freePortNear, portAt, routeAround, samePt, setPartValue, toggleSign,
 } from "../core/schema/model";
 export { schemaWidth } from "../core/schema/model";
-import { SYMBOLS, symbolByLetter, type SymKey } from "../core/schema/symbols";
-import { isPartRef, labelTex } from "../core/schema/label";
+import { PRESETS, SYMBOLS, fitWidth, presetByKey, symbolByLetter, type SymKey } from "../core/schema/symbols";
+import { isPartRef, labelTex, labelWidth } from "../core/schema/label";
 import { TEMPLATES, templateByKey } from "../core/schema/templates";
 export { isPartRef };
 
@@ -104,13 +105,16 @@ let openEditor: { close: () => void } | null = null;
 export function schemaEditing(): boolean { return !!openEditor; }
 
 /** Valeur tapee juste apres la pose : les pieces qui en ont une. */
-const HAS_VALUE = new Set<SymKey>(["R", "C", "Cp", "L", "Pot", "V", "Vdc", "I", "B", "F", "Lamp"]);
+const HAS_VALUE = new Set<SymKey>(["R", "C", "Cp", "L", "Pot", "V", "Vdc", "I", "B", "F", "Lamp", "Gain"]);
 
-const PALETTE: { sym: SymKey; hint: string }[] = [
+const INTEGRATOR = PRESETS.B!;
+
+const PALETTE: { sym: SymKey; hint: string; value?: string; label?: string }[] = [
   { sym: "R", hint: "r" }, { sym: "C", hint: "c" }, { sym: "L", hint: "l" }, { sym: "D", hint: "d" },
   { sym: "V", hint: "v" }, { sym: "Vdc", hint: "u" }, { sym: "K", hint: "k" }, { sym: "A", hint: "a" },
   { sym: "Q", hint: "q" }, { sym: "G", hint: "g" }, { sym: "O", hint: "o" }, { sym: "X", hint: "⇧O" },
-  { sym: "B", hint: "b" }, { sym: "S", hint: "s" },
+  { sym: "B", hint: "b" }, { sym: "Gain", hint: "⇧G" }, { sym: "S", hint: "s" },
+  { sym: INTEGRATOR.sym, hint: "⇧B", value: INTEGRATOR.value, label: INTEGRATOR.label },
 ];
 
 /** Outils d'annotation de la palette (un clic les arme, ou les glisser sur la piece ou le fil). */
@@ -135,6 +139,9 @@ const HELP: [string, string][] = [
   ["Ctrl+C · Ctrl+V · Ctrl+A", "copier · coller · tout sélectionner"],
   ["Flèches · Maj+flèche", "fil au clavier · aller sans fil"],
   ["Lettre", "composant (r, c, l, d, v, k...) puis sa valeur ; au-dessus d'un fil : posé sur le fil"],
+  ["b · Maj+G · s · Maj+B", "schéma-bloc : bloc (s'élargit selon son texte) · gain (triangle) · comparateur · intégrateur ∫dt"],
+  ["Clic sur un signe du comparateur", "+ devient −, − devient +"],
+  ["Glisser d'une sortie vers une entrée", "boucle de retour tracée seule, par-dessous ou par-dessus (Ctrl+R sur un gain : il pointe à gauche)"],
   ["« . » · Tab · Entrée", "retenir un nœud · borne libre suivante · la relier"],
   ["Ctrl+R · Ctrl+M · Ctrl+flèche", "tourner (une flèche : la retourner) · miroir · déplacer"],
   ["Alt+U · Alt+I · Alt+T", "tension (encore : autre côté) · courant · texte"],
@@ -197,9 +204,10 @@ export function openSchemaEditor(o: EditorOptions): void {
   const head = el("div", { class: "sch-head" },
     s.under ? null : el("div", { class: "sch-pal" },
       ...PALETTE.map((p) => {
-        const btn = el("button", { class: "sch-pal-btn", title: `${SYMBOLS[p.sym].label} (${p.hint}) : cliquer pour le poser au curseur, ou le glisser à sa place` },
-          el("span", { class: "sch-pal-k" }, p.hint), SYMBOLS[p.sym].label);
-        paletteDrag(btn, () => { place(p.sym); root.focus(); }, (at) => dropPart(p.sym, at));
+        const label = p.label ?? SYMBOLS[p.sym].label;
+        const btn = el("button", { class: "sch-pal-btn", title: `${label} (${p.hint}) : cliquer pour le poser au curseur, ou le glisser à sa place` },
+          el("span", { class: "sch-pal-k" }, p.hint), label);
+        paletteDrag(btn, () => { place(p.sym, p.value); root.focus(); }, (at) => dropPart(p.sym, at, p.value));
         return btn;
       }),
       el("span", { class: "sch-pal-sep" }),
@@ -210,7 +218,7 @@ export function openSchemaEditor(o: EditorOptions): void {
         return btn;
       }),
       el("span", { class: "sch-pal-sep" }),
-      el("button", { class: "sch-pal-btn sch-models", title: "Montages et chronogrammes prêts à modifier", onclick: (e: MouseEvent) => templatesMenu(e.currentTarget as HTMLElement) }, "Modèles ▾"),
+      el("button", { class: "sch-pal-btn sch-models", title: "Montages, schémas-blocs et chronogrammes prêts à modifier", onclick: (e: MouseEvent) => templatesMenu(e.currentTarget as HTMLElement) }, "Modèles ▾"),
     ),
     hint,
     s.under ? null : el("button", { class: "sch-help-btn", title: "Tous les raccourcis (?)", onclick: () => { help.hidden = !help.hidden; root.focus(); } }, "?"),
@@ -352,13 +360,13 @@ export function openSchemaEditor(o: EditorOptions): void {
   /* ---- valeur (ou nom) d'une piece, tapee juste apres la pose ---- */
   const askValue = (part: SchemaPart, which: "value" | "name" = "value", then?: (key: string) => void) => {
     const b = partBox(part);
-    const ph = which === "name" ? "nom, ex. R1 ou R_f" : part.sym === "B" ? "fonction de transfert, ex. K/(1+tau p)" : "valeur, ex. 10k";
+    const ph = which === "name" ? "nom, ex. R1 ou R_f" : part.sym === "B" ? "fonction de transfert, ex. K/(1+tau p)" : part.sym === "Gain" ? "gain, ex. K, 1/τ, 2mω_0, ω_0^2" : "valeur, ex. 10k";
     field({ x: b.x + b.w + 0.4, y: b.y + b.h / 2 }, (which === "name" ? part.name : part.value) ?? "", ph, (v) => {
       const cur = (which === "name" ? part.name : part.value) ?? "";
       if (v === cur) return;
       edit(() => {
         if (which === "name") { if (v) part.name = v; else delete part.name; }
-        else if (v) part.value = v; else delete part.value;
+        else valueOf(part, v);
       });
     }, then);
   };
@@ -384,14 +392,23 @@ export function openSchemaEditor(o: EditorOptions): void {
     });
   };
 
+  /** Valeur d'une piece ; bloc et gain s'elargissent, le curseur clavier suit leur sortie. */
+  const valueOf = (part: SchemaPart, v: string) => {
+    const moved = setPartValue(s, part.id, v);
+    if (moved && samePt(t.at, moved.from)) t.at = { ...moved.to };
+  };
+
+  /** Bloc pre-rempli (integrateur) pose sur un fil : deja a la largeur de son texte. */
+  const presetWidth = (sym: SymKey, value?: string) => (value ? fitWidth(sym, labelWidth(value) * 0.95) : undefined);
+
   /* ---- actions ---- */
-  function place(sym: SymKey): void {
+  function place(sym: SymKey, value?: string): void {
     let placed: SchemaPart | null = null;
     edit(() => {
       // Lettre tapee au-dessus d'un fil (souris) : la piece se pose sur ce fil.
       if (hover?.wire && hover.fresh && SYMBOLS[sym].through) {
         const a0 = wirePts(s.wires[hover.wire.wire])[hover.wire.seg];
-        placed = insertOnWire(s, sym, hover.wire.wire, hover.wire.seg, hover.pt);
+        placed = insertOnWire(s, sym, hover.wire.wire, hover.wire.seg, hover.pt, presetWidth(sym, value));
         if (placed && a0) {
           // Le curseur repart de la borne la plus loin du debut du segment (sens du fil).
           const th = SYMBOLS[sym].through!;
@@ -401,25 +418,28 @@ export function openSchemaEditor(o: EditorOptions): void {
         }
       }
       if (!placed) placed = turtlePlace(s, t, sym);
+      if (placed && value) valueOf(placed, value);
     });
     if (hover) hover.fresh = false;
     if (!placed) return;
     selected = (placed as SchemaPart).id;
     selNote = null;
     paint();
+    if (value) return;
     if (HAS_VALUE.has(sym)) askValue(placed, "value", (key) => arrowKey(key, false));
   }
 
   /** Symbole glisse depuis la palette : pose la ou on le lache (sur un fil : insere dans le fil). */
-  function dropPart(sym: SymKey, g: { x: number; y: number }): void {
+  function dropPart(sym: SymKey, g: { x: number; y: number }, value?: string): void {
     let placed: SchemaPart | null = null;
     edit(() => {
       const w = wireAt(s, g, 0.6);
-      if (w && SYMBOLS[sym].through) placed = insertOnWire(s, sym, w.wire, w.seg, snapPt(g));
+      if (w && SYMBOLS[sym].through) placed = insertOnWire(s, sym, w.wire, w.seg, snapPt(g), presetWidth(sym, value));
       if (!placed) {
         const d = SYMBOLS[sym];
         placed = addPart(s, sym, { x: Math.round(g.x - d.w / 2), y: Math.round(g.y - d.h / 2) });
       }
+      if (placed && value) valueOf(placed, value);
     });
     if (!placed) return;
     selected = (placed as SchemaPart).id;
@@ -498,6 +518,7 @@ export function openSchemaEditor(o: EditorOptions): void {
     const item = (tp: typeof TEMPLATES[number]) => ({ label: tp.label, run: () => insertTemplate(tp.key) });
     contextMenu(at, [
       { title: "Montages" }, ...TEMPLATES.filter((x) => x.group === "Montages").map(item),
+      "sep", { title: "Schémas-blocs" }, ...TEMPLATES.filter((x) => x.group === "Schémas-blocs").map(item),
       "sep", { title: "Chronogrammes" }, ...TEMPLATES.filter((x) => x.group === "Chronogrammes").map(item),
     ], { label: "Modèles", onClose: () => root.focus() });
   }
@@ -692,6 +713,8 @@ export function openSchemaEditor(o: EditorOptions): void {
       return;
     }
     if (k.length === 1 && /[a-z]/i.test(k)) {
+      const pre = presetByKey(k);
+      if (pre) { e.preventDefault(); place(pre.sym, pre.value); return; }
       const def = symbolByLetter(k);
       if (def) { e.preventDefault(); place(def.key); }
     }
@@ -756,6 +779,20 @@ export function openSchemaEditor(o: EditorOptions): void {
     return fine({ x: a.x + Math.cos(ang) * len, y: a.y + Math.sin(ang) * len });
   };
   const startUndo = () => undo.push(snap());
+  /**
+   * Fil glisse : a angles droits (le 1er mouvement choisit). Vers l'entree
+   * d'un schema-bloc (bloc, gain, comparateur : aimantee a pres d'une case)
+   * ou depuis une sortie de schema-bloc : chemin qui contourne les pieces,
+   * par-dessous ou par-dessus (boucle de retour en un geste).
+   */
+  const wireRoute = (from: Pt, g: { x: number; y: number }, vertical?: boolean): Pt[] => {
+    const near = freePortNear(s, g, 0.9);
+    const to = near && blockInputAt(s, near) ? near : snapPt(g);
+    const src = portAt(s, from);
+    const fromOut = !!src && ["B", "Gain", "S"].includes(src.part.sym) && src.port.name === "out";
+    if (!samePt(from, to) && (blockInputAt(s, to) || (fromOut && portAt(s, to)))) return routeAround(s, from, to);
+    return routeOrtho(from, to, vertical);
+  };
 
   stage.addEventListener("pointermove", (e) => {
     const g = toGrid(e);
@@ -818,7 +855,7 @@ export function openSchemaEditor(o: EditorOptions): void {
         // Premier mouvement : il decide si le fil part a l'horizontale ou a la verticale.
         drag.vertical = Math.abs(g.y - drag.from.y) > Math.abs(g.x - drag.from.x);
       }
-      preview = drag.moved ? routeOrtho(drag.from, p, drag.vertical) : null;
+      preview = drag.moved ? wireRoute(drag.from, g, drag.vertical) : null;
       paint();
       return;
     }
@@ -851,6 +888,12 @@ export function openSchemaEditor(o: EditorOptions): void {
         selNote = ni; selected = null; group = null;
         drag = { kind: "note", index: ni, from: g, moved: false };
         paint();
+        return;
+      }
+      if (lab?.sign && lab.part) {
+        const id = lab.part, port = lab.sign;
+        drag = null;
+        edit(() => { toggleSign(s, id, port); });
         return;
       }
       if (lab?.part) { selected = lab.part; selNote = null; group = null; drag = { kind: "part", id: lab.part, last: snapPt(g), moved: false }; paint(); return; }
@@ -942,10 +985,11 @@ export function openSchemaEditor(o: EditorOptions): void {
     }
     if (d.kind !== "wire") return;
     const wd = d;
-    const to = snapPt(toGrid(e));
+    const route = wireRoute(wd.from, toGrid(e), wd.vertical);
+    const to = route[route.length - 1];
     preview = null;
     if (wd.moved && (to.x !== wd.from.x || to.y !== wd.from.y)) {
-      edit(() => addWire(s, routeOrtho(wd.from, to, wd.vertical)));
+      edit(() => addWire(s, route));
       t.at = to;
       t.dir = to.x !== wd.from.x && !wd.vertical ? (to.x > wd.from.x ? "right" : "left") : (to.y > wd.from.y ? "down" : "up");
     } else {

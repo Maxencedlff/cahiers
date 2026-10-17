@@ -283,6 +283,8 @@ export interface SchemaPart {
   value?: string;
   /** Circuit ouvert (sym "X") mis a la place d'une piece : son symbole d'origine, pour revenir. */
   was?: string;
+  /** Bloc ou gain de schema-bloc : largeur en cases, selon son texte (absent : celle du symbole). */
+  w?: number;
 }
 
 /**

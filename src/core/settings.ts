@@ -49,6 +49,8 @@ export interface Settings {
   autoMath: boolean;
   /** Correcteur orthographique du navigateur sur le texte tape (coupe par defaut). */
   spellcheck: boolean;
+  /** Bulle d'aide aux raccourcis (« ome » → ω, Tab l'accepte) ; activee par defaut. */
+  shortcutHints: boolean;
   myscript: { applicationKey: string; hmacKey: string };
 }
 
@@ -70,6 +72,7 @@ const DEFAULTS: Settings = {
   layout: LAYOUT,
   autoMath: true,
   spellcheck: false,
+  shortcutHints: true,
   textColor: null,
   touchWrites: false,
   myscript: { applicationKey: "", hmacKey: "" },
@@ -95,6 +98,7 @@ export function loadSettings(): Settings {
     out.calcDetached = out.calcDetached === true;
     out.mathPinned = out.mathPinned === true;
     out.touchWrites = out.touchWrites === true;
+    out.shortcutHints = out.shortcutHints !== false;
     // Ancienne detection du stylet (Ctrl+D l'oubliait) : retiree.
     delete (out as Partial<Settings> & { penSeen?: unknown }).penSeen;
     // Ancien ruban « deplie dans la colonne » : remplace par le volet epinglable.

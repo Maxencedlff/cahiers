@@ -123,7 +123,10 @@ const LHS = /(?:[A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω]{0,6}\s*)?(?:\$[^$]+\$)?\
  */
 export function extractFormulas(content: string): Formula[] {
   const out: Formula[] = [];
-  for (const line of docLines(parseDoc(content))) {
+  // Case de tableau = une ligne a elle ; le code n'a pas de formules.
+  const tokens = parseDoc(content).flatMap((t): DocToken[] => t.kind === "table"
+    ? t.rows.flat().flatMap((c): DocToken[] => [...c, { kind: "br" }]) : t.kind === "codeblock" ? [{ kind: "br" }] : [t]);
+  for (const line of docLines(tokens)) {
     const toks = line.tokens
       .map((t): DocToken | null => (t.kind === "text" ? { kind: "text", text: t.text } : t.kind === "math" ? { kind: "math", latex: t.latex } : null))
       .filter((t): t is DocToken => !!t);

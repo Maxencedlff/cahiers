@@ -573,6 +573,14 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-sheet);
 }
 .hero .thumb { width: 120px; height: 156px; }
+/* Premier lancement : creer sa premiere matiere (decision du 16/10/2026). */
+.welcome {
+  max-width: 760px; padding: 18px 20px; background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-sheet);
+}
+.welcome p { margin: 0 0 14px; }
+.welcome-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.welcome-create { min-height: 40px; padding: 0 18px; border-radius: 10px; font-weight: 600; gap: 8px; }
+.welcome-sync { color: var(--muted); font-size: var(--fs-sm); text-decoration: underline; text-underline-offset: 3px; }
 .hero-text { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
 .hero-where { font-size: var(--fs-sm); color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .hero-title { font-size: 20px; font-weight: 650; margin: 2px 0 2px; color: var(--text); overflow-wrap: anywhere; }
@@ -1152,6 +1160,13 @@ kbd { color: var(--text-2); }
 .set-control { flex: 0 1 340px; display: flex; justify-content: flex-end; min-width: 0; }
 .set-control .seg { flex: 1; }
 .set-root { margin-top: 12px; font-size: var(--fs-xs); color: var(--text-2); overflow-wrap: anywhere; }
+/* Reglages, emplacement des cahiers (src/ui/location.ts). */
+.location-path { font-size: var(--fs-xs); color: var(--text-2); overflow-wrap: anywhere; user-select: text; padding: 2px 0 8px; }
+.location-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0; }
+.location-warn {
+  display: flex; align-items: center; gap: 12px; justify-content: space-between; margin: 4px 0 8px;
+  padding: 10px 12px; border: 1px solid var(--warn-border); background: var(--warn-soft); border-radius: var(--radius);
+}
 @media (max-width: 600px) { .set-row { flex-direction: column; align-items: stretch; gap: 8px; } .set-control { flex: none; } }
 
 /* Fiche des raccourcis (F1) : l'essentiel, puis tout. */
@@ -1228,6 +1243,13 @@ kbd {
   border-radius: 4px; padding: 0 .35em;
 }
 .text-ghost-eq .katex { font-size: 1em; }
+/* Bulle d'aide aux raccourcis (« ome » → ω, Tab) : petite, au-dessus du mot. */
+.text-ghost.text-hint {
+  opacity: 1; gap: .45em; padding: .1em .45em; border-radius: 6px;
+  background: var(--page-bg, #fff); color: var(--sheet-text, #1f2430);
+  border: 1px solid var(--sheet-border, #dfe2e8); box-shadow: 0 1px 4px rgba(0,0,0,.12);
+}
+.text-ghost.text-hint .text-ghost-key { opacity: .55; }
 
 /* Couleur de frappe active : son nom en marge de la ligne du curseur
    (textdoc.ts, paintColorTag). Jamais dans le contenu. */
@@ -1299,6 +1321,69 @@ kbd {
   min-width: 44px; min-height: 44px; padding: 0; border-radius: 6px; font-size: 18px; cursor: pointer;
 }
 .text-doc .doc-img-bar button:last-child { color: #b42318; }
+/* Tableau dans le texte (src/ui/doctable.ts) : bordures fines, chaque case
+   est un petit texte d'une ligne (formules comprises). La barre n'apparait
+   que le clavier dans une case (jamais a l'impression ni a l'export). */
+.text-doc .doc-table { position: relative; display: block; width: max-content; max-width: 100%; cursor: default; }
+.text-doc .doc-table table { border-collapse: collapse; table-layout: auto; }
+.text-doc .doc-table td {
+  position: relative; padding: 0; vertical-align: top; min-width: calc(64px * var(--k, 1));
+  border: 1px solid color-mix(in srgb, var(--sheet-text, #1f2430) 40%, transparent);
+}
+.text-doc .doc-table .text-doc.cell-doc {
+  position: relative; left: auto; top: auto; right: auto; min-height: var(--line);
+  padding: calc(1px * var(--k, 1)) calc(8px * var(--k, 1)); cursor: text;
+}
+.text-doc .doc-table td:focus-within { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.text-doc .doc-table-bar {
+  display: none; position: absolute; left: calc(100% + 10px); top: 0; z-index: 5; gap: 2px; align-items: center;
+  padding: 3px; border-radius: 8px; background: var(--page-bg, #fff); white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,.18); font: 12px/1 system-ui, sans-serif; color: var(--text, #1f2430);
+}
+.text-doc .doc-table:focus-within > .doc-table-bar { display: flex; }
+/* Tableau large : la barre passe au-dessus (a droite, elle sortirait de la feuille). */
+.text-doc .doc-table.bar-above > .doc-table-bar { left: 0; top: auto; bottom: calc(100% + 4px); }
+.text-doc .doc-table-bar button {
+  min-height: var(--row-h, 32px); padding: 0 .7em; border-radius: 6px; border: none; background: transparent;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.text-doc .doc-table-bar button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.text-doc .doc-table-bar button:nth-last-child(2) { color: #b42318; }
+.text-doc .doc-table-help { padding: 0 .6em; opacity: .55; cursor: help; }
+/* Bloc de code (src/ui/doccode.ts) : zone de texte transparente posee sur
+   le rendu colore, memes police et retours a la ligne (grille 1 x 1). */
+.text-doc .doc-code {
+  position: relative; display: block; margin: calc(4px * var(--k, 1)) 0; cursor: default;
+  border-radius: 6px; background: color-mix(in srgb, var(--sheet-text, #1f2430) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sheet-text, #1f2430) 14%, transparent);
+}
+.text-doc .doc-code-head {
+  display: flex; justify-content: flex-end; align-items: center; gap: 2px; height: 0; position: relative; z-index: 2;
+}
+.text-doc .doc-code-lang, .text-doc .doc-code-help {
+  font: 11px/1 system-ui, sans-serif; color: color-mix(in srgb, var(--sheet-text, #1f2430) 55%, transparent);
+  background: transparent; border: none; padding: 4px 6px; margin-top: calc(14px * var(--k, 1)); cursor: pointer;
+}
+.text-doc .doc-code-help { cursor: help; }
+.text-doc .doc-code-box { display: grid; }
+.text-doc .doc-code-box > * {
+  grid-area: 1 / 1; margin: 0; padding: calc(6px * var(--k, 1)) calc(10px * var(--k, 1));
+  font: calc(14px * var(--k, 1)) / 1.45 "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; letter-spacing: 0; border: none;
+}
+.text-doc .doc-code-hl { color: var(--sheet-text, #1f2430); pointer-events: none; }
+.text-doc .doc-code-input {
+  resize: none; overflow: hidden; background: transparent; color: transparent; caret-color: var(--accent);
+  outline: none; min-height: 1.45em; cursor: text; touch-action: auto;
+}
+.text-doc .doc-code-input::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); color: transparent; }
+.text-doc .doc-code:focus-within { border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+.text-doc .hl-kw { color: #a626a4; }
+.text-doc .hl-type { color: #0184bc; }
+.text-doc .hl-fn { color: #4078f2; }
+.text-doc .hl-str { color: #50a14f; }
+.text-doc .hl-num { color: #b76b01; }
+.text-doc .hl-com { color: #8a8f98; }
 /* Blocs vivants dans le texte (calcul, courbe) : comme une photo, un appui
    les rouvre dans la calculatrice. Le calcul suit la largeur de sa formule. */
 .text-doc .doc-img.live { cursor: pointer; }

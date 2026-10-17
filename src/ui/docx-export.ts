@@ -146,7 +146,8 @@ export function measureLineSpans(root: HTMLElement, sheet: HTMLElement): VSpan[]
     spans[idx] = cur ? { top: Math.min(cur.top, s.top), bottom: Math.max(cur.bottom, s.bottom) } : s;
   };
   for (const n of Array.from(root.childNodes)) {
-    if (n instanceof HTMLElement && n.classList.contains("dl")) {
+    // Ligne mise en forme ou tableau : un bloc qui fait sa ligne a lui seul.
+    if (n instanceof HTMLElement && (n.classList.contains("dl") || n.classList.contains("doc-island"))) {
       if (has) idx++;
       add(nodeRect(n));
       idx++;

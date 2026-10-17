@@ -14,7 +14,7 @@ import { REVIEW_COLORS, focusQuery, type ReviewItem } from "../core/review";
 import type { Bounds } from "../core/ink/stroke";
 import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
 import { buildFormulaPanel, MATH_TEMPLATES } from "./mathbar";
-import { currentTypingSize, insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setSpellcheck, setTypingColor, setTypingSize } from "./textdoc";
+import { currentTypingSize, insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setShortcutHints, setSpellcheck, setTypingColor, setTypingSize } from "./textdoc";
 import { FONT_SIZES, NORMAL_SIZE } from "../core/text/doc";
 import type { Calculator } from "./calculator/index";
 import { PALETTE, NEUTRAL_INK, labelOf } from "../core/palette";
@@ -54,6 +54,8 @@ import { isPhotoImportKey, PHOTO_IMPORT_KEYS } from "../core/image/photo";
 import { isPdfFile } from "../core/pdf/pdf";
 import { PAPERS } from "../core/paper";
 import { loadSettings, saveSettings, type Settings } from "../core/settings";
+import type { LocationApi } from "../core/storage/location";
+import { locationSection, runSwitch, type LocationHost } from "./location";
 import {
   ctrlCommand, escapeAction, isReloadKey, keyLabel, keysOf, pageLabel, titleOf, type Command,
 } from "../core/shortcuts";
@@ -65,6 +67,7 @@ import {
   mathPanelMode, sidebarMode, calcPlacement, PHONE_MAX, type MathPanelMode, type SidebarMode,
 } from "../core/chrome";
 import { statusSummary } from "../core/status";
+import { parseTableSize } from "../core/text/table";
 import { inkDisplayColor, nextThemePref, SHEET_TONES, THEME_PREFS, type SheetPref, type ThemePref } from "../core/theme";
 import type { Presence } from "../platform";
 import { PRESENCE_CLAIM_MS, presenceAgo, type OtherPresence } from "../core/sync";
@@ -242,6 +245,9 @@ export class App {
     private ocr: ((dataUrl: string) => Promise<string>) | null = null,
     private machineKeys: { applicationKey: string; hmacKey: string } | null = null,
     private saveKeys: ((a: string, h: string) => Promise<void>) | null = null,
+    /** Emplacement des cahiers (dans l'appli / dossier synchronise) ; null = pas de bascule. */
+    private location: LocationApi | null = null,
+    private canSwitchLocation = false,
   ) {
     document.addEventListener("cahiers-typing-size", () => this.paintSizeButton());
     this.repo = new Repo(fs);
@@ -259,6 +265,7 @@ export class App {
     this.autoConvert = this.settings.autoConvert;
     setAutoMath(this.settings.autoMath);
     setSpellcheck(this.settings.spellcheck);
+    setShortcutHints(this.settings.shortcutHints);
     if (this.autoConvert) this.renderMode = "clean";
 
     // Les cles de la machine passent devant celles du navigateur : elles
@@ -520,6 +527,25 @@ export class App {
       deleteNotebook: (dir: string) => this.deleteNotebook(dir),
       adoptNotebook: (dir: string, title: string, color: string) => this.adoptNotebook(dir, title, color),
       unmarkNotebooks: (dirs: string[]) => this.unmarkNotebooks(dirs),
+      useSyncFolder: () => {
+        const host = this.locationHost();
+        if (host) void runSwitch(host, "picked");
+      },
+    };
+  }
+
+  /** Reglages « Emplacement des cahiers » : tout ecrire et liberer la presence avant de basculer. */
+  private locationHost(): LocationHost | null {
+    if (!this.location) return null;
+    return {
+      api: this.location,
+      canSwitch: this.canSwitchLocation,
+      prepare: async () => {
+        await this.flushAll();
+        if (this.hasUnsaved) return false;
+        await this.releaseAll();
+        return true;
+      },
     };
   }
 
@@ -2234,6 +2260,19 @@ export class App {
       { label: "Photo du tableau…", icon: "camera", keys: keyLabel(PHOTO_IMPORT_KEYS), run: () => void this.importImage() },
       { label: "Importer un PDF…", icon: "fileUp", keys: keysOf("importPdf"), run: () => void this.importPdf() },
       { label: "Schéma (électrique, blocs)", icon: "pen", keys: keysOf("schema"), run: () => view.insertSchema() },
+      { label: "Bloc de code", icon: "fileText", keys: "```", run: () => view.insertCode() },
+      {
+        label: "Tableau", icon: "grid", keys: keysOf("table"), sub: [
+          ...([[2, 2], [3, 3], [4, 3], [3, 4]] as const).map(([r, c]) => ({ label: `${r} lignes × ${c} colonnes`, run: () => view.insertTable(r, c) })),
+          {
+            label: "Autre taille…", run: () => void askText("Tableau", "Lignes × colonnes (ex. 5x3)", "3x3").then((v) => {
+              const size = v ? parseTableSize(v) : null;
+              if (size) view.insertTable(size.rows, size.cols);
+              else if (v) toast("Taille non comprise : écrire par exemple 5x3 (20 au plus).", "warn");
+            }),
+          },
+        ],
+      },
       { label: "Importer un schéma LTspice (.asc)…", icon: "fileUp", run: () => void view.importLtspice() },
       "sep",
       {
@@ -2339,6 +2378,10 @@ export class App {
           ["Oui", this.settings.spellcheck, () => { this.setSpelling(true); paint(); }],
           ["Non", !this.settings.spellcheck, () => { this.setSpelling(false); paint(); }],
         ]), "Souligner les fautes dans le texte tapé"),
+        settingRow("Aide aux raccourcis", segmented([
+          ["Oui", this.settings.shortcutHints, () => { this.setHints(true); paint(); }],
+          ["Non", !this.settings.shortcutHints, () => { this.setHints(false); paint(); }],
+        ]), "« ome » → ω, « mat2x2 » → matrice : Tab accepte la bulle"),
         settingRow("Écrire au doigt (sans stylet)", segmented([
           ["Oui", this.touchRole() === "write", () => { this.setFingerWrites(true); paint(); }],
           ["Non", this.touchRole() !== "write", () => { this.setFingerWrites(false); paint(); }],
@@ -2353,9 +2396,15 @@ export class App {
           onclick: () => { dlg.close(); this.showProbe(); },
         }, "Ouvrir la sonde"), "Ce que renvoie l'écran : type de pointeur, pression, points"),
         settingRow("Raccourcis clavier", el("button", { onclick: () => showShortcuts() }, "Afficher", el("kbd", {}, "F1")), ""),
-        el("div", { class: "set-root", title: this.rootLabel }, el("span", { class: "muted" }, "Dossier des cahiers : "), this.rootLabel),
+        el("h3", { class: "set-h" }, "Emplacement des cahiers"),
+        place,
       );
     };
+    // Section a part : elle lit l'emplacement (commande Rust) une fois.
+    const place = el("div", { class: "set-place" },
+      el("div", { class: "set-root", title: this.rootLabel }, el("span", { class: "muted" }, "Dossier des cahiers : "), this.rootLabel));
+    const locHost = this.locationHost();
+    if (locHost) void locationSection(locHost).then((sec) => place.replaceChildren(sec));
     paint();
     const dlg = sheetDialog("Réglages", body, { cls: "settings-dialog" });
     // Dossiers sans page affiches comme matieres : proposes ici, jamais d'office.
@@ -2938,6 +2987,7 @@ export class App {
       case "exportWordAll": if (notebook) void this.exportWord(view, "all"); return true;
       case "importPdf": if (notebook) void this.importPdf(); return true;
       case "schema": if (notebook) view?.insertSchema(); return true;
+      case "table": if (notebook) view?.insertTable(); return true;
       case "closeTab": { const t = this.focusedTab(); if (t) void this.closeTab(t.id); return true; }
       case "nextTab": this.cycleTab(1); return true;
       case "prevTab": this.cycleTab(-1); return true;
@@ -3055,6 +3105,12 @@ export class App {
     setAutoMath(on);
     saveSettings(this.settings);
     toast(on ? "Formules tapées mises en forme automatiquement" : "Formules tapées laissées telles quelles");
+  }
+
+  private setHints(on: boolean): void {
+    this.settings.shortcutHints = on;
+    setShortcutHints(on);
+    saveSettings(this.settings);
   }
 
   private setSpelling(on: boolean): void {

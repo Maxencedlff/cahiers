@@ -48,6 +48,8 @@ export interface DxPara {
   caption?: boolean;
   /** Ligne encadree (conclusion) : bordure tout autour. */
   boxed?: boolean;
+  /** Tableau (texte tape) : rangees de cases, chaque case un paragraphe ; `runs` est alors ignore. */
+  table?: DxRun[][][];
 }
 
 export interface DxDoc {
@@ -174,7 +176,24 @@ class Builder {
     return this.text({ kind: "text", text: this.plainOf(latex), italic: true, color }, { runs: [] });
   }
 
+  /** Tableau Word simple : bordures fines, colonnes ajustees au contenu, une case = un paragraphe. */
+  table(rows: DxRun[][][]): string {
+    this.numbering.reset();
+    const cols = Math.max(1, ...rows.map((r) => r.length));
+    const colW = Math.floor((PAGE_W_TW - 2 * MARGIN_TW) / cols);
+    const side = (n: string) => `<w:${n} w:val="single" w:sz="4" w:space="0" w:color="808080"/>`;
+    const pr = `<w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${["top", "left", "bottom", "right", "insideH", "insideV"].map(side).join("")}</w:tblBorders>`
+      + `<w:tblLayout w:type="autofit"/><w:tblCellMar><w:left w:w="85" w:type="dxa"/><w:right w:w="85" w:type="dxa"/></w:tblCellMar></w:tblPr>`;
+    const grid = `<w:tblGrid>${`<w:gridCol w:w="${colW}"/>`.repeat(cols)}</w:tblGrid>`;
+    const trs = rows.map((r) => `<w:tr>${Array.from({ length: cols }, (_, k) => {
+      const cell = this.para({ runs: r[k] ?? [] }).replace("<w:p>", "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>");
+      return `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>${cell}</w:tc>`;
+    }).join("")}</w:tr>`).join("");
+    return `<w:tbl>${pr}${grid}${trs}</w:tbl>`;
+  }
+
   para(p: DxPara): string {
+    if (p.table) return this.table(p.table);
     const pPr: string[] = [];
     if (p.heading) pPr.push(`<w:pStyle w:val="Heading${p.heading}"/>`);
     else if (p.list) pPr.push("<w:pStyle w:val=\"ListParagraph\"/>");
@@ -247,7 +266,8 @@ function coreXml(title: string, now: string): string {
 /** Fichiers du paquet .docx (pour les tests), dans l'ordre de l'archive. */
 export function docxParts(doc: DxDoc, opts: { fallback?: MathFallback; plain?: (latex: string) => string; now?: string } = {}): ZipEntry[] {
   const b = new Builder(opts.fallback ?? null, opts.plain ?? ((l) => l.replace(/\\[a-zA-Z]+|[{}\\_^$]/g, " ").replace(/\s+/g, " ").trim()));
-  const paras = doc.paras.length ? doc.paras : [{ runs: [] }];
+  // Word veut un paragraphe apres un tableau en fin de document.
+  const paras = doc.paras.length ? (doc.paras[doc.paras.length - 1].table ? [...doc.paras, { runs: [] }] : doc.paras) : [{ runs: [] }];
   const body = paras.map((p) => b.para(p)).join("");
   const sect = `<w:sectPr><w:pgSz w:w="${PAGE_W_TW}" w:h="${PAGE_H_TW}"/>`
     + `<w:pgMar w:top="${MARGIN_TW}" w:right="${MARGIN_TW}" w:bottom="${MARGIN_TW}" w:left="${MARGIN_TW}" w:header="708" w:footer="708" w:gutter="0"/>`

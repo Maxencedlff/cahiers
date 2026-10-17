@@ -1,11 +1,14 @@
 /**
  * Modeles de schemas prets a inserer (logique pure) : montages du cours
  * (pont diviseur, RC, RL, RLC, hacheurs, AOP, regulateur Zener) et
- * chronogrammes (axes, creneau, triangle, dent de scie). On les insere puis
+ * chronogrammes (axes, creneau, triangle, dent de scie), schemas-blocs
+ * (bloc de transfert, systemes du 1er et du 2e ordre). On les insere puis
  * on les modifie (noms, valeurs, fleches) : ce sont des schemas ordinaires.
  */
 import type { SchemaBlock, SchemaNote, SchemaPart } from "../types";
-import type { SymKey } from "./symbols";
+import { SYMBOLS, fitWidth, type SymKey } from "./symbols";
+import { labelWidth } from "./label";
+import { insertOnWire, routeAround, wirePts } from "./model";
 
 type Piece = Pick<SchemaBlock, "parts" | "wires" | "notes">;
 type P = [number, number];
@@ -61,7 +64,101 @@ class Build {
     if (dash) n.dash = true;
     this.notes.push(n);
   }
+  /**
+   * Bloc, gain ou sommateur pose par sa borne d'entree `in` (vers la droite) ;
+   * bloc et gain a la largeur de leur texte. Rend l'id et la borne de sortie.
+   */
+  blk(sym: "B" | "Gain" | "S", at: P, value?: string): { id: string; out: P } {
+    const id = `p${this.parts.length + 1}`;
+    const d = SYMBOLS[sym];
+    const w = sym === "S" ? d.w : fitWidth(sym, labelWidth(value ?? "") * 0.95);
+    const p: SchemaPart = sym === "S" ? { id, sym, x: at[0], y: at[1] - 1 } : { id, sym, x: at[0], y: at[1] - 2 };
+    if (w !== d.w) p.w = w;
+    if (value) p.value = value;
+    this.parts.push(p);
+    return { id, out: [at[0] + w, at[1]] };
+  }
+  /** Etiquette d'un signal, au-dessus du fil (a la main : un texte, il ne bouge pas tout seul). */
+  signal(x: number, y: number, label: string): void { this.text(x, y - (/\//.test(label) ? 1.5 : 1.1), label); }
+  /** Retour de `from` vers la borne `to`, trace comme a la souris (par-dessous ou par-dessus). */
+  feedback(from: P, to: P, gain?: string): void {
+    const s = this.block();
+    const pts = routeAround(s, { x: from[0], y: from[1] }, { x: to[0], y: to[1] });
+    this.wires.push({ pts: pts.flatMap((q) => [q.x, q.y]) });
+    if (!gain) return;
+    // Gain sur le plus long segment horizontal du retour, pointe vers la gauche.
+    const k = this.wires.length - 1;
+    const q = wirePts(this.wires[k]);
+    let seg = 0, best = -1;
+    for (let i = 0; i + 1 < q.length; i++) if (q[i].y === q[i + 1].y && Math.abs(q[i + 1].x - q[i].x) > best) { best = Math.abs(q[i + 1].x - q[i].x); seg = i; }
+    const sb = this.block();
+    const mid = { x: Math.round((q[seg].x + q[seg + 1].x) / 2), y: q[seg].y };
+    const g = insertOnWire(sb, "Gain", k, seg, mid, fitWidth("Gain", labelWidth(gain) * 0.95));
+    if (!g) return;
+    g.value = gain;
+    this.parts = sb.parts;
+    this.wires = sb.wires;
+  }
+  private block(): SchemaBlock { return { id: "t", type: "schema", parts: this.parts, wires: this.wires, notes: this.notes }; }
   done(): Piece { return { parts: this.parts, wires: this.wires, notes: this.notes }; }
+}
+
+/** e(t) -> [H(p)] -> s(t). */
+function transfert(): Piece {
+  const b = new Build();
+  b.wire([0, 4], [4, 4]);
+  b.signal(2, 4, "e(t)");
+  const H = b.blk("B", [4, 4], "H(p)");
+  b.wire(H.out, [H.out[0] + 5, 4]);
+  b.signal(H.out[0] + 2.5, 4, "s(t)");
+  return b.done();
+}
+
+/** Systeme du 1er ordre τ dy/dt + y = K e : e(t) -> K -> ⊗ -> 1/τ -> ∫dt -> y(t), retour de y sur l'entree −. */
+function ordre1(): Piece {
+  const b = new Build();
+  b.wire([0, 6], [4, 6]);
+  b.signal(2, 6, "e(t)");
+  const K = b.blk("Gain", [4, 6], "K");
+  b.wire(K.out, [K.out[0] + 3, 6]);
+  const S = b.blk("S", [K.out[0] + 3, 6], "+-");
+  b.wire(S.out, [S.out[0] + 4, 6]);
+  const T = b.blk("Gain", [S.out[0] + 4, 6], "1/τ");
+  b.wire(T.out, [T.out[0] + 5, 6]);
+  b.signal(T.out[0] + 2.5, 6, "dy/dt");
+  const I = b.blk("B", [T.out[0] + 5, 6], "∫dt");
+  const end = I.out[0] + 7;
+  b.wire(I.out, [end, 6]);
+  b.signal(end - 1.5, 6, "y(t)");
+  b.feedback([I.out[0] + 3, 6], [S.out[0] - 1, 7]);
+  return b.done();
+}
+
+/**
+ * Systeme du 2e ordre d²y/dt² + 2mω₀ dy/dt + ω₀² y = K e : e(t) -> K ->
+ * ⊗(+,−,−) -> ∫ -> ∫ -> y(t) ; retours 2mω₀ depuis dy/dt (dessous) et ω₀²
+ * depuis y (dessus).
+ */
+function ordre2(): Piece {
+  const b = new Build();
+  b.wire([0, 6], [4, 6]);
+  b.signal(2, 6, "e(t)");
+  const K = b.blk("Gain", [4, 6], "K");
+  b.wire(K.out, [K.out[0] + 3, 6]);
+  const S = b.blk("S", [K.out[0] + 3, 6], "+--");
+  b.wire(S.out, [S.out[0] + 6, 6]);
+  b.signal(S.out[0] + 3, 6, "d²y/dt²");
+  const I1 = b.blk("B", [S.out[0] + 6, 6], "∫dt");
+  b.wire(I1.out, [I1.out[0] + 6, 6]);
+  b.signal(I1.out[0] + 2, 6, "dy/dt");
+  const I2 = b.blk("B", [I1.out[0] + 6, 6], "∫dt");
+  const end = I2.out[0] + 8;
+  b.wire(I2.out, [end, 6]);
+  b.signal(end - 2, 6, "y(t)");
+  const sx = S.out[0] - 1;
+  b.feedback([I1.out[0] + 4, 6], [sx, 7], "2mω_0");
+  b.feedback([I2.out[0] + 3, 6], [sx, 5], "ω_0^2");
+  return b.done();
 }
 
 /** Source E a gauche, branche du haut sur y = 4, retour sur y = bas. */
@@ -246,7 +343,7 @@ function scie(): Piece {
   return b.done();
 }
 
-export interface Template { key: string; label: string; group: "Montages" | "Chronogrammes"; build: () => Piece }
+export interface Template { key: string; label: string; group: "Montages" | "Schémas-blocs" | "Chronogrammes"; build: () => Piece }
 
 export const TEMPLATES: Template[] = [
   { key: "diviseur", label: "Pont diviseur", group: "Montages", build: diviseur },
@@ -258,6 +355,9 @@ export const TEMPLATES: Template[] = [
   { key: "inv", label: "AOP inverseur", group: "Montages", build: () => aop(true) },
   { key: "noninv", label: "AOP non inverseur", group: "Montages", build: () => aop(false) },
   { key: "zener", label: "Régulateur Zener + transistor", group: "Montages", build: zener },
+  { key: "transfert", label: "Bloc de transfert", group: "Schémas-blocs", build: transfert },
+  { key: "ordre1", label: "Système du 1er ordre", group: "Schémas-blocs", build: ordre1 },
+  { key: "ordre2", label: "Système du 2e ordre", group: "Schémas-blocs", build: ordre2 },
   { key: "axes", label: "Axes", group: "Chronogrammes", build: () => { const b = new Build(); axes(b, 10, 1, 27, "u(t)"); return b.done(); } },
   { key: "creneau", label: "Créneau (tension de bobine)", group: "Chronogrammes", build: creneau },
   { key: "triangle", label: "Triangle (courant de bobine)", group: "Chronogrammes", build: triangle },

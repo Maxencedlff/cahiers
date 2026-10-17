@@ -1,0 +1,126 @@
+import { el, toast, confirmDialog } from "./dom";
+import { icon, type IconName } from "./icons";
+import {
+  formatBytes, modeLabel, pagesLabel, switchFlow,
+  type LocationApi, type StorageInfo, type SwitchAsk, type Target,
+} from "../core/storage/location";
+
+/**
+ * Reglages, « Emplacement des cahiers » : mode (dans l'appli / dossier
+ * synchronise), chemin, bascules et « Ouvrir l'emplacement ». La logique
+ * (copie verifiee, choix selon le contenu du dossier) est dans
+ * core/storage/location.ts ; ici seulement les questions et les messages.
+ */
+export interface LocationHost {
+  api: LocationApi;
+  /** Appli installee : les bascules sont possibles (pas en mode navigateur). */
+  canSwitch: boolean;
+  /**
+   * Avant de copier ou de basculer : tout ecrire, liberer les fichiers de
+   * presence. false = une page reste refusee, on n'y touche pas.
+   */
+  prepare: () => Promise<boolean>;
+}
+
+export async function locationSection(host: LocationHost): Promise<HTMLElement> {
+  const box = el("div", { class: "location" });
+  let info: StorageInfo;
+  try {
+    info = await host.api.info();
+  } catch (e) {
+    box.append(el("p", { class: "small muted" }, `Emplacement illisible : ${(e as Error).message}`));
+    return box;
+  }
+  const hintOff = host.canSwitch ? "" : "Dans l'appli installée seulement";
+  const button = (label: string, run: () => void, primary = false, ic?: IconName) => el("button", {
+    class: primary ? "primary" : "", disabled: !host.canSwitch, title: hintOff, onclick: run,
+  }, ic ? icon(ic, 18) : null, label);
+
+  const run = (target: Target) => { void runSwitch(host, target); };
+  box.append(
+    el("div", { class: "set-row" },
+      el("div", { class: "set-label" },
+        el("span", {}, modeLabel(info.mode)),
+        el("span", { class: "set-hint" }, info.mode === "app"
+          ? "Les cahiers sont rangés dans l'espace privé de l'appli, sur cet ordinateur"
+          : "Les cahiers sont dans un dossier que tu as choisi (OneDrive, iCloud Drive…)")),
+      el("div", { class: "set-control" },
+        el("button", {
+          disabled: !host.canSwitch, title: hintOff,
+          onclick: () => { void host.api.open().catch((e) => toast(`Ouverture impossible : ${(e as Error).message}`, "err")); },
+        }, icon("folder", 18), "Ouvrir l'emplacement"))),
+    el("div", { class: "location-path", title: info.path }, info.path),
+  );
+  if (info.missing) {
+    box.append(el("div", { class: "location-warn" },
+      el("div", {},
+        el("strong", {}, "Dossier introuvable"),
+        el("div", { class: "small" },
+          `« ${info.missing} » n'était pas là au lancement. Les cahiers s'ouvrent dans l'appli en attendant : `
+            + "ce qui est écrit maintenant reste ici, rien n'a été copié ni supprimé.")),
+      button("Rouvrir ce dossier", () => run("missing"))));
+  }
+  box.append(el("div", { class: "location-actions" },
+    ...(info.mode === "app"
+      ? [button("Passer à un dossier synchronisé…", () => run("picked"), true)]
+      : [
+        button("Ramener dans l'appli…", () => run("internal")),
+        button("Changer de dossier…", () => run("picked")),
+      ]),
+  ));
+  box.append(el("p", { class: "set-hint" },
+    "Les cahiers sont copiés, jamais déplacés : l'ancien emplacement reste tel quel. Mêmes fichiers JSON lisibles dans les deux cas."));
+  return box;
+}
+
+/** Questions de la bascule, en dialogues. */
+function asker(info: StorageInfo): SwitchAsk {
+  return {
+    confirmCopy: (src, path) => confirmDialog(
+      "Copier les cahiers",
+      `${pagesLabel(src.pages)} (${src.files} fichiers, ${formatBytes(src.bytes)}) seront copiées vers « ${path} ». `
+        + `Rien n'est écrasé ; « ${info.path} » reste tel quel. L'appli bascule une fois la copie vérifiée.`,
+      "Copier",
+    ),
+    confirmOpen: (r) => confirmDialog(
+      "Ce dossier contient déjà des cahiers",
+      `« ${r.path} » : ${r.notebooks} matière${r.notebooks > 1 ? "s" : ""}, ${pagesLabel(r.pages)}. `
+        + `L'ouvrir tel quel ? Les cahiers actuels restent dans « ${info.path} », ils ne sont pas copiés.`,
+      "Ouvrir ce dossier",
+    ),
+    confirmSubfolder: (r) => confirmDialog(
+      "Dossier déjà utilisé",
+      `« ${r.path} » contient d'autres fichiers. Les cahiers seront copiés dans un sous-dossier « Cahiers » ; rien d'autre n'est touché.`,
+      "Copier dans « Cahiers »",
+    ),
+    progress: (m) => toast(m, "info", 4000),
+  };
+}
+
+/**
+ * Bascule complete : prepare (tout ecrit), switchFlow, puis rechargement
+ * de l'appli sur la nouvelle racine. Rien ne change si un pas echoue.
+ */
+export async function runSwitch(host: LocationHost, target: Target): Promise<void> {
+  if (!host.canSwitch) { toast("Disponible dans l'appli installée seulement.", "info"); return; }
+  let info: StorageInfo;
+  try { info = await host.api.info(); } catch (e) { toast(`Emplacement illisible : ${(e as Error).message}`, "err"); return; }
+  if (!(await host.prepare())) {
+    toast("Une page n'est pas encore enregistrée : rien n'a changé. Réessaie dans un instant.", "err", 6000);
+    return;
+  }
+  const out = await switchFlow(host.api, target, asker(info));
+  switch (out.kind) {
+    case "cancelled": return;
+    case "unchanged": toast(out.message, "info", 6000); return;
+    case "failed": toast(`Rien n'a changé : ${out.message}`, "err", 9000); return;
+    case "switched": {
+      const what = out.copied
+        ? `${pagesLabel(out.copied.dest.pages)} copiées et vérifiées. `
+        : "";
+      toast(`${what}Cahiers : ${modeLabel(out.info.mode).toLowerCase()}.`, "info", 4000);
+      // L'appli repart sur la nouvelle racine (menu, recherche, presence).
+      setTimeout(() => window.location.reload(), 600);
+    }
+  }
+}

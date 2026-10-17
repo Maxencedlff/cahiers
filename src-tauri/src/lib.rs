@@ -18,8 +18,21 @@ use std::time::Duration;
 
 use tauri::{Manager, State};
 
+mod location;
+
 /// Racine des cahiers, resolue une fois au demarrage.
 struct Root(Mutex<PathBuf>);
+
+/// Emplacement des cahiers (location.rs) : espace prive de l'appli, dossier
+/// retenu introuvable au lancement, dossier choisi dans la boite de dialogue.
+/// Seuls ces chemins-la peuvent devenir la racine : le frontend ne passe
+/// jamais un chemin absolu de son choix.
+#[derive(Default)]
+struct Storage {
+    internal: Mutex<PathBuf>,
+    missing: Mutex<Option<PathBuf>>,
+    picked: Mutex<Option<PathBuf>>,
+}
 
 /// Les erreurs remontent au frontend en clair : c'est ce qui s'affiche dans
 /// le bandeau de statut quand une ecriture echoue.
@@ -685,6 +698,158 @@ fn set_root(state: State<Root>, path: String) -> Res<String> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Emplacement des cahiers : dans l'appli ou dossier synchronise       */
+/* ------------------------------------------------------------------ */
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageInfo {
+    /// « app » : espace prive de l'appli ; « folder » : dossier synchronise.
+    mode: &'static str,
+    path: String,
+    internal: String,
+    /// Dossier retenu dans root.txt mais introuvable a ce lancement.
+    missing: Option<String>,
+}
+
+fn lock_of<T: Clone>(m: &Mutex<T>) -> Res<T> {
+    m.lock().map(|g| g.clone()).map_err(|_| fail("etat indisponible"))
+}
+
+fn info_of(root: &State<Root>, st: &State<Storage>) -> Res<StorageInfo> {
+    let path = root_of(root)?;
+    let internal = lock_of(&st.internal)?;
+    Ok(StorageInfo {
+        mode: if location::same_dir(&path, &internal) { "app" } else { "folder" },
+        path: path.to_string_lossy().to_string(),
+        internal: internal.to_string_lossy().to_string(),
+        missing: lock_of(&st.missing)?.map(|p| p.to_string_lossy().to_string()),
+    })
+}
+
+#[tauri::command]
+fn storage_info(root: State<Root>, st: State<Storage>) -> Res<StorageInfo> {
+    info_of(&root, &st)
+}
+
+/// Chemin vise par une bascule : « internal » (espace prive), « picked »
+/// (dernier dossier choisi dans la boite), « current » (racine actuelle),
+/// « missing » (dossier de root.txt introuvable au lancement). `sub` : un
+/// seul nom de dossier dedans (« Cahiers »), jamais un chemin.
+fn target_path(root: &State<Root>, st: &State<Storage>, target: &str, sub: Option<&str>) -> Res<PathBuf> {
+    let base = match target {
+        "internal" => lock_of(&st.internal)?,
+        "current" => root_of(root)?,
+        "picked" => lock_of(&st.picked)?.ok_or_else(|| fail("aucun dossier choisi"))?,
+        "missing" => lock_of(&st.missing)?.ok_or_else(|| fail("aucun dossier introuvable"))?,
+        _ => return Err(fail(format!("emplacement inconnu : {target}"))),
+    };
+    match sub {
+        None => Ok(base),
+        Some(name) => {
+            let ok = !name.is_empty()
+                && Path::new(name).components().count() == 1
+                && matches!(Path::new(name).components().next(), Some(Component::Normal(_)));
+            if !ok {
+                return Err(fail(format!("nom de dossier refuse : {name}")));
+            }
+            Ok(base.join(name))
+        }
+    }
+}
+
+/// Boite « Choisir un dossier » du systeme. Le chemin vient de la boite,
+/// jamais du frontend (sandbox Mac : seul un dossier choisi ainsi est permis).
+#[tauri::command(async)]
+fn pick_sync_folder(app: tauri::AppHandle, st: State<'_, Storage>) -> Res<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file().set_title("Dossier synchronisé pour les cahiers");
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    let Some(picked) = dialog.blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| fail(format!("chemin refuse : {e}")))?;
+    *st.picked.lock().map_err(|_| fail("etat indisponible"))? = Some(path.clone());
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Decrit un emplacement avant d'y basculer. Rien n'est ecrit.
+#[tauri::command(async)]
+fn inspect_location(
+    root: State<'_, Root>, st: State<'_, Storage>, target: String, sub: Option<String>,
+) -> Res<location::DirReport> {
+    let path = target_path(&root, &st, &target, sub.as_deref())?;
+    Ok(location::inspect(&root_of(&root)?, &path))
+}
+
+/// Copie verifiee de la racine actuelle vers l'emplacement vise (location.rs).
+/// `aside` : seulement pour l'espace prive qui n'a aucune page (Vrac vide du
+/// premier lancement), son contenu est renomme a cote, jamais efface.
+#[tauri::command(async)]
+fn copy_to_location(
+    root: State<'_, Root>, st: State<'_, Storage>, target: String, sub: Option<String>, aside: Option<bool>,
+) -> Res<location::CopyReport> {
+    let src = root_of(&root)?;
+    let dst = target_path(&root, &st, &target, sub.as_deref())?;
+    let mut moved = None;
+    if aside.unwrap_or(false) {
+        if target != "internal" || sub.is_some() {
+            return Err(fail("mise de cote refusee hors de l'espace de l'appli"));
+        }
+        if location::inspect(&src, &dst).inventory.pages > 0 {
+            return Err(fail("l'espace de l'appli contient des pages : rien n'a ete deplace"));
+        }
+        moved = location::set_aside(&dst)?;
+    }
+    let mut report = location::copy_tree(&src, &dst)?;
+    report.aside = moved.map(|p| p.to_string_lossy().to_string());
+    Ok(report)
+}
+
+/// Bascule la racine vers l'emplacement vise, retenu pour les lancements
+/// suivants. L'ancien emplacement n'est pas touche.
+#[tauri::command]
+fn switch_location(
+    root: State<Root>, st: State<Storage>, target: String, sub: Option<String>,
+) -> Res<StorageInfo> {
+    let path = target_path(&root, &st, &target, sub.as_deref())?;
+    if target == "internal" {
+        fs::create_dir_all(&path).map_err(|e| fail(format!("{} : {e}", path.display())))?;
+    }
+    if !path.is_dir() {
+        return Err(fail(format!("{} n'est pas un dossier", path.display())));
+    }
+    save_root_preference(&path);
+    *root.0.lock().map_err(|_| fail("racine verrouillee"))? = path;
+    *st.missing.lock().map_err(|_| fail("etat indisponible"))? = None;
+    info_of(&root, &st)
+}
+
+/// Ouvre le dossier des cahiers dans l'explorateur Windows ou le Finder.
+#[tauri::command]
+fn open_root(state: State<Root>) -> Res<()> {
+    let path = root_of(&state)?;
+    open_folder(&path).map_err(|e| fail(format!("{} : {e}", path.display())))
+}
+
+#[cfg(windows)]
+fn open_folder(path: &Path) -> io::Result<()> {
+    std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn open_folder(path: &Path) -> io::Result<()> {
+    std::process::Command::new("open").arg(path).spawn().map(|_| ())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn open_folder(path: &Path) -> io::Result<()> {
+    std::process::Command::new("xdg-open").arg(path).spawn().map(|_| ())
+}
+
+/* ------------------------------------------------------------------ */
 /* Resolution de la racine                                             */
 /* ------------------------------------------------------------------ */
 
@@ -702,42 +867,44 @@ fn save_root_preference(path: &Path) {
     }
 }
 
-/// Ou sont les cahiers ?
-///
-/// 1. le choix deja enregistre ;
-/// 2. les emplacements habituels d'un dossier ESEO dans OneDrive ;
-/// 3. a defaut, on cree Documents/ESEO plutot que d'echouer au demarrage.
-fn resolve_root() -> PathBuf {
-    if let Some(file) = preference_file() {
-        if let Ok(saved) = fs::read_to_string(&file) {
-            let p = PathBuf::from(saved.trim());
-            if p.is_dir() {
-                return p;
-            }
-        }
-    }
+/// Espace prive de l'appli : `Cahiers/` dans le dossier de donnees de Tauri
+/// (Windows %APPDATA%\fr.mdlf.cahiers, Mac ~/Library/Application Support/
+/// fr.mdlf.cahiers, conteneur sandbox compris).
+fn internal_dir(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .or_else(|| dirs::data_dir().map(|d| d.join("fr.mdlf.cahiers")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Cahiers")
+}
 
+/// Anciens emplacements d'un dossier ESEO, repris seulement s'ils
+/// contiennent deja des cahiers (second PC sans root.txt).
+fn legacy_candidates() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let candidates = [
+    vec![
         home.join("OneDrive").join("Desktop").join("ESEO"),
         home.join("OneDrive").join("Bureau").join("ESEO"),
         home.join("OneDrive").join("ESEO"),
         home.join("Desktop").join("ESEO"),
         dirs::document_dir().unwrap_or_else(|| home.join("Documents")).join("ESEO"),
-    ];
-    for c in candidates.iter() {
-        if c.is_dir() {
-            save_root_preference(c);
-            return c.clone();
-        }
-    }
+    ]
+}
 
-    let fallback = dirs::document_dir()
-        .unwrap_or_else(|| home.join("Documents"))
-        .join("ESEO");
-    let _ = fs::create_dir_all(&fallback);
-    save_root_preference(&fallback);
-    fallback
+/// Ou sont les cahiers ? Voir `location::choose_root` : root.txt d'abord,
+/// tel quel ; sinon un ancien dossier ESEO de cahiers ; sinon l'espace prive.
+fn resolve_root(app: &tauri::AppHandle) -> (PathBuf, PathBuf, Option<PathBuf>) {
+    let internal = internal_dir(app);
+    let saved = preference_file().and_then(|f| fs::read_to_string(f).ok());
+    let r = location::choose_root(saved.as_deref(), &internal, &legacy_candidates());
+    if location::same_dir(&r.root, &internal) {
+        let _ = fs::create_dir_all(&internal);
+    }
+    if r.save {
+        save_root_preference(&r.root);
+    }
+    (r.root, internal, r.missing)
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,7 +924,16 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
-        .manage(Root(Mutex::new(resolve_root())))
+        .manage(Root(Mutex::new(PathBuf::new())))
+        .manage(Storage::default())
+        .setup(|app| {
+            let (root, internal, missing) = resolve_root(app.handle());
+            if let Ok(mut g) = app.state::<Root>().0.lock() { *g = root; }
+            let st = app.state::<Storage>();
+            if let Ok(mut g) = st.internal.lock() { *g = internal; }
+            if let Ok(mut g) = st.missing.lock() { *g = missing; }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             root_path,
             machine_name,
@@ -781,6 +957,12 @@ pub fn run() {
             rename_path,
             reveal_path,
             set_root,
+            storage_info,
+            pick_sync_folder,
+            inspect_location,
+            copy_to_location,
+            switch_location,
+            open_root,
         ])
         .run(tauri::generate_context!())
         .expect("erreur au demarrage de Cahiers");

@@ -1574,6 +1574,8 @@ export class PageView {
    */
   private routePointers(loaded: LoadedPage): void {
     loaded.doc.root.addEventListener("pointerdown", (e) => {
+      // Barre d'un tableau du texte : ses boutons, a la souris comme au stylet et au doigt.
+      if ((e.target as Element).closest?.(".doc-table-bar")) return;
       // Photo dans le texte : le stylet ecrit dessus comme sur un PDF ; le
       // doigt sur une photo non selectionnee fait defiler. Deplacer ou
       // retailler : photo selectionnee (appui long, souris, barre).
@@ -1717,6 +1719,9 @@ export class PageView {
    */
   private placeCaretAt(loaded: LoadedPage, x: number, y: number): boolean {
     const root = loaded.doc.root;
+    // Bloc de code : sa zone de texte prend le clavier (le navigateur y place le curseur au clic, pas au stylet).
+    const code = document.elementFromPoint(x, y)?.closest(".doc-code")?.querySelector<HTMLTextAreaElement>(".doc-code-input");
+    if (code && root.contains(code)) { code.focus({ preventScroll: true }); return true; }
     const d = document as Document & {
       caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
     };
@@ -1748,7 +1753,10 @@ export class PageView {
       box = probe.getBoundingClientRect();
     }
     if (!box.height || y < box.top - 4 || y > box.bottom + 4) return false;
-    root.focus({ preventScroll: true });
+    // Case d'un tableau : c'est elle qui prend le clavier.
+    const cell = (range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>(".cell-doc");
+    (cell && root.contains(cell) ? cell : root).focus({ preventScroll: true });
     const sel = document.getSelection();
     if (!sel) return false;
     sel.removeAllRanges();
@@ -2063,7 +2071,7 @@ export class PageView {
     r.selectNodeContents(root);
     if (side === "after") r.setStart(at.startContainer, at.startOffset);
     else r.setEnd(at.startContainer, at.startOffset);
-    if (r.cloneContents().querySelector(".eq, .doc-img, math-field")) return false;
+    if (r.cloneContents().querySelector(".eq, .doc-img, .doc-island, math-field")) return false;
     return !r.toString().replace(/[\s\u200b]/g, "");
   }
 
@@ -3414,7 +3422,27 @@ export class PageView {
 
   /** Texte de la page en cours, pour poser une formule depuis le ruban. */
   get activeDoc(): TextDoc | undefined {
-    return this.activePage()?.doc;
+    const doc = this.activePage()?.doc;
+    // Clavier dans une case d'un tableau : la formule du ruban va dans la case.
+    return doc?.activeCell ?? doc;
+  }
+
+  /** Bloc de code vide au curseur du texte de la page en vue (aussi : ``` puis Entree dans le texte). */
+  insertCode(): boolean {
+    const loaded = this.activePage();
+    if (!loaded) return false;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
+    this.notePreEdit(loaded);
+    return !!loaded.doc.insertCode();
+  }
+
+  /** Nouveau tableau vide au curseur du texte de la page en vue (sinon a la fin du texte). */
+  insertTable(rows = 2, cols = 2): boolean {
+    const loaded = this.activePage();
+    if (!loaded) return false;
+    if (loaded.readOnly || this.readOnly) { this.warnedReadOnly = false; this.warnReadOnly(); return false; }
+    this.notePreEdit(loaded);
+    return !!loaded.doc.insertTable(rows, cols);
   }
 
   /**
@@ -5607,7 +5635,7 @@ export class PageView {
       range.selectNodeContents(n);
       for (const r of range.getClientRects()) hard.push(span(r));
     }
-    p.doc.root.querySelectorAll(".eq, .doc-img").forEach((e) => hard.push(span(e.getBoundingClientRect())));
+    p.doc.root.querySelectorAll(".eq, .doc-img, .doc-island").forEach((e) => hard.push(span(e.getBoundingClientRect())));
     for (const c of Array.from(p.overlay.children)) hard.push(span(c.getBoundingClientRect()));
     const k = (sheet.clientWidth || PAGE_W) / PAGE_W;
     const soft: Span[] = [];

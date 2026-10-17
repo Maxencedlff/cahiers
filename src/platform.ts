@@ -2,6 +2,7 @@ import { BrowserFs, TauriFs, joinPath, splitDataUrl, type FsAdapter } from "./co
 import {
   isPresenceFile, othersPresent, parsePresence, presenceFileName, type OtherPresence,
 } from "./core/sync";
+import type { LocationApi, StorageInfo, Target } from "./core/storage/location";
 
 /**
  * Couche plateforme. L'application tourne dans deux contextes :
@@ -30,6 +31,8 @@ export interface Platform {
   /** Cles MyScript retenues par la machine, si elles ont ete enregistrees. */
   keys: { applicationKey: string; hmacKey: string } | null;
   saveKeys: ((applicationKey: string, hmacKey: string) => Promise<void>) | null;
+  /** Emplacement des cahiers (dans l'appli / dossier synchronise). */
+  location: LocationApi;
 }
 
 function inTauri(): boolean {
@@ -39,7 +42,8 @@ function inTauri(): boolean {
 export async function detectPlatform(): Promise<Platform> {
   if (!inTauri()) {
     const fs = new BrowserFs();
-    await seedDemo(fs);
+    // « ?vierge » : premier lancement tel qu'un nouvel utilisateur le voit.
+    if (!new URLSearchParams(window.location.search).has("vierge")) await seedDemo(fs);
     return {
       fs,
       rootLabel: "Mode navigateur, données de développement",
@@ -50,6 +54,7 @@ export async function detectPlatform(): Promise<Platform> {
       ocr: null,
       keys: null,
       saveKeys: null,
+      location: browserLocation(),
     };
   }
 
@@ -79,6 +84,32 @@ export async function detectPlatform(): Promise<Platform> {
     keys,
     saveKeys: (applicationKey: string, hmacKey: string) =>
       invoke<void>("set_myscript_keys", { applicationKey, hmacKey }),
+    location: tauriLocation(invoke as never),
+  };
+}
+
+type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+
+/** Emplacement des cahiers : commandes Rust (src-tauri/src/location.rs). */
+function tauriLocation(invoke: Invoke): LocationApi {
+  return {
+    info: () => invoke<StorageInfo>("storage_info"),
+    pickFolder: () => invoke<string | null>("pick_sync_folder"),
+    inspect: (target, sub) => invoke("inspect_location", { target, sub: sub ?? null }),
+    copy: (target: Target, sub?: string, aside?: boolean) =>
+      invoke("copy_to_location", { target, sub: sub ?? null, aside: aside ?? false }),
+    switchTo: (target, sub) => invoke<StorageInfo>("switch_location", { target, sub: sub ?? null }),
+    open: () => invoke<void>("open_root"),
+  };
+}
+
+/** Mode navigateur : les donnees sont « dans l'appli » (localStorage), sans bascule. */
+function browserLocation(): LocationApi {
+  const label = "Mode navigateur, données de développement";
+  const no = () => Promise.reject(new Error("disponible dans l'appli installée seulement"));
+  return {
+    info: async () => ({ mode: "app", path: label, internal: label, missing: null }),
+    pickFolder: no, inspect: no, copy: no, switchTo: no, open: no,
   };
 }
 
@@ -122,7 +153,8 @@ function buildPresence(fs: FsAdapter, machine: string): Presence {
  * Rien de tout ceci n'existe dans l'application installee.
  */
 async function seedDemo(fs: BrowserFs): Promise<void> {
-  if (await fs.exists("Maths")) return;
+  // Seulement sur un stockage vide (bancs d'essai : localStorage.clear()).
+  if ((await fs.listDirs("")).length || (await fs.listFiles("")).length) return;
   const now = new Date().toISOString();
   for (const [nb, color, dividers] of [
     ["Maths", "#2563eb", ["Cours", "Exos", "TD"]],

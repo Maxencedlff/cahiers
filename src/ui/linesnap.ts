@@ -28,7 +28,8 @@ export function snapLines(root: HTMLElement, all = false): boolean {
   let changed = false;
   for (const eq of root.querySelectorAll<HTMLElement>(".eq")) {
     if (eq.dataset.snap && !all) continue;
-    if (eq.closest(HEADING)) { eq.dataset.snap = "1"; continue; }
+    // Titre ou case de tableau : leur propre grille, on ne touche a rien.
+    if (eq.closest(HEADING) || eq.closest(".doc-table")) { eq.dataset.snap = "1"; continue; }
     const m = measureEq(eq);
     if (!m) continue;
     const s = snapInline(m.boxAsc / fontPx, m.boxDesc / fontPx, m.inkAsc / fontPx, m.inkDesc / fontPx);
@@ -44,7 +45,7 @@ export function snapLines(root: HTMLElement, all = false): boolean {
   // h : hauteur reelle (offsetHeight est arrondi, l'ecart d'un demi-pixel
   // suffisait a laisser une ligne a cote de la plus haute des deux).
   const want = new Map<HTMLElement, { top: number; bottom: number; h: number }>();
-  for (const fig of root.querySelectorAll<HTMLElement>(":scope > .doc-img, .dl > .doc-img")) {
+  for (const fig of root.querySelectorAll<HTMLElement>(":scope > .doc-img, .dl > .doc-img, :scope > .doc-island")) {
     const h = fig.offsetHeight;
     if (h) want.set(fig, { ...blockMargins(h, line, 0.25, ghostAfter(fig)), h: fig.getBoundingClientRect().height });
   }
@@ -99,7 +100,7 @@ function ghostAfter(fig: HTMLElement): boolean {
   const a = fig.nextSibling;
   if (!(a instanceof Text) || a.data.replace(/\u200b/g, "")) return false;
   const b = a.nextSibling;
-  return !b || b.nodeName === "BR" || (b instanceof HTMLElement && (b.classList.contains("doc-img") || b.classList.contains("dl")));
+  return !b || b.nodeName === "BR" || (b instanceof HTMLElement && (b.classList.contains("doc-img") || b.classList.contains("dl") || b.classList.contains("doc-island")));
 }
 
 /**
