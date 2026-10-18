@@ -25,6 +25,11 @@ tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 # Boite « Enregistrer sous » de l'export Word (save_export).
 tauri-plugin-dialog = "2"
+# Ouvrir un dossier, montrer un fichier dans l'explorateur ou le Finder
+# (NSWorkspace sur Mac, compatible sandbox), ouvrir la politique de
+# confidentialite dans le navigateur (shell.rs). Fonctions Rust seulement :
+# aucune permission « opener » n'est donnee au frontend.
+tauri-plugin-opener = "2.7"
 # Mises a jour : verifie latest.json sur cahiers-releases (signature minisign),
 # telecharge, installe ; process relance l'appli ensuite.
 tauri-plugin-updater = "2.14"

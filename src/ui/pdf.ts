@@ -3,20 +3,25 @@
  * rien n'est telecharge ni parse tant qu'aucun PDF n'est ouvert (lancement
  * et batterie). Documents ouverts gardes en petit nombre (LRU), rendus d'une
  * page a la fois (un seul worker).
+ *
+ * Build `legacy/` : le build par defaut appelle sans polyfill des API que le
+ * WebKit des Mac encore suivis n'a pas (Map.getOrInsertComputed,
+ * Uint8Array.fromBase64, Math.sumPrecise) et l'import PDF y cassait. Le
+ * legacy les apporte ; memes types, memes fonctions.
  */
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import type { Bounds } from "../core/ink/stroke";
 import { joinTextItems, placeTextItem, type PlacedText } from "../core/pdf/pdf";
 
-type PdfJs = typeof import("pdfjs-dist");
+type PdfJs = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 let lib: Promise<PdfJs> | null = null;
 
 /** Charge pdf.js et son worker (fichier servi par Vite, meme origine : CSP 'self'). */
 export function loadPdfJs(): Promise<PdfJs> {
   lib ??= (async () => {
     const [m, worker] = await Promise.all([
-      import("pdfjs-dist"),
-      import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+      import("pdfjs-dist/legacy/build/pdf.mjs"),
+      import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url"),
     ]);
     m.GlobalWorkerOptions.workerSrc = worker.default;
     return m;

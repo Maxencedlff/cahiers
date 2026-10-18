@@ -20,6 +20,7 @@ use tauri::{Manager, State};
 
 mod location;
 mod sandbox;
+mod shell;
 
 /// Racine des cahiers, resolue une fois au demarrage.
 struct Root(Mutex<PathBuf>);
@@ -450,9 +451,39 @@ fn save_export(
         .into_path()
         .map_err(|e| fail(format!("chemin refuse : {e}")))?;
     let shown = path.display().to_string();
-    write_durable(&path, &shown, &bytes)
-        .map_err(|e| fail(format!("{e} (document ouvert dans Word ?)")))?;
+    write_export(&path, &bytes).map_err(|e| fail(export_error(&shown, &e)))?;
     Ok(Some(shown))
+}
+
+/// Ecrit l'export directement sur le fichier choisi dans « Enregistrer sous ».
+///
+/// Pas de `write_durable` ici : son fichier temporaire, a cote du fichier
+/// choisi, est refuse sous App Sandbox (Mac App Store), ou la boite n'ouvre
+/// que le fichier choisi et pas son dossier (« Related Items » du guide de
+/// la sandbox). L'atomicite compte moins que pour une page : un export rate
+/// se refait, et un fichier a moitie ecrit est retire.
+fn write_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut created = false;
+    let written = retry_locked(|| {
+        let mut file = fs::File::create(path)?;
+        created = true;
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    if written.is_err() && created {
+        let _ = fs::remove_file(path);
+    }
+    written
+}
+
+/// Message d'un export refuse. L'indice « ouvert dans Word ? » ne vaut que
+/// sous Windows, ou Word verrouille le document ouvert ; ailleurs il egarait.
+fn export_error(shown: &str, e: &io::Error) -> String {
+    if cfg!(windows) && is_locked(e) {
+        format!("{shown} : {e} (document ouvert dans Word ?)")
+    } else {
+        format!("{shown} : {e}")
+    }
 }
 
 /// Async : hors du thread principal. Chaque photo affichee passe par ici, et
@@ -568,6 +599,14 @@ fn ocr_bytes(_bytes: &[u8]) -> Res<String> {
     Err(fail("OCR disponible uniquement sous Windows"))
 }
 
+/// OCR local disponible (Windows seulement). Sans lui, le frontend ne
+/// propose pas la lecture du texte des photos : pas d'avertissement a
+/// chaque import sur Mac ou Linux.
+#[tauri::command]
+fn ocr_available() -> bool {
+    cfg!(windows)
+}
+
 #[tauri::command]
 fn path_exists(state: State<Root>, rel: String) -> Res<bool> {
     if rel.is_empty() {
@@ -667,33 +706,13 @@ fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
     fs::rename(src, dst)
 }
 
-/// Montre un fichier dans l'explorateur Windows, selectionne. Sert a la
-/// feuille « Page illisible » : verifier que OneDrive l'a bien telecharge.
+/// Montre un fichier, selectionne, dans l'explorateur ou le Finder
+/// (shell.rs). Sert a la feuille « Page illisible » : verifier que OneDrive
+/// l'a bien telecharge.
 #[tauri::command]
 fn reveal_path(state: State<Root>, rel: String) -> Res<()> {
     let path = resolve(&root_of(&state)?, &rel)?;
-    reveal(&path).map_err(|e| fail(format!("{rel} : {e}")))
-}
-
-#[cfg(windows)]
-fn reveal(path: &Path) -> io::Result<()> {
-    use std::os::windows::process::CommandExt;
-    // /select, puis le chemin entre guillemets, sans autre echappement :
-    // c'est la seule forme qu'explorer.exe comprend avec des espaces.
-    let target = if path.exists() { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
-    // Le chemin relatif arrive avec des "/" (Maths/Cours/0001.page.json) :
-    // explorer ne selectionne rien avec, il ouvre Documents.
-    let target = target.display().to_string().replace('/', "\\");
-    std::process::Command::new("explorer")
-        .raw_arg(format!("/select,\"{target}\""))
-        .spawn()
-        .map(|_| ())
-}
-
-#[cfg(not(windows))]
-fn reveal(path: &Path) -> io::Result<()> {
-    let dir = path.parent().unwrap_or(path);
-    std::process::Command::new("xdg-open").arg(dir).spawn().map(|_| ())
+    shell::reveal(&path).map_err(|e| fail(format!("{rel} : {e}")))
 }
 
 /// Change la racine et la retient pour les prochains lancements.
@@ -875,22 +894,13 @@ fn keep_access(st: &State<Storage>, target: &str) -> Res<()> {
 #[tauri::command]
 fn open_root(state: State<Root>) -> Res<()> {
     let path = root_of(&state)?;
-    open_folder(&path).map_err(|e| fail(format!("{} : {e}", path.display())))
+    shell::open_dir(&path).map_err(|e| fail(format!("{} : {e}", path.display())))
 }
 
-#[cfg(windows)]
-fn open_folder(path: &Path) -> io::Result<()> {
-    std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
-}
-
-#[cfg(target_os = "macos")]
-fn open_folder(path: &Path) -> io::Result<()> {
-    std::process::Command::new("open").arg(path).spawn().map(|_| ())
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-fn open_folder(path: &Path) -> io::Result<()> {
-    std::process::Command::new("xdg-open").arg(path).spawn().map(|_| ())
+/// Politique de confidentialite (Reglages › À propos), dans le navigateur.
+#[tauri::command]
+fn open_privacy() -> Res<()> {
+    shell::open_privacy().map_err(|e| fail(format!("{} : {e}", shell::PRIVACY_URL)))
 }
 
 /* ------------------------------------------------------------------ */
@@ -1011,6 +1021,7 @@ pub fn run() {
             write_binary,
             save_export,
             ocr_image,
+            ocr_available,
             myscript_keys,
             set_myscript_keys,
             path_exists,
@@ -1025,6 +1036,7 @@ pub fn run() {
             copy_to_location,
             switch_location,
             open_root,
+            open_privacy,
         ])
         .run(tauri::generate_context!())
         .expect("erreur au demarrage de Cahiers");
@@ -1071,6 +1083,32 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.to_string_lossy().ends_with(".tmp-write"));
         assert!(a.file_name().unwrap().to_string_lossy().starts_with("0001.page.json."));
+    }
+
+    #[test]
+    fn export_ecrit_sur_le_fichier_choisi_seulement() {
+        // Sous sandbox, seul le fichier choisi est ouvert : rien a cote.
+        let dir = std::env::temp_dir().join(format!("cahiers-export-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Cours.docx");
+        write_export(&path, b"ancien contenu plus long").unwrap();
+        write_export(&path, b"neuf").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"neuf");
+        let names: Vec<_> = fs::read_dir(&dir).unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["Cours.docx".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn indice_word_sous_windows_seulement() {
+        let locked = io::Error::from(io::ErrorKind::PermissionDenied);
+        let msg = export_error("C:/Cours.docx", &locked);
+        assert_eq!(msg.contains("Word"), cfg!(windows));
+        let other = io::Error::from(io::ErrorKind::NotFound);
+        assert!(!export_error("C:/Cours.docx", &other).contains("Word"));
     }
 
     #[test]

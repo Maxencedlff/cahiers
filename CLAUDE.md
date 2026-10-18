@@ -348,6 +348,13 @@ Le portable tient environ 3 h. Chaque watt compte.
 - Raccourcis sur Mac (17/10/2026) : tests `src/tests/mac-keys.test.ts`.
   - `src/core/shortcuts.ts` : `altKeyName` (touche d'un raccourci Alt : lettre/chiffre d'`e.key` d'abord, AZERTY Windows compris, sinon `e.code` : Option+= « ≠ » → « = », Option+F « ƒ » → « f », & é " → chiffres) ; `typesChar` (AltGr Windows, Option seule sur Mac = caractère) ; `isMacSystemKey` (Cmd+Q/H/W/M laissés à macOS, `ctrlCommand(e, mac)` les ignore ; ⌃W, ⌃M passent) ; `keyLabel` Mac : Ctrl+W/M/Tab → ⌃ ; `detectMac` lit aussi `navigator.userAgentData.platform`.
   - `src/ui/app.ts` (`onAltKey` : tout par `altKeyName` ; outils Alt+A/Z sur la lettre tapée, plus la place physique KeyA/KeyZ, fausse en AZERTY) ; `src/ui/schema-view.ts` (Alt+U/I/T/O/F par `altKeyName`) ; `src/ui/pageview.ts` (`typing` = `typesChar`) ; `src/ui/textdoc.ts` (Cmd+B/I/G = Ctrl) ; `src/ui/calculator/keys.ts` (`mapKey(e, mac)` : Option+[ ] { } | s'écrit sur Mac).
+- Mac, corrections de l'audit du 18/10/2026 (branche fix/mac) :
+  - Export PDF : `src/core/printwait.ts` (`printAndWait` : fin = `afterprint`, focus revenu après l'avoir perdu, ou `PRINT_WAIT_MAX_MS` ; commande d'impression refusée = erreur, la vue revient toujours), utilisé par `PageView.exportPdf` et `printReview`. Sur Mac, Tauri passe `window.print` à l'impression native : permission `core:webview:allow-print` (capability) et entitlement `com.apple.security.print` (MAS). Tests : `src/tests/printwait.test.ts`.
+  - `src-tauri/src/shell.rs` : seul endroit « quel outil selon le système » (`open_dir`, `reveal` = NSWorkspace sur Mac, compatible sandbox, `open_privacy`), par les fonctions libres de tauri-plugin-opener (plugin non enregistré, aucune permission opener côté JS).
+  - Export Word : `write_export` écrit directement sur le fichier choisi (pas de frère `.tmp-write`, refusé par la sandbox) ; « document ouvert dans Word ? » seulement sous Windows.
+  - pdf.js : build `legacy/` (polyfills des API récentes). `vite.config.ts` : cible `chrome110` (Windows) ou `safari16.4` (WebKit de macOS 13.3 = `bundle.macOS.minimumSystemVersion`), sans sourcemaps en build.
+  - OCR : commande `ocr_available` (Windows seulement) ; ailleurs `platform.ocr` = null, pas d'avertissement à chaque photo.
+  - Confidentialité : `src/core/privacy.ts` (`PRIVACY_URL`, `MYSCRIPT_NOTICE` dans la boîte des clés et les Réglages), Réglages › À propos › « Politique de confidentialité » (`platform.openPrivacy`, adresse fixe côté Rust). Aucun texte de l'interface ne cite ESEO (test `src/tests/textes.test.ts`).
 - **Tests dès le début.** Une vingtaine de calculs à résultat connu, lancés automatiquement. Ajouter les matrices ne doit pas casser la dérivation sans qu'on le voie tout de suite.
 
 ---
@@ -371,7 +378,7 @@ Le dossier `ESEO/` est synchronisé entre un portable et un PC fixe.
 - Ne pas utiliser SQLite ni un fichier global dans le dossier synchronisé.
 - Ne pas mettre le verrou d'instance dans OneDrive.
 - Ne pas bloquer l'écriture quand le réseau est absent.
-- Ne pas ouvrir de navigateur, ne pas afficher d'URL.
+- Ne pas ouvrir de navigateur, ne pas afficher d'URL. Seule exception : la politique de confidentialité (exigée par l'App Store), ouverte au clic depuis les Réglages.
 - Ne pas ajouter de fonctionnalité de priorité 3 avant que la priorité 1 soit solide.
 
 ---

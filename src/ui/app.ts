@@ -62,6 +62,7 @@ import {
 import { showShortcuts } from "./help";
 import type { Updater } from "./updater";
 import { shortVersion } from "../core/update";
+import { MYSCRIPT_NOTICE, PRIVACY_URL } from "../core/privacy";
 import { icon, widthIcon, type IconName } from "./icons";
 import { applyAppearance, installTooltips, onSystemThemeChange } from "./tooltip";
 import { retoneSurfaces } from "./canvas";
@@ -253,6 +254,8 @@ export class App {
     /** Emplacement des cahiers (dans l'appli / dossier synchronise) ; null = pas de bascule. */
     private location: LocationApi | null = null,
     private canSwitchLocation = false,
+    /** Politique de confidentialite dans le navigateur du systeme (Reglages › À propos). */
+    private openPrivacy: (() => Promise<void>) | null = null,
   ) {
     document.addEventListener("cahiers-typing-size", () => this.paintSizeButton());
     this.repo = new Repo(fs);
@@ -1603,7 +1606,7 @@ export class App {
         const ok = await confirmDialog(
           isGroup ? "Supprimer le groupe" : "Supprimer l'intercalaire",
           `${dividerLabel(d)} et toutes ses pages${inside ? `, avec ${inside} intercalaire${inside > 1 ? "s" : ""} rangé${inside > 1 ? "s" : ""} dedans,` : ""} `
-            + "partent à la corbeille (dossier ESEO/.corbeille). "
+            + "partent à la corbeille de Cahiers. "
             + "Le bouton « Annuler » du message qui suit le remet en place.",
           "Supprimer",
         );
@@ -1783,7 +1786,7 @@ export class App {
         const name = await this.repo.restoreNotebook(entry);
         toast(`Matière ${name} restaurée`);
       } catch (e) {
-        toast(`Restauration impossible : ${(e as Error).message}. La matière reste dans ESEO/.corbeille.`, "err", 8000);
+        toast(`Restauration impossible : ${(e as Error).message}. La matière reste dans la corbeille de Cahiers.`, "err", 8000);
       }
       if (this.screen === "menu") await this.showMenu();
       return;
@@ -1805,7 +1808,7 @@ export class App {
         const n = await this.repo.restorePage(entry);
         toast(`Page ${n} de ${dividerLabel(entry.divider)} restaurée`);
       } catch (e) {
-        toast(`Restauration impossible : ${(e as Error).message}. La page reste dans ESEO/.corbeille.`, "err", 8000);
+        toast(`Restauration impossible : ${(e as Error).message}. La page reste dans la corbeille de Cahiers.`, "err", 8000);
       }
       return;
     }
@@ -1813,7 +1816,7 @@ export class App {
     try {
       name = await this.repo.restoreDivider(entry);
     } catch (e) {
-      toast(`Restauration impossible : ${(e as Error).message}. L'intercalaire reste dans ESEO/.corbeille.`, "err", 8000);
+      toast(`Restauration impossible : ${(e as Error).message}. L'intercalaire reste dans la corbeille de Cahiers.`, "err", 8000);
       return;
     }
     toast(`Intercalaire ${dividerLabel(name)} restauré`);
@@ -1923,7 +1926,7 @@ export class App {
     const title = (await this.repo.readMeta(dir)).title;
     const ok = await confirmDialog(
       "Supprimer la matière",
-      `${title} et toutes ses pages partent à la corbeille (dossier ESEO/.corbeille). `
+      `${title} et toutes ses pages partent à la corbeille de Cahiers. `
         + "Le bouton « Annuler » du message qui suit la remet en place.",
       "Supprimer",
     );
@@ -2412,6 +2415,7 @@ export class App {
           class: q.backendReady ? "" : "primary", onclick: () => { void this.editKeys().then(() => paint()); },
         }, icon("key", 18), q.backendReady ? "Modifier les clés…" : "Saisir les clés…"),
         q.backendReady ? "Configurées : la conversion est active" : "Non configurées : l'encre est gardée, rien n'est converti"),
+        el("p", { class: "set-note" }, MYSCRIPT_NOTICE),
         el("h3", { class: "set-h" }, "Diagnostic"),
         settingRow("Sonde stylet", el("button", {
           onclick: () => { dlg.close(); this.showProbe(); },
@@ -2425,6 +2429,12 @@ export class App {
             onclick: () => { void this.updater?.check(true); },
           }, icon("download", 18), "Rechercher des mises à jour"),
           this.appVersion ? `Cahiers ${shortVersion(this.appVersion)} installé` : "Cahiers installé"),
+        ] : []),
+        ...(this.openPrivacy ? [
+          el("h3", { class: "set-h" }, "À propos"),
+          settingRow("Confidentialité", el("button", {
+            onclick: () => { void this.showPrivacy(); },
+          }, "Politique de confidentialité"), "Aucune donnée collectée ; s'ouvre dans le navigateur"),
         ] : []),
       );
     };
@@ -3409,6 +3419,15 @@ export class App {
     this.paintToolbar();
   }
 
+  /** Ouvre la politique de confidentialite ; un echec est dit, avec l'adresse. */
+  private async showPrivacy(): Promise<void> {
+    try {
+      await this.openPrivacy?.();
+    } catch (e) {
+      toast(`Navigateur introuvable : ${(e as Error).message}. Adresse : ${PRIVACY_URL}`, "err", 8000);
+    }
+  }
+
   /**
    * Saisie des cles MyScript. Elles sont essayees avant d'etre gardees (un
    * petit trait envoye), puis servent tout de suite : plus de relance de
@@ -3432,7 +3451,7 @@ export class App {
         message: `Clés non vérifiées : ${err.message.replace(/\.$/, "")}. Elles serviront dès que MyScript répondra.`,
         force: "Enregistrer sans tester",
       };
-    });
+    }, MYSCRIPT_NOTICE);
     if (!r) return false;
     const keys = { applicationKey: r.app, hmacKey: r.hmac };
     let onMachine = false;
