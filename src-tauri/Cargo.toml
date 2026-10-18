@@ -1,6 +1,6 @@
 [package]
 name = "cahiers"
-version = "0.2.0"
+version = "0.2.1"
 description = "Prise de notes stylet pour etudes d'ingenieur"
 authors = ["Maxence de La Fouchardiere"]
 edition = "2021"
