@@ -125,7 +125,7 @@ jobs:
           (umask 077 && printf '%s\n' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH")
           npx tauri build --target universal-apple-darwin --bundles app,dmg
       # Installateurs + artefacts du updater (.sig, Cahiers.app.tar.gz).
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cahiers-${{ matrix.name }}
           path: |
@@ -293,7 +293,7 @@ jobs:
           lipo -archs "$app/Contents/MacOS/cahiers"
           pkgutil --check-signature mas/Cahiers.pkg | tee mas/pkgutil.txt
           grep -F "3rd Party Mac Developer Installer" mas/pkgutil.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cahiers-mas
           path: mas/
