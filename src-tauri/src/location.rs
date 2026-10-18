@@ -39,7 +39,7 @@ pub struct DirReport {
     pub exists: bool,
     /// Noms du premier niveau (dossiers et fichiers), tels quels.
     pub entries: Vec<String>,
-    /// Dossiers du premier niveau qui ont un cahier.json.
+    /// Matieres : dossiers du premier niveau qui ont un cahier.json, hors Vrac.
     pub notebooks: u64,
     #[serde(flatten)]
     pub inventory: Inventory,
@@ -147,6 +147,42 @@ pub fn confine(r: Resolved, internal: &Path, granted: Option<&Path>) -> Resolved
     Resolved { root: internal.to_path_buf(), save: false, missing: Some(r.root) }
 }
 
+/// Sandbox : un dossier synchronise deplace ou renomme dans le Finder. Le
+/// bookmark le suit (`granted` : le dossier qu'il rouvre), root.txt garde
+/// l'ancien chemin, et `confine` le declarerait introuvable (C-10).
+///
+/// Si la racine retenue (`r.root`, ou `r.missing` quand son dossier a
+/// disparu) n'est plus dans `granted`, elle y est replacee : le dossier
+/// rouvert lui-meme, ou son sous-dossier de meme nom que l'ancienne racine
+/// quand c'est lui qui a les cahiers (« Cahiers », seul sous-dossier qu'une
+/// bascule cree). `save` : root.txt est reecrit avec ce chemin. None = rien
+/// a suivre (espace prive, racine deja couverte, dossier rouvert absent).
+pub fn follow_bookmark(r: &Resolved, internal: &Path, granted: &Path) -> Option<Resolved> {
+    let saved = r.missing.as_deref().unwrap_or(&r.root);
+    if same_dir(saved, internal) || !granted.is_dir() {
+        return None;
+    }
+    if matches!(relation(granted, saved), "same" | "inside") {
+        return None;
+    }
+    let root = saved
+        .file_name()
+        .map(|name| granted.join(name))
+        .filter(|sub| looks_like_cahiers(sub) && !looks_like_cahiers(granted))
+        .unwrap_or_else(|| granted.to_path_buf());
+    Some(Resolved { root, save: true, missing: None })
+}
+
+/// Dossier existant le plus proche d'un chemin (lui-meme ou un parent, jamais
+/// la racine du disque) : point de depart de la boite « Choisir un dossier »
+/// pour retrouver un dossier introuvable.
+pub fn nearest_dir(p: &Path) -> Option<PathBuf> {
+    p.ancestors()
+        .filter(|a| a.parent().is_some())
+        .find(|a| a.is_dir())
+        .map(Path::to_path_buf)
+}
+
 /// Chemin comparable : canonique s'il existe, sinon celui du parent + nom.
 fn canonical(p: &Path) -> PathBuf {
     if let Ok(c) = fs::canonicalize(p) {
@@ -242,10 +278,12 @@ pub fn inspect(root: &Path, target: &Path) -> DirReport {
     let mut notebooks = 0;
     if let Ok(it) = fs::read_dir(target) {
         for e in it.filter_map(|e| e.ok()) {
-            entries.push(e.file_name().to_string_lossy().to_string());
-            if e.path().join("cahier.json").is_file() {
+            let name = e.file_name().to_string_lossy().to_string();
+            // Vrac n'est pas une matiere : « 2 matières » pour Maths seule egarait.
+            if name != "Vrac" && e.path().join("cahier.json").is_file() {
                 notebooks += 1;
             }
+            entries.push(name);
         }
     }
     entries.sort();
@@ -462,6 +500,49 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_suit_un_dossier_deplace_ou_renomme() {
+        let base = tmp("deplace");
+        let internal = base.join("interne");
+        // Racine = sous-dossier « Cahiers » du dossier choisi, puis le dossier
+        // choisi est renomme : le bookmark rouvre le nouveau nom.
+        let old_root = base.join("iCloud").join("Cahiers");
+        let moved = base.join("iCloud renomme");
+        fs::create_dir_all(moved.join("Cahiers").join("Vrac")).unwrap();
+        let lost = Resolved { root: internal.clone(), save: false, missing: Some(old_root.clone()) };
+        let r = follow_bookmark(&lost, &internal, &moved).expect("nouveau chemin suivi");
+        assert_eq!(r, Resolved { root: moved.join("Cahiers"), save: true, missing: None });
+        // Ce chemin est ensuite garde par confine (acces rouvert dessus).
+        assert_eq!(confine(r, &internal, Some(&moved)).root, moved.join("Cahiers"));
+
+        // Racine = le dossier choisi lui-meme, deplace ailleurs.
+        let old_eseo = base.join("OneDrive").join("ESEO");
+        let new_eseo = base.join("Archives").join("ESEO 2026");
+        fs::create_dir_all(new_eseo.join("Vrac")).unwrap();
+        let lost = Resolved { root: internal.clone(), save: false, missing: Some(old_eseo) };
+        let r = follow_bookmark(&lost, &internal, &new_eseo).unwrap();
+        assert_eq!(r.root, new_eseo);
+        assert!(r.save);
+
+        // Rien a suivre : racine deja dans le dossier rouvert, espace prive,
+        // dossier rouvert absent.
+        let ok = Resolved { root: moved.join("Cahiers"), save: false, missing: None };
+        assert_eq!(follow_bookmark(&ok, &internal, &moved), None);
+        let own = Resolved { root: internal.clone(), save: true, missing: None };
+        assert_eq!(follow_bookmark(&own, &internal, &moved), None);
+        let lost = Resolved { root: internal.clone(), save: false, missing: Some(old_root) };
+        assert_eq!(follow_bookmark(&lost, &internal, &base.join("disparu")), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn boite_ouverte_pres_du_dossier_introuvable() {
+        let base = tmp("proche");
+        assert_eq!(nearest_dir(&base.join("absent").join("Cahiers")), Some(base.clone()));
+        assert_eq!(nearest_dir(&base), Some(base.clone()));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn copie_verifiee_sans_ecraser() {
         let base = tmp("copy");
         let src = base.join("src");
@@ -519,12 +600,13 @@ mod tests {
         let base = tmp("inspect");
         put(&base.join("Maths/cahier.json"), "{}");
         put(&base.join("Maths/Cours/0001.page.json"), "{}");
+        put(&base.join("Vrac/cahier.json"), "{}");
         put(&base.join(".versions/a/1.json"), "{}");
         let r = inspect(&std::env::temp_dir().join("cahiers-loc-ailleurs"), &base);
         assert!(r.exists);
         assert_eq!(r.notebooks, 1);
         assert_eq!(r.inventory.pages, 1);
-        assert_eq!(r.inventory.files, 3);
+        assert_eq!(r.inventory.files, 4);
         assert_eq!(r.relation, "none");
         assert_eq!(inspect(&base.join("Maths"), &base).relation, "contains");
         assert_eq!(inspect(&base, &base.join("Maths")).relation, "inside");

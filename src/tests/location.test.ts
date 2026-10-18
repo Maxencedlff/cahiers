@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  isEmptyDir, isFirstRun, planDestination, switchFlow, verifyCopy, SUBFOLDER,
+  isEmptyDir, isFirstRun, planDestination, switchFlow, verifyCopy, NOT_READY, SUBFOLDER,
   type CopyReport, type DirReport, type Inventory, type LocationApi, type StorageInfo, type SwitchAsk, type Target,
 } from "../core/storage/location";
 
@@ -32,11 +32,13 @@ describe("emplacement : que faire du dossier vise", () => {
     expect(planDestination(r, "picked", true)).toEqual({ kind: "refuse" });
   });
 
-  it("espace prive : Vrac vide mis de cote, pages gardees (ouverture)", () => {
-    const skeleton = report({ entries: ["Vrac"], notebooks: 1, files: 1 });
+  it("espace prive : Vrac vide mis de cote ; ancienne copie avec pages = choix (C-13)", () => {
+    const skeleton = report({ entries: ["Vrac"], files: 1 });
     expect(planDestination(skeleton, "internal")).toEqual({ kind: "aside" });
-    const used = report({ entries: ["Vrac", "Maths"], notebooks: 2, pages: 3, files: 5 });
-    expect(planDestination(used, "internal").kind).toBe("open");
+    const used = report({ entries: ["Vrac", "Maths"], notebooks: 1, pages: 3, files: 5 });
+    expect(planDestination(used, "internal")).toEqual({ kind: "reopen", notebooks: 1, pages: 3 });
+    // Ailleurs, un dossier qui a des cahiers est toujours ouvert tel quel.
+    expect(planDestination(used, "picked").kind).toBe("open");
   });
 
   it("racine actuelle ou dossier imbrique : rien", () => {
@@ -100,6 +102,7 @@ function fakeApi(o: {
 
 const yes: SwitchAsk = {
   confirmCopy: async () => true, confirmOpen: async () => true, confirmSubfolder: async () => true,
+  chooseInternal: async () => "copy",
 };
 
 const okCopy = (src: Inventory) => (): CopyReport => ({ path: "x", source: src, dest: src, copied: src.files, same: 0, aside: null });
@@ -176,6 +179,49 @@ describe("emplacement : bascule", () => {
     const out = await switchFlow(api, "internal", yes);
     expect(out.kind).toBe("switched");
     expect(calls).toEqual(["inspect:internal", "copy:internal:aside", "switch:internal"]);
+  });
+
+  it("tout est ecrit et la presence liberee seulement apres confirmation, juste avant la copie", async () => {
+    // C-18 : une annulation ne doit rien liberer ; C-11 : le voile se pose la.
+    const { api, calls } = fakeApi({ current, targets: { picked: report() }, copyResult: okCopy(inv(12, 7, 9000)) });
+    const ask: SwitchAsk = { ...yes, ready: async () => { calls.push("ready"); return true; } };
+    expect((await switchFlow(api, "picked", ask)).kind).toBe("switched");
+    expect(calls).toEqual(["pick", "inspect:picked", "ready", "copy:picked", "switch:picked"]);
+
+    const no = fakeApi({ current, targets: { picked: report() }, copyResult: okCopy(inv(1, 1, 1)) });
+    const refused: SwitchAsk = { ...yes, confirmCopy: async () => false, ready: async () => { no.calls.push("ready"); return true; } };
+    expect((await switchFlow(no.api, "picked", refused)).kind).toBe("cancelled");
+    expect(no.calls).not.toContain("ready");
+  });
+
+  it("une page refusee par le disque : rien n'est copie ni bascule", async () => {
+    const { api, calls } = fakeApi({ current, targets: { picked: report() }, copyResult: okCopy(inv(12, 7, 9000)) });
+    const out = await switchFlow(api, "picked", { ...yes, ready: async () => false });
+    expect(out).toEqual({ kind: "unchanged", message: NOT_READY });
+    expect(calls).toEqual(["pick", "inspect:picked"]);
+    const open = fakeApi({ current, targets: { picked: report({ entries: ["Maths"], notebooks: 1, pages: 30 }) } });
+    expect((await switchFlow(open.api, "picked", { ...yes, ready: async () => false })).kind).toBe("unchanged");
+    expect(open.calls.some((c) => c.startsWith("switch"))).toBe(false);
+  });
+
+  it("ramener dans l'appli qui a une ancienne copie : mise de cote puis copie des notes actuelles", async () => {
+    const setup = () => fakeApi({
+      current: report({ path: "D:/ESEO", relation: "same", files: 400, pages: 250, bytes: 9e6 }),
+      targets: { internal: report({ entries: ["Vrac", "Maths"], notebooks: 1, pages: 3, files: 5 }) },
+      copyResult: okCopy(inv(400, 250, 9e6)),
+    });
+    const copy = setup();
+    let confirmCopy = 0;
+    const out = await switchFlow(copy.api, "internal", { ...yes, confirmCopy: async () => { confirmCopy++; return true; } });
+    expect(out.kind).toBe("switched");
+    expect(copy.calls).toEqual(["inspect:internal", "copy:internal:aside", "switch:internal"]);
+    expect(confirmCopy).toBe(0); // une seule question
+    const reopen = setup();
+    expect((await switchFlow(reopen.api, "internal", { ...yes, chooseInternal: async () => "open" })).kind).toBe("switched");
+    expect(reopen.calls).toEqual(["inspect:internal", "switch:internal"]);
+    const cancel = setup();
+    expect((await switchFlow(cancel.api, "internal", { ...yes, chooseInternal: async () => null })).kind).toBe("cancelled");
+    expect(cancel.calls).toEqual(["inspect:internal"]);
   });
 
   it("dossier dans l'emplacement actuel : refuse sans rien faire", async () => {

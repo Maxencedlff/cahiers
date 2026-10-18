@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryFs } from "../core/storage/fs";
-import { Repo, safeName, trashStamp, TRASH_DIR, serializePage, migratePage } from "../core/storage/repo";
+import { Repo, safeName, trashStamp, HIDDEN_NOTEBOOK, TRASH_DIR, serializePage, migratePage } from "../core/storage/repo";
 import { searchAll, listFlags, normalize } from "../core/storage/search";
 import { pageFileName, parsePageNumber } from "../core/types";
 import { uuid, nowIso } from "../core/id";
@@ -33,6 +33,18 @@ describe("noms de fichiers", () => {
 });
 
 describe("arborescence", () => {
+  it("refuse une matiere au nom cache (point initial), a la creation comme au renommage", async () => {
+    // Sinon elle recoit des notes puis disparait de la liste au rechargement (C-12).
+    for (const title of [".Notes perso", " .git", "./Maths"]) {
+      await expect(repo.createNotebook(title, "#000")).rejects.toThrow(HIDDEN_NOTEBOOK);
+    }
+    expect(await repo.listNotebookDirs()).toEqual(["Vrac"]);
+    expect((await fs.listDirs("")).filter((d) => d.startsWith("."))).toEqual([]);
+    const nb = await repo.createNotebook("Maths", "#000");
+    await expect(repo.renameNotebook(nb, ".Maths")).rejects.toThrow(HIDDEN_NOTEBOOK);
+    expect(await repo.listNotebookDirs()).toContain("Maths");
+  });
+
   it("cree Vrac au premier lancement", async () => {
     expect(await repo.listNotebookDirs()).toContain("Vrac");
   });

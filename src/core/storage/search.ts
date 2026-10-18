@@ -1,5 +1,5 @@
 import type { Repo } from "./repo";
-import type { Block, ColorKey, Page } from "../types";
+import { isFutureVersion, type Block, type ColorKey, type Page } from "../types";
 import { dividerMatches, extractReview, groupReview, type ReviewFilter, type ReviewItem, type ReviewResult, type ReviewSource } from "../review";
 import { docHeadings, docLinks, docTitle, flattenTables, parseDoc, texToPlain, type DocToken } from "../text/doc";
 import { extractFormulas, type Formula } from "../suggest";
@@ -91,6 +91,11 @@ export interface PageIndex {
   anchors?: LinkAnchor[];
   /** Relations du texte tape (core/suggest.ts), reproposees en grise. Absent : aucune. */
   formulas?: Formula[];
+  /**
+   * Page ecrite par une version plus recente de Cahiers (lecture seule) :
+   * indexee quand meme, ses blocs inconnus ignores (C-34). Absent : non.
+   */
+  future?: true;
 }
 
 /** Longueur de la premiere ligne montree dans la liste des pages. */
@@ -163,6 +168,7 @@ export function indexPage(page: Page): PageIndex {
     ...(links.length ? { links } : {}),
     ...(anchors.length ? { anchors } : {}),
     ...(formulas.length ? { formulas } : {}),
+    ...(isFutureVersion(page) ? { future: true as const } : {}),
   };
 }
 
@@ -220,6 +226,10 @@ export function searchableText(b: Block): string {
       ...(Array.isArray(b.parts) ? b.parts : []).flatMap((p) => [p.name ?? "", p.value ?? ""]),
       ...(b.notes ?? []).map((n) => n.label),
     ].filter(Boolean).join(" ");
+    // Bloc d'un type que cette version ne connait pas (page d'une version
+    // plus recente) : rien a chercher dedans, mais la page reste indexee,
+    // sinon elle passerait pour illisible (C-34).
+    default: return "";
   }
 }
 
