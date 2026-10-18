@@ -10,4 +10,4 @@
 export const PRIVACY_URL = "https://cahiers.vercel.app/confidentialite.html";
 
 /** Phrase de la boite et des Reglages « Reconnaissance manuscrite ». */
-export const MYSCRIPT_NOTICE = "Les traits convertis sont envoyés à MyScript (cloud.myscript.com) avec vos clés.";
+export const MYSCRIPT_NOTICE = "Les traits convertis sont envoyés à MyScript (cloud.myscript.com) avec tes clés.";
