@@ -18,6 +18,12 @@ on:
         default: tout
   push:
     tags: ["v*"]
+
+# GITHUB_TOKEN en lecture seule partout : la release passe par RELEASES_TOKEN
+# (depot cahiers-releases), l'envoi Mac App Store par la cle d'API Apple.
+permissions:
+  contents: read
+
 jobs:
   # Tag : les trois numeros de version (package.json, tauri.conf.json,
   # Cargo.toml) doivent etre ceux du tag, avant de payer un build Mac.
@@ -25,16 +31,36 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
+      # Pre-versions (v0.3.0-beta.1, v1.0.0+x) refusees : masBuildNumber ne
+      # sait pas les numeroter (le job mas casserait apres la release), et
+      # une installation beta ne verrait jamais la version finale (isNewer).
+      # Voir docs/PUBLIER.md.
+      - name: Pas de pre-version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*|*+*)
+              echo "::error::Tag « $GITHUB_REF_NAME » : les pre-versions ne sont pas gerees, utiliser vX.Y.Z (docs/PUBLIER.md)."
+              exit 1 ;;
+          esac
       - run: node --experimental-strip-types scripts/release.ts check "$GITHUB_REF_NAME"
 
+  # Tests (ci.yml, version complete : tsc, vitest, npm audit, cargo test
+  # Windows et macOS, avec et sans app-store). Rien n'est construit, publie
+  # ni envoye a Apple si un test est rouge. Aucun secret transmis.
+  test:
+    uses: ./.github/workflows/ci.yml
+    with:
+      complet: true
+
   build:
-    needs: version
+    needs: [version, test]
     # Lancement a la main : « version » est sautee, le build part quand meme
-    # (sauf « Mac App Store seul »). Tag : `inputs.cible` est vide.
+    # (sauf « Mac App Store seul »), mais jamais si « test » a echoue.
+    # Tag : `inputs.cible` est vide.
     if: ${{ !failure() && !cancelled() && inputs.cible != 'mas' }}
     strategy:
       fail-fast: false
@@ -47,22 +73,19 @@ jobs:
           - os: macos-latest
             name: mac
     runs-on: ${{ matrix.os }}
-    env:
-      # Signature des mises a jour (bundle.createUpdaterArtifacts) : sans
-      # elle, `tauri build` s'arrete. Cle privee : ~/.config/cahiers-updater.
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    # Les secrets ne sont declares que dans les etapes `tauri build` : ni les
+    # actions tierces, ni les scripts d'installation npm ne les voient.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           # Mac : une seule appli pour les puces Apple et Intel.
           targets: ${{ matrix.name == 'mac' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
       - name: Paquets systeme (Linux)
@@ -70,27 +93,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: npm ci || npm install
+      - run: npm ci
+      # Signature des mises a jour (bundle.createUpdaterArtifacts) : sans
+      # elle, `tauri build` s'arrete. Cle privee : ~/.config/cahiers-updater.
       - name: Build (Windows, Linux)
         if: matrix.name != 'mac'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build ${{ matrix.name == 'linux' && '--bundles deb,appimage' || '' }}
       # Mac : signe avec le certificat Developer ID et notarise par Apple
       # (secrets du depot), sinon macOS refuse d'ouvrir l'appli telechargee.
       - name: Build signe et notarise (Mac)
         if: matrix.name == 'mac'
         env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        # La cle .p8 passe par l'environnement, jamais recopiee dans le
+        # script genere ; fichier supprime a la fin, meme en cas d'echec.
         run: |
-          echo "${{ secrets.APPLE_API_KEY_P8 }}" > "$RUNNER_TEMP/AuthKey.p8"
+          set -euo pipefail
           export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
+          (umask 077 && printf '%s\n' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH")
           npx tauri build --target universal-apple-darwin --bundles app,dmg
       # Installateurs + artefacts du updater (.sig, Cahiers.app.tar.gz).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cahiers-${{ matrix.name }}
           path: |
@@ -112,16 +147,17 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
-      - uses: actions/download-artifact@v4
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artefacts
       - name: Fichiers a publier et latest.json
         run: node --experimental-strip-types scripts/release.ts plan "$GITHUB_REF_NAME" artefacts publier
-      # Depot public : le jeton RELEASES_TOKEN (PAT) peut y publier. gh cree
+      # Depot public : le jeton RELEASES_TOKEN peut y publier (jeton
+      # fine-grained limite a cahiers-releases, voir docs/PUBLIER.md). gh cree
       # la release en brouillon, envoie les fichiers, puis la publie : le
       # latest.json « latest » ne pointe jamais vers une release incomplete.
       - name: Release dans Maxencedlff/cahiers-releases
@@ -140,13 +176,13 @@ jobs:
 
   # Mac App Store (doc Tauri v2 « App Store ») : a cote du .dmg Developer ID,
   # qui ne change pas. Tag v* (apres le job « version ») ou lancement a la
-  # main. Ne bloque ni « build » ni « release ».
+  # main. Ne bloque ni « build » ni « release ». Jamais si « test » a echoue.
   # - config fusionnee : src-tauri/tauri.appstore.conf.json (sandbox,
   #   entitlements, profil embarque, pas d'updater) + feature Cargo app-store ;
   # - signe « Apple Distribution », .pkg signe « 3rd Party Mac Developer
   #   Installer », verifie, puis envoye sur App Store Connect (TestFlight).
   mas:
-    needs: version
+    needs: [version, test]
     if: ${{ !failure() && !cancelled() }}
     runs-on: macos-latest
     env:
@@ -156,19 +192,19 @@ jobs:
       ASC_APP_ID: "6824238306"
       BUNDLE_ID: fr.mdlf.cahiers
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
           key: mas
-      - run: npm ci || npm install
+      - run: npm ci
       # Trousseau temporaire : les deux certificats (appli + installeur), plus
       # les intermediaires Apple WWDR G3 pour une chaine complete.
       - name: Certificats (trousseau temporaire)
@@ -222,10 +258,27 @@ jobs:
           app="src-tauri/target/universal-apple-darwin/release/bundle/macos/Cahiers.app"
           mkdir -p mas
           xcrun productbuild --sign "$INSTALLER_SIGNING_IDENTITY" --component "$app" /Applications mas/Cahiers.pkg
-      - name: Verifications (signatures, entitlements, profil, Info.plist)
+      - name: Verifications (signatures, entitlements, profil, Info.plist, pas d'updater)
         run: |
           set -euo pipefail
           app="src-tauri/target/universal-apple-darwin/release/bundle/macos/Cahiers.app"
+          # Guideline 2.4.5(vii) : aucune mise a jour par l'appli. La config
+          # embarquee dans le binaire ne doit contenir ni l'adresse de
+          # cahiers-releases ni la cle publique de l'updater (presentes dans
+          # le binaire du .dmg Developer ID, absentes si plugins.updater est
+          # bien null). Temoin : l'identifiant, lui, doit y etre, sinon la
+          # recherche ne prouverait rien.
+          bin="$app/Contents/MacOS/cahiers"
+          pubkey="$(node -p "require('./src-tauri/tauri.conf.json').plugins.updater.pubkey")"
+          LC_ALL=C grep -a -q -F "$BUNDLE_ID" "$bin"
+          if LC_ALL=C grep -a -q -F -e "cahiers-releases" -e "$pubkey" "$bin"; then
+            echo "::error::La build Mac App Store embarque la config de l'updater (cahiers-releases ou pubkey)."
+            exit 1
+          fi
+          if find src-tauri/target/universal-apple-darwin/release/bundle -name '*.app.tar.gz' -o -name '*.sig' | grep -q .; then
+            echo "::error::La build Mac App Store a produit des artefacts de mise a jour (.app.tar.gz, .sig)."
+            exit 1
+          fi
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dvv --entitlements - "$app" 2>&1 | tee mas/codesign.txt
           grep -F "Authority=Apple Distribution" mas/codesign.txt
@@ -240,7 +293,7 @@ jobs:
           lipo -archs "$app/Contents/MacOS/cahiers"
           pkgutil --check-signature mas/Cahiers.pkg | tee mas/pkgutil.txt
           grep -F "3rd Party Mac Developer Installer" mas/pkgutil.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cahiers-mas
           path: mas/

@@ -1,0 +1,8 @@
+# Actions epinglees par SHA (build.yml, ci.yml) : Dependabot propose la mise
+# a jour du SHA et du tag en commentaire quand une nouvelle version sort.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

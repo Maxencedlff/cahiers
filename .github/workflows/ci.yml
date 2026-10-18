@@ -1,19 +1,73 @@
-# Tests a chaque envoi, sur une machine de GitHub (rien ne tourne sur le PC).
+# Tests, sur une machine de GitHub (rien ne tourne sur le PC).
+# - A chaque envoi sur une branche : TypeScript (tsc, vitest, npm audit) sous
+#   Linux et tests Rust sous Windows.
+# - Appele par build.yml (job « test », complet: true) avant tout build, toute
+#   release et tout envoi Mac App Store : en plus, tests Rust sous macOS, avec
+#   et sans la feature app-store. Pas a chaque envoi : une minute Mac compte
+#   10 fois sur le quota d'un depot prive.
+# - A la main (Actions, « Tests », Run workflow) : complet au choix.
 name: Tests
 on:
   push:
     branches: ["**"]
   workflow_dispatch:
+    inputs:
+      complet:
+        description: "Ajouter les tests Rust macOS (avec et sans app-store)"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      complet:
+        type: boolean
+        default: false
+
+# GITHUB_TOKEN en lecture seule : ces jobs ne publient rien.
+permissions:
+  contents: read
+
 jobs:
-  test:
+  typescript:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
-      # Lockfile ecrit sous Windows : les paquets natifs Linux s'ajoutent a l'installation.
-      - run: npm ci || npm install
+      # npm ci seul : l'arbre installe est exactement celui du lockfile,
+      # jamais reecrit en silence (le lockfile contient deja les paquets
+      # natifs Linux et macOS).
+      - run: npm ci
+      # Failles connues (niveau high et plus) dans ce qui part dans l'appli.
+      - run: npm audit --omit=dev --audit-level=high
       - run: npx tsc --noEmit -p .
       - run: npx vitest run
+      - run: npx vite build
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.complet && '[{"os":"windows-latest","features":""},{"os":"macos-latest","features":""},{"os":"macos-latest","features":"app-store"}]' || '[{"os":"windows-latest","features":""}]') }}
+    name: rust (${{ matrix.os }}${{ matrix.features && format(', {0}', matrix.features) || '' }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # tauri::generate_context! embarque le dossier dist/ : il doit exister
+      # pour compiler la crate, tests compris.
+      - run: npx vite build
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          key: tests-${{ matrix.features || 'direct' }}
+      # --locked : Cargo.lock fait foi, comme le lockfile npm.
+      - name: cargo test
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked ${{ matrix.features && format('--features {0}', matrix.features) || '' }}

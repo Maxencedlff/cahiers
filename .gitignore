@@ -11,3 +11,14 @@ demo-data
 
 # Profil Mac App Store, ecrit par le job « mas » (secret MAS_PROVISION_PROFILE).
 src-tauri/appstore/embedded.provisionprofile
+
+# Secrets : cles et certificats Apple, cle de l'updater, variables locales.
+# Ils vivent hors du depot (~/.config/apple, ~/.config/cahiers-updater) et
+# dans les secrets GitHub ; jamais commites, meme par erreur.
+*.p8
+*.p12
+*.key
+*.pem
+*.cer
+*.provisionprofile
+.env*

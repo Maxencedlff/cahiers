@@ -3,7 +3,11 @@ import { defineConfig } from "vite";
 export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
-  envPrefix: ["VITE_", "TAURI_"],
+  // Variables d'environnement visibles du JS livre : jamais tout « TAURI_ »,
+  // sinon TAURI_SIGNING_PRIVATE_KEY (presente pendant le build) finirait dans
+  // le bundle des qu'un code lirait import.meta.env. TAURI_ENV_* = variables
+  // publiques posees par la CLI Tauri (plateforme, cible, debug).
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {
     target: "esnext",
     minify: "esbuild",

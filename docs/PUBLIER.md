@@ -16,6 +16,12 @@
 
 Si les trois numéros ne sont pas ceux du tag, le workflow s'arrête tout de suite (job « version ») et rien n'est publié. Il s'arrête aussi si un des trois builds échoue : jamais de release à moitié.
 
+Avant tout build, le job « test » (workflow `ci.yml` en version complète) relance tout : `npm audit` (failles high et plus), `tsc`, `vitest`, `cargo test` sous Windows et macOS, et sous macOS aussi avec `--features app-store`. Un test rouge : aucun installateur, aucune release, rien envoyé à Apple.
+
+### Pas de pré-version
+
+Le tag doit être exactement `vX.Y.Z` (ex. `v0.3.0`). Un tag de pré-version (`v0.3.0-beta.1`, `v1.0.0+build`) est refusé tout de suite par le job « version », avec un message clair, et rien ne part. Raisons : le numéro de build Mac App Store ne sait pas les coder (le job `mas` casserait après la release), et une installation bêta ne verrait jamais la version finale (`0.3.0` n'est pas « plus récent » que `0.3.0-beta.1` pour l'updater). Pour essayer une version avant de la publier : « Lancer un build sans publier » ci-dessous.
+
 ## Où voir
 
 - Le build : dépôt privé `Maxencedlff/cahiers`, onglet **Actions**, workflow « Installateurs ».
@@ -30,7 +36,13 @@ Seules les versions installées depuis la release (ou un build du workflow) se m
 
 ## Lancer un build sans publier
 
-Onglet Actions, « Installateurs », **Run workflow** : les installateurs arrivent en artefacts du workflow, aucune release n'est créée. Un build Mac compte 10 fois sur le quota de minutes du dépôt privé.
+Onglet Actions, « Installateurs », **Run workflow** : les installateurs arrivent en artefacts du workflow, aucune release n'est créée. Les tests complets passent d'abord, comme pour un tag. Un build Mac compte 10 fois sur le quota de minutes du dépôt privé.
+
+## Tests à chaque envoi
+
+Workflow « Tests » (`ci.yml`), à chaque push sur une branche : `npm ci`, `npm audit --omit=dev --audit-level=high`, `tsc`, `vitest`, `vite build` sous Linux, `cargo test` sous Windows. Les tests Rust macOS (avec et sans `app-store`) ne tournent qu'avant une publication, ou à la main (Actions, « Tests », Run workflow, case « complet »), pour ménager le quota Mac.
+
+Règles de la CI : Node 22 partout (`.nvmrc`), `npm ci` seul (jamais `npm install`, qui réécrirait l'arbre en silence), `cargo test --locked`. Les actions tierces sont épinglées par SHA (tag en commentaire) ; Dependabot (`.github/dependabot.yml`) propose les mises à jour. Les secrets ne sont déclarés que dans les étapes qui s'en servent, jamais au niveau du job, et le `GITHUB_TOKEN` est en lecture seule (`permissions: contents: read`).
 
 ## Mac App Store
 
@@ -40,7 +52,7 @@ Ce qu'il fait :
 
 1. Build universelle (puces Apple et Intel) avec `src-tauri/tauri.appstore.conf.json` fusionnée et la feature Cargo `app-store` : appli sandboxée, sans updater (c'est l'App Store qui met à jour ; le bandeau, le menu ⋯ et les Réglages ne parlent plus de mises à jour), catégorie Éducation, `ITSAppUsesNonExemptEncryption` = false, profil de provisioning embarqué.
 2. Signature « Apple Distribution », puis `.pkg` signé « 3rd Party Mac Developer Installer ».
-3. Vérifications : `codesign --verify`, entitlements (sandbox, bookmarks, identifiant), profil, numéro de build, `pkgutil --check-signature`. Le `.pkg` est gardé en artefact `cahiers-mas`.
+3. Vérifications : `codesign --verify`, entitlements (sandbox, bookmarks, identifiant), profil, numéro de build, `pkgutil --check-signature`, et aucune trace de l'updater (ni l'adresse `cahiers-releases`, ni la clé publique dans le binaire, ni `.app.tar.gz`/`.sig` produits : Guideline 2.4.5(vii)). Le `.pkg` est gardé en artefact `cahiers-mas`.
 4. Envoi sur App Store Connect (`xcrun altool --upload-package`, clé d'API de la notarisation). Le build apparaît ensuite dans App Store Connect › Cahiers › TestFlight (traitement par Apple : 10 à 30 min), puis on le choisit dans la version à soumettre.
 
 Numéro de build (`CFBundleVersion`) : unique et croissant à chaque envoi, sans rien changer à la main : version codée, numéro du run, tentative (0.2.0, run 57 → `200.57.1`, `src/core/release.ts`). La version affichée (`CFBundleShortVersionString`) reste celle des trois fichiers ; la version préparée dans App Store Connect doit porter le même numéro (0.2.0, puis 0.2.1…).
@@ -58,7 +70,8 @@ Certificats et profil sur le PC (WSL) : `~/.config/apple/` (`dist.p12`, `mas_ins
 ## Secrets du dépôt `cahiers` (Settings › Secrets and variables › Actions)
 
 - `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` : signature des mises à jour.
-- `RELEASES_TOKEN` : jeton GitHub qui publie dans `cahiers-releases`. S'il expire, la publication échoue (dernière étape) : en recréer un (droits `repo`) et remplacer le secret.
+- `RELEASES_TOKEN` : jeton GitHub qui publie dans `cahiers-releases`. S'il expire, la publication échoue (dernière étape) : en recréer un et remplacer le secret.
+  - **À faire au prochain renouvellement** : aujourd'hui c'est un jeton classique avec le droit `repo`, qui donne l'écriture sur **tous** les dépôts du compte. Le remplacer par un jeton *fine-grained* : GitHub › Settings › Developer settings › Personal access tokens › Fine-grained tokens › Generate new token ; Resource owner `Maxencedlff` ; Repository access : *Only select repositories* › `cahiers-releases` seul ; Permissions › Repository › **Contents : Read and write** (Metadata : Read, ajouté d'office) ; rien d'autre ; expiration 1 an au plus (noter la date). Puis remplacer la valeur du secret `RELEASES_TOKEN` du dépôt `cahiers` et révoquer l'ancien jeton. `gh release create` n'a besoin de rien de plus.
 - `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `KEYCHAIN_PASSWORD` : signature Developer ID du Mac.
 - `APPLE_API_ISSUER`, `APPLE_API_KEY`, `APPLE_API_KEY_P8` : notarisation Apple, et envoi sur App Store Connect.
 - `MAS_CERTIFICATE`, `MAS_CERTIFICATE_PASSWORD` : certificat « Apple Distribution » (`.p12` en base64) ; `MAS_INSTALLER_CERTIFICATE`, `MAS_INSTALLER_CERTIFICATE_PASSWORD` : certificat « 3rd Party Mac Developer Installer » ; `MAS_PROVISION_PROFILE` : profil Mac App Store de `fr.mdlf.cahiers` (base64). `KEYCHAIN_PASSWORD` sert aussi au trousseau temporaire du job `mas`.
