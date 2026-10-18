@@ -929,6 +929,16 @@ h2 { font-size: 17px; margin: 28px 0 12px; }
   background: var(--surface); border-radius: 12px; box-shadow: 0 24px 60px rgba(10,14,25,.3);
   width: min(560px, 100%); max-height: 84vh; display: flex; flex-direction: column; overflow: hidden;
 }
+/* Voile d'une copie de bascule (busyVeil) : au-dessus des Reglages et des messages. */
+.busy-veil { z-index: 100; outline: none; }
+.busy-veil .modal { width: min(420px, 100%); }
+.modal .content.busy-content { flex-direction: row; align-items: center; padding: 18px; }
+.busy-spinner {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent); animation: busy-spin .8s linear infinite;
+}
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .busy-spinner { animation-duration: 3s; } }
 .modal header { padding: 16px 18px 10px; font-size: 17px; font-weight: 600; }
 .modal .content { padding: 0 18px 6px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .modal footer { padding: 14px 18px; display: flex; gap: 8px; justify-content: flex-end; }

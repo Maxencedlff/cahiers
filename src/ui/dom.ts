@@ -521,6 +521,51 @@ export async function askText(
   return r ? r.v : null;
 }
 
+/** Voile d'une operation qui ne doit pas etre interrompue (`busyVeil`). */
+export interface BusyVeil {
+  /** Change le message (progression). */
+  update(message: string): void;
+  /** Retire le voile et rend l'appli. */
+  close(): void;
+}
+
+/**
+ * Voile modal NON fermable : ni Echap, ni appui a cote, ni bouton. Tout le
+ * reste de la page passe `inert` (plus de focus, de clic ni de frappe) et
+ * les raccourcis clavier de l'appli sont arretes a la source, sinon un
+ * Ctrl+N ou une frappe partirait pendant l'operation. Pour la copie d'une
+ * bascule de dossier (C-11) : ce qui serait tape pendant la copie resterait
+ * dans l'ancien dossier, invisible apres le rechargement.
+ */
+const VEIL_BLOCKED = ["keydown", "keypress", "keyup", "beforeinput", "paste", "drop"] as const;
+
+export function busyVeil(message: string): BusyVeil {
+  const text = el("p", { class: "muted" }, message);
+  const veil = el("div", { class: "backdrop busy-veil", role: "alertdialog", "aria-modal": "true", "aria-busy": "true", tabindex: "-1" },
+    el("div", { class: "modal" },
+      el("div", { class: "content busy-content" }, el("span", { class: "busy-spinner", "aria-hidden": "true" }), text)));
+  const frozen: HTMLElement[] = [];
+  for (const child of document.body.children) {
+    if (child instanceof HTMLElement && !child.inert) { child.inert = true; frozen.push(child); }
+  }
+  const block = (e: Event) => { e.preventDefault(); e.stopImmediatePropagation(); };
+  for (const type of VEIL_BLOCKED) window.addEventListener(type, block, { capture: true });
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  document.body.append(veil);
+  veil.focus();
+  let open = true;
+  return {
+    update: (m) => { text.textContent = m; },
+    close: () => {
+      if (!open) return;
+      open = false;
+      for (const type of VEIL_BLOCKED) window.removeEventListener(type, block, { capture: true });
+      for (const node of frozen) node.inert = false;
+      veil.remove();
+    },
+  };
+}
+
 export function confirmDialog(title: string, message: string, okLabel = "Confirmer"): Promise<boolean> {
   return new Promise((resolve) => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(false); } };

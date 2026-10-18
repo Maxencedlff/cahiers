@@ -26,6 +26,8 @@ export interface SidebarPage {
   /** Reperes « pas compris » en attente sur la page. */
   flags: number;
   unreadable?: boolean;
+  /** Ecrite par une version plus recente de Cahiers : lisible, en lecture seule. */
+  future?: boolean;
 }
 
 export interface NotebookSidebarModel {
@@ -156,9 +158,9 @@ function pageList(m: NotebookSidebarModel, host: NotebookSidebarHost, depth: num
     pageThumb(m.color, p.heading),
     el("span", { class: "sb-page-text" },
       el("span", { class: `sb-page-title${p.heading ? " heading" : ""}${p.title ? "" : " untitled"}` },
-        p.unreadable ? "Page illisible" : p.title || "Sans titre"),
+        p.unreadable ? "Page illisible" : p.title || (p.future ? "Version plus récente" : "Sans titre")),
       el("span", { class: "sb-page-meta" },
-        `p. ${p.n}${p.day ? ` · ${p.day}` : ""}`,
+        `p. ${p.n}${p.day ? ` · ${p.day}` : ""}${p.future && p.title ? " · version plus récente" : ""}`,
         p.flags ? el("span", { class: "sb-flag" }, icon("flag", 12), String(p.flags)) : null)));
     row.addEventListener("contextmenu", (e) => { e.preventDefault(); host.pageMenu(p.n, { x: e.clientX, y: e.clientY }); });
     longPress(row, (at) => host.pageMenu(p.n, at));

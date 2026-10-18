@@ -17,12 +17,8 @@ async function guardClose(app: App): Promise<void> {
   let asking = false;
   await getCurrentWindow().onCloseRequested(async (event) => {
     if (asking) { event.preventDefault(); return; }
-    await app.flushAll();
-    if (!app.hasUnsaved) {
-      // L'autre PC ne doit plus croire les cahiers ouverts ici (section 11).
-      await app.releaseAll();
-      return; // la fenetre se ferme (destroy)
-    }
+    // L'autre PC ne doit plus croire les cahiers ouverts ici (section 11).
+    if (await app.quiesce()) return; // la fenetre se ferme (destroy)
     asking = true;
     const close = await confirmDialog(
       "Modifications non enregistrées",
@@ -32,7 +28,7 @@ async function guardClose(app: App): Promise<void> {
     );
     asking = false;
     if (!close) event.preventDefault();
-    else await app.releaseAll();
+    else await app.quiesce(true);
   });
 }
 

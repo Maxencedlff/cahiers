@@ -3,7 +3,7 @@ import { MemoryFs } from "../core/storage/fs";
 import { Repo } from "../core/storage/repo";
 import { searchAll, listFlags, indexPage, sortFlags, type FlagHit } from "../core/storage/search";
 import { fold, flagContext, makeExcerpt, normalize, parseQuery } from "../core/text/find";
-import type { Block, Page } from "../core/types";
+import { SCHEMA_VERSION, type Block, type Page } from "../core/types";
 import { uuid } from "../core/id";
 
 let fs: MemoryFs;
@@ -319,5 +319,27 @@ describe("recherche dans les tableaux et blocs de code", () => {
     expect(txt).toContain("Vbe");
     expect(txt).toContain("bonjour");
     expect(txt).toContain("Apres");
+  });
+});
+
+describe("page d'une version plus recente (C-34)", () => {
+  it("indexee malgre un bloc inconnu : ni illisible, ni absente de la recherche", async () => {
+    await repo.createNotebook("Maths", "#000");
+    await repo.createDivider("Maths", "Cours");
+    const page = {
+      version: SCHEMA_VERSION + 1, id: uuid(), created: "2026-10-18T10:00:00Z", modified: "2026-10-18T10:00:00Z",
+      blocks: [
+        { type: "text", id: uuid(), content: "# Théorème de Rolle\nf continue sur [a, b]" },
+        { type: "hologramme", id: uuid(), payload: { anything: 1 } },
+      ],
+    };
+    await fs.writeText("Maths/Cours/0001.page.json", JSON.stringify(page));
+    const [scanned] = (await repo.scanDivider("Maths", "Cours"))!;
+    expect(scanned.index).not.toBeNull();
+    expect(scanned.index?.future).toBe(true);
+    expect(scanned.index?.title).toBe("Théorème de Rolle");
+    expect((await searchAll(repo, "Rolle")).length).toBe(1);
+    // Une page d'aujourd'hui n'est pas marquee.
+    expect(indexPage({ version: SCHEMA_VERSION, id: "x", created: "", modified: "", blocks: [] }).future).toBeUndefined();
   });
 });

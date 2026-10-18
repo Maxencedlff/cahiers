@@ -23,6 +23,11 @@ export interface StorageInfo {
   internal: string;
   /** Dossier retenu (root.txt) mais introuvable a ce lancement. */
   missing: string | null;
+  /**
+   * Sandbox Mac App Store : `missing` n'est pas forcement absent, c'est
+   * l'acces qui manque ; il faut le choisir de nouveau (« picked »).
+   */
+  lostAccess?: boolean;
 }
 
 export interface Inventory {
@@ -40,7 +45,7 @@ export interface DirReport extends Inventory {
   exists: boolean;
   /** Noms du premier niveau. */
   entries: string[];
-  /** Dossiers du premier niveau qui ont un cahier.json. */
+  /** Matieres : dossiers du premier niveau qui ont un cahier.json, hors Vrac. */
   notebooks: number;
   /** Parcours arrete avant la fin (dossier enorme). */
   truncated: boolean;
@@ -100,6 +105,11 @@ export type DestPlan =
   | { kind: "copy" }
   /** Espace prive sans aucune page (Vrac vide) : mis de cote, puis copie. */
   | { kind: "aside" }
+  /**
+   * Retour dans l'espace prive qui a deja des pages (ancienne copie) : au
+   * choix, la mettre de cote puis copier les notes actuelles, ou la rouvrir.
+   */
+  | { kind: "reopen"; notebooks: number; pages: number }
   /** Contient deja des cahiers : proposer de l'ouvrir tel quel. */
   | { kind: "open"; notebooks: number; pages: number }
   /** Autre chose dedans : copier dans un sous-dossier « Cahiers ». */
@@ -115,8 +125,12 @@ export function planDestination(r: DirReport, target: Target, nested = false): D
   if (r.relation === "same") return { kind: "current" };
   if (r.relation !== "none") return { kind: "nested" };
   if (isEmptyDir(r)) return { kind: "copy" };
+  // « Ramener dans l'appli » doit ramener les notes actuelles : une ancienne
+  // copie dans l'espace prive ne passe pas avant (C-13).
+  if (target === "internal") {
+    return r.pages > 0 ? { kind: "reopen", notebooks: r.notebooks, pages: r.pages } : { kind: "aside" };
+  }
   if (hasCahiers(r) && r.pages > 0) return { kind: "open", notebooks: r.notebooks, pages: r.pages };
-  if (target === "internal") return { kind: "aside" };
   if (hasCahiers(r) && !r.truncated) return { kind: "open", notebooks: r.notebooks, pages: r.pages };
   return nested ? { kind: "refuse" } : { kind: "subfolder" };
 }
@@ -166,9 +180,24 @@ export interface SwitchAsk {
   confirmOpen(report: DirReport): Promise<boolean>;
   /** Le dossier contient autre chose : copier dans `path/Cahiers` ? */
   confirmSubfolder(report: DirReport): Promise<boolean>;
+  /**
+   * Retour dans l'espace prive qui a deja une copie (`report`) : « copy » =
+   * la mettre de cote (renommee, jamais effacee) puis copier `current` ;
+   * « open » = rouvrir cette ancienne copie ; null = annuler.
+   */
+  chooseInternal(report: DirReport, current: Inventory): Promise<"copy" | "open" | null>;
+  /**
+   * Juste avant de copier ou de basculer, une fois tout confirme : tout
+   * ecrire et liberer la presence (App.quiesce). false = une page reste
+   * refusee, rien ne bascule. Jamais appele si l'utilisateur annule avant.
+   */
+  ready?(): Promise<boolean>;
   /** Pendant la copie (peut durer). */
   progress?(message: string): void;
 }
+
+/** `ready` refuse : une page attend encore d'etre ecrite. */
+export const NOT_READY = "Une page n'est pas encore enregistrée : rien n'a changé. Réessaie dans un instant.";
 
 export type SwitchOutcome =
   | { kind: "cancelled" }
@@ -191,16 +220,23 @@ export async function switchFlow(api: LocationApi, target: Target, ask: SwitchAs
       case "nested": return { kind: "unchanged", message: "Ce dossier est dans l'emplacement actuel (ou le contient) : choisis un dossier à part." };
       case "open":
         if (!(await ask.confirmOpen(report))) return { kind: "cancelled" };
-        return { kind: "switched", info: await api.switchTo(target), copied: null };
+        return await openAsIs(api, ask, target);
       case "copy":
       case "aside":
         return await copyThenSwitch(api, ask, target, report.path, undefined, plan.kind === "aside");
+      case "reopen": {
+        const current = await api.inspect("current");
+        const choice = await ask.chooseInternal(report, current);
+        if (choice === "open") return await openAsIs(api, ask, target);
+        if (choice !== "copy") return { kind: "cancelled" };
+        return await copyThenSwitch(api, ask, target, report.path, undefined, true, current);
+      }
       case "subfolder": {
         const sub = await api.inspect(target, SUBFOLDER);
         const next = planDestination(sub, target, true);
         if (next.kind === "open") {
           if (!(await ask.confirmOpen(sub))) return { kind: "cancelled" };
-          return { kind: "switched", info: await api.switchTo(target, SUBFOLDER), copied: null };
+          return await openAsIs(api, ask, target, SUBFOLDER);
         }
         if (next.kind !== "copy") {
           return { kind: "unchanged", message: `« ${sub.path} » existe déjà et contient autre chose : choisis un autre dossier.` };
@@ -216,11 +252,20 @@ export async function switchFlow(api: LocationApi, target: Target, ask: SwitchAs
   }
 }
 
+/** Ouvre un dossier qui a deja des cahiers, tel quel, sans copie. */
+async function openAsIs(api: LocationApi, ask: SwitchAsk, target: Target, sub?: string): Promise<SwitchOutcome> {
+  if (ask.ready && !(await ask.ready())) return { kind: "unchanged", message: NOT_READY };
+  return { kind: "switched", info: await api.switchTo(target, sub), copied: null };
+}
+
+/** `confirmed` : inventaire deja montre et copie deja acceptee (chooseInternal). */
 async function copyThenSwitch(
   api: LocationApi, ask: SwitchAsk, target: Target, path: string, sub: string | undefined, aside: boolean,
+  confirmed?: Inventory,
 ): Promise<SwitchOutcome> {
-  const current = await api.inspect("current");
-  if (!(await ask.confirmCopy(current, path))) return { kind: "cancelled" };
+  const current = confirmed ?? await api.inspect("current");
+  if (!confirmed && !(await ask.confirmCopy(current, path))) return { kind: "cancelled" };
+  if (ask.ready && !(await ask.ready())) return { kind: "unchanged", message: NOT_READY };
   ask.progress?.(`Copie de ${pagesLabel(current.pages)} (${formatBytes(current.bytes)})…`);
   const report = await api.copy(target, sub, aside);
   const check = verifyCopy(report.source, report.dest);

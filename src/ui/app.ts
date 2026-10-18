@@ -243,6 +243,12 @@ export class App {
   private present = new Map<string, NotebookPresence>();
   /** Rafraichissement de la presence, seulement tant qu'un cahier est ouvert. */
   private presenceTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Presence liberee par `quiesce` (bascule de dossier, mise a jour) : le
+   * signe de vie des 5 min se tait jusqu'a `resumePresence`, sinon il la reprendrait
+   * dans l'ancien dossier en pleine copie.
+   */
+  private quiesced = false;
 
   constructor(
     fs: FsAdapter,
@@ -548,18 +554,14 @@ export class App {
     };
   }
 
-  /** Reglages « Emplacement des cahiers » : tout ecrire et liberer la presence avant de basculer. */
+  /** Reglages « Emplacement des cahiers » : tout ecrire et liberer la presence avant de basculer, la reprendre si rien n'a change. */
   private locationHost(): LocationHost | null {
     if (!this.location) return null;
     return {
       api: this.location,
       canSwitch: this.canSwitchLocation,
-      prepare: async () => {
-        await this.flushAll();
-        if (this.hasUnsaved) return false;
-        await this.releaseAll();
-        return true;
-      },
+      quiesce: () => this.quiesce(),
+      resumePresence: () => this.resumePresence(),
     };
   }
 
@@ -1014,6 +1016,7 @@ export class App {
     const rows = pages.map((p): SidebarPage => ({
       n: p.n, title: p.index?.title || p.index?.firstLine || "", day: dayLabel(p.index?.created || p.index?.modified),
       heading: !!p.index?.title, flags: p.index?.flags.length ?? 0, ...(p.index ? {} : { unreadable: true }),
+      ...(p.index?.future ? { future: true } : {}),
     }));
     this.pageRows.set(`${notebook}\u0000${divider}`, rows);
     return rows;
@@ -3523,6 +3526,37 @@ export class App {
     }
   }
 
+  /**
+   * Avant de quitter la racine (fermeture, bascule de dossier, mise a jour) :
+   * tout ecrire, puis liberer la presence de ce PC. Une seule sequence pour
+   * les trois, qui avaient chacune la leur (C-18).
+   *
+   * false = une page reste refusee par le disque : rien n'est libere, a
+   * l'appelant de demander. `force` libere quand meme (l'utilisateur a
+   * accepte de perdre cette page).
+   */
+  async quiesce(force = false): Promise<boolean> {
+    await this.flushAll();
+    if (this.hasUnsaved && !force) return false;
+    this.quiesced = true;
+    await this.releaseAll();
+    return true;
+  }
+
+  /**
+   * La racine n'a pas change (bascule annulee ou ratee, mise a jour en
+   * echec) : la presence est reprise tout de suite, sans attendre le signe
+   * de vie des 5 min, pour que l'autre PC ne croie pas le cahier libre.
+   * Sans effet si rien n'a ete libere.
+   */
+  async resumePresence(): Promise<void> {
+    if (!this.quiesced) return;
+    this.quiesced = false;
+    for (const [dir, state] of this.present) {
+      if (!state.readOnly) await this.presence?.claim(dir);
+    }
+  }
+
   /** Rafraichit la presence toutes les 5 min, tant qu'un cahier est ouvert. */
   private armPresence(): void {
     if (this.presenceTimer || !this.presence) return;
@@ -3534,7 +3568,7 @@ export class App {
    * examen de l'autre PC (il a pu ouvrir le cahier, ou le refermer).
    */
   private async presenceTick(): Promise<void> {
-    if (!this.presence) return;
+    if (!this.presence || this.quiesced) return;
     for (const [dir, state] of [...this.present]) {
       const other = await this.presence.check(dir);
       if (this.present.get(dir) !== state) continue; // ferme ou change entre-temps

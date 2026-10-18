@@ -17,12 +17,16 @@ import { APP_TOAST, confirmDialog, dismissToast, toast } from "./dom";
  *   (comme a la fermeture), installation, relance.
  */
 
-/** Ce que l'updater demande a l'appli : ecrire, savoir si tout est ecrit, liberer. */
+/**
+ * Ce que l'updater demande a l'appli (App.quiesce / App.resumePresence) : tout
+ * ecrire et liberer la presence avant d'installer, la reprendre si
+ * l'installation echoue.
+ */
 export interface UpdateHost {
-  flushAll(): Promise<void>;
-  readonly hasUnsaved: boolean;
+  /** false = une page reste refusee, rien n'est libere ; `force` libere quand meme. */
+  quiesce(force?: boolean): Promise<boolean>;
+  resumePresence(): Promise<void>;
   readonly unsavedError: string | null;
-  releaseAll(): Promise<void>;
 }
 
 const OFFER_KEY = `${APP_TOAST}update`;
@@ -125,9 +129,8 @@ export class Updater {
         paint();
       });
       // Comme a la fermeture : tout ce qui attend part sur le disque avant
-      // que l'installateur ferme l'appli.
-      await this.host.flushAll();
-      if (this.host.hasUnsaved) {
+      // que l'installateur ferme l'appli, puis la presence est liberee.
+      if (!(await this.host.quiesce())) {
         const go = await confirmDialog(
           "Modifications non enregistrées",
           `Une page n'a pas pu être écrite (${this.host.unsavedError ?? "erreur inconnue"}). `
@@ -140,14 +143,16 @@ export class Updater {
           this.offer();
           return;
         }
+        await this.host.quiesce(true);
       }
       toast(`Installation de Cahiers ${shortVersion(u.version)}…`, "info", OFFER_MS, undefined, PROGRESS_KEY);
-      await this.host.releaseAll();
       // Windows : l'installateur (mode passif) ferme l'appli lui-meme.
       await u.install();
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (e) {
+      // L'appli reste ouverte : l'autre PC doit de nouveau voir ses cahiers pris.
+      await this.host.resumePresence().catch(() => undefined);
       dismissToast(PROGRESS_KEY);
       this.busy = false;
       toast("La mise à jour n'a pas pu se faire. Les notes sont intactes ; réessaie plus tard.", "warn", 6000);

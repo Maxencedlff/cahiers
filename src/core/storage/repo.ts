@@ -332,6 +332,9 @@ export class Repo {
    * cahier.json (« Autres dossiers ») recoit le sien.
    */
   async createNotebook(title: string, color: string): Promise<string> {
+    // Un dossier cache n'est jamais liste (listNotebookDirs) : la matiere
+    // recevrait des notes puis disparaitrait au rechargement (C-12).
+    if (safeName(title).startsWith(".")) throw new Error(HIDDEN_NOTEBOOK);
     const existing = await this.findDir(title);
     if (existing) {
       if (await this.isGitRepo(existing)) throw new Error(`${existing} est un dépôt git, jamais une matière`);
@@ -372,7 +375,8 @@ export class Repo {
     if (next !== dir && dir !== VRAC) {
       const key = next.toLowerCase();
       const taken = (await this.fs.listDirs("")).some((d) => d !== dir && d.toLowerCase() === key);
-      if (taken || next.startsWith(".")) throw new Error(`le nom « ${next} » est déjà pris`);
+      if (next.startsWith(".")) throw new Error(HIDDEN_NOTEBOOK);
+      if (taken) throw new Error(`le nom « ${next} » est déjà pris`);
       this.forget(dir);
       if (key === dir.toLowerCase()) {
         const step = `${dir}.renommage`;
@@ -1397,6 +1401,9 @@ export function trashStamp(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_`
     + `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
 }
+
+/** Matiere au nom qui commence par « . » : dossier cache, jamais liste. */
+export const HIDDEN_NOTEBOOK = "un nom de matière ne peut pas commencer par « . » (le dossier serait caché)";
 
 /** Nom de dossier valide : ni separateur, ni caractere interdit par Windows. */
 export function safeName(input: string): string {

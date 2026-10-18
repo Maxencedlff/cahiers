@@ -47,21 +47,41 @@ fn fail(msg: impl Into<String>) -> String {
     msg.into()
 }
 
-/// Resout un chemin relatif SOUS la racine.
+/// Resout un chemin relatif SOUS la racine, vers une entree de la racine
+/// (fichier ou dossier), jamais la racine elle-meme.
 ///
 /// Tout composant `..` est refuse : le frontend ne doit jamais pouvoir sortir
-/// du dossier des cahiers, meme par accident.
+/// du dossier des cahiers, meme par accident. Un chemin vide, « / » ou « . »
+/// est refuse aussi (C-19) : il designerait la racine, et `remove_path("")`
+/// effacerait alors tous les cahiers d'un coup.
 fn resolve(root: &Path, rel: &str) -> Res<PathBuf> {
+    let (path, named) = resolve_under(root, rel)?;
+    if !named {
+        return Err(fail(format!("chemin refuse (racine) : « {rel} »")));
+    }
+    Ok(path)
+}
+
+/// Comme `resolve`, mais la racine elle-meme est permise (chemin vide) :
+/// seulement pour les commandes qui LISTENT ou regardent, jamais pour une
+/// commande qui ecrit, renomme ou supprime.
+fn resolve_dir(root: &Path, rel: &str) -> Res<PathBuf> {
+    resolve_under(root, rel).map(|(path, _)| path)
+}
+
+/// Chemin sous la racine, et s'il nomme au moins un composant (`Normal`).
+fn resolve_under(root: &Path, rel: &str) -> Res<(PathBuf, bool)> {
     let rel = rel.trim_start_matches(['/', '\\']);
     let candidate = Path::new(rel);
+    let mut named = false;
     for c in candidate.components() {
         match c {
-            Component::Normal(_) => {}
+            Component::Normal(_) => named = true,
             Component::CurDir => {}
             _ => return Err(fail(format!("chemin refuse : {rel}"))),
         }
     }
-    Ok(root.join(candidate))
+    Ok((root.join(candidate), named))
 }
 
 fn root_of(state: &State<Root>) -> Res<PathBuf> {
@@ -141,7 +161,7 @@ fn host_name() -> Option<String> {
 
 #[tauri::command]
 fn list_dirs(state: State<Root>, rel: String) -> Res<Vec<String>> {
-    let path = resolve(&root_of(&state)?, &rel)?;
+    let path = resolve_dir(&root_of(&state)?, &rel)?;
     let mut out = Vec::new();
     if !path.exists() {
         return Ok(out);
@@ -158,7 +178,7 @@ fn list_dirs(state: State<Root>, rel: String) -> Res<Vec<String>> {
 
 #[tauri::command]
 fn list_files(state: State<Root>, rel: String) -> Res<Vec<String>> {
-    let path = resolve(&root_of(&state)?, &rel)?;
+    let path = resolve_dir(&root_of(&state)?, &rel)?;
     let mut out = Vec::new();
     if !path.exists() {
         return Ok(out);
@@ -223,7 +243,7 @@ fn matches(current: Option<&FileMeta>, expect: Option<&Expect>) -> bool {
 
 #[tauri::command]
 fn stat_path(state: State<Root>, rel: String) -> Res<Option<FileMeta>> {
-    let path = resolve(&root_of(&state)?, &rel)?;
+    let path = resolve_dir(&root_of(&state)?, &rel)?;
     Ok(stat_of(&path))
 }
 
@@ -271,7 +291,7 @@ fn write_text_if(state: State<'_, Root>, rel: String, content: String, expect: O
 
 #[tauri::command]
 fn list_files_meta(state: State<Root>, rel: String) -> Res<Vec<FileMeta>> {
-    let path = resolve(&root_of(&state)?, &rel)?;
+    let path = resolve_dir(&root_of(&state)?, &rel)?;
     let mut out = Vec::new();
     if !path.exists() {
         return Ok(out);
@@ -612,7 +632,7 @@ fn path_exists(state: State<Root>, rel: String) -> Res<bool> {
     if rel.is_empty() {
         return Ok(true);
     }
-    Ok(resolve(&root_of(&state)?, &rel)?.exists())
+    Ok(resolve_dir(&root_of(&state)?, &rel)?.exists())
 }
 
 #[tauri::command]
@@ -715,19 +735,6 @@ fn reveal_path(state: State<Root>, rel: String) -> Res<()> {
     shell::reveal(&path).map_err(|e| fail(format!("{rel} : {e}")))
 }
 
-/// Change la racine et la retient pour les prochains lancements.
-#[tauri::command]
-fn set_root(state: State<Root>, path: String) -> Res<String> {
-    let candidate = PathBuf::from(&path);
-    if !candidate.is_dir() {
-        return Err(fail(format!("{path} n'est pas un dossier")));
-    }
-    save_root_preference(&candidate);
-    let mut guard = state.0.lock().map_err(|_| fail("racine verrouillee"))?;
-    *guard = candidate.clone();
-    Ok(candidate.to_string_lossy().to_string())
-}
-
 /* ------------------------------------------------------------------ */
 /* Emplacement des cahiers : dans l'appli ou dossier synchronise       */
 /* ------------------------------------------------------------------ */
@@ -741,6 +748,10 @@ struct StorageInfo {
     internal: String,
     /// Dossier retenu dans root.txt mais introuvable a ce lancement.
     missing: Option<String>,
+    /// Sandbox (Mac App Store) : ce dossier n'est pas forcement absent, c'est
+    /// l'acces qui manque. Le rouvrir par son chemin ne peut pas reussir, il
+    /// faut le choisir de nouveau dans la boite (C-10).
+    lost_access: bool,
 }
 
 fn lock_of<T: Clone>(m: &Mutex<T>) -> Res<T> {
@@ -750,11 +761,13 @@ fn lock_of<T: Clone>(m: &Mutex<T>) -> Res<T> {
 fn info_of(root: &State<Root>, st: &State<Storage>) -> Res<StorageInfo> {
     let path = root_of(root)?;
     let internal = lock_of(&st.internal)?;
+    let missing = lock_of(&st.missing)?;
     Ok(StorageInfo {
         mode: if location::same_dir(&path, &internal) { "app" } else { "folder" },
         path: path.to_string_lossy().to_string(),
         internal: internal.to_string_lossy().to_string(),
-        missing: lock_of(&st.missing)?.map(|p| p.to_string_lossy().to_string()),
+        lost_access: sandbox::ACTIVE && missing.is_some(),
+        missing: missing.map(|p| p.to_string_lossy().to_string()),
     })
 }
 
@@ -798,6 +811,12 @@ fn pick_sync_folder(app: tauri::AppHandle, st: State<'_, Storage>) -> Res<Option
     if let Some(window) = app.get_webview_window("main") {
         dialog = dialog.set_parent(&window);
     }
+    // Dossier introuvable ou acces perdu (sandbox) : la boite s'ouvre la ou
+    // il etait, pour le choisir de nouveau d'un clic. Seulement un point de
+    // depart : le chemin retenu reste celui que l'utilisateur choisit.
+    if let Some(near) = lock_of(&st.missing)?.and_then(|m| location::nearest_dir(&m)) {
+        dialog = dialog.set_directory(near);
+    }
     let Some(picked) = dialog.blocking_pick_folder() else {
         return Ok(None);
     };
@@ -824,8 +843,9 @@ fn inspect_location(
 }
 
 /// Copie verifiee de la racine actuelle vers l'emplacement vise (location.rs).
-/// `aside` : seulement pour l'espace prive qui n'a aucune page (Vrac vide du
-/// premier lancement), son contenu est renomme a cote, jamais efface.
+/// `aside` : seulement vers l'espace prive lui-meme, son contenu actuel (Vrac
+/// vide du premier lancement, ou ancienne copie quand on « ramene dans
+/// l'appli », C-13) est renomme a cote, jamais efface.
 #[tauri::command(async)]
 fn copy_to_location(
     root: State<'_, Root>, st: State<'_, Storage>, target: String, sub: Option<String>, aside: Option<bool>,
@@ -837,8 +857,10 @@ fn copy_to_location(
         if target != "internal" || sub.is_some() {
             return Err(fail("mise de cote refusee hors de l'espace de l'appli"));
         }
-        if location::inspect(&src, &dst).inventory.pages > 0 {
-            return Err(fail("l'espace de l'appli contient des pages : rien n'a ete deplace"));
+        // Jamais la racine en service ni un dossier qui la contient : on la
+        // viderait sous l'appli, et copy_tree refuserait apres coup.
+        if location::relation(&src, &dst) != "none" {
+            return Err(fail("un emplacement ne peut pas être dans l'autre : rien n'a été déplacé"));
         }
         moved = location::set_aside(&dst)?;
     }
@@ -960,6 +982,14 @@ fn resolve_root(app: &tauri::AppHandle) -> (PathBuf, PathBuf, Option<PathBuf>) {
     let legacy = if sandbox::ACTIVE { Vec::new() } else { legacy_candidates() };
     let mut r = location::choose_root(saved.as_deref(), &internal, &legacy);
     if sandbox::ACTIVE {
+        // Dossier deplace ou renomme : le bookmark le suit, root.txt non.
+        // On reprend le nouveau chemin (sous-dossier « Cahiers » garde) et on
+        // le retient, au lieu de le declarer introuvable (C-10).
+        if let Some(g) = granted.as_deref() {
+            if let Some(moved) = location::follow_bookmark(&r, &internal, g) {
+                r = moved;
+            }
+        }
         r = location::confine(r, &internal, granted.as_deref());
     }
     if location::same_dir(&r.root, &internal) {
@@ -1029,7 +1059,6 @@ pub fn run() {
             remove_path,
             rename_path,
             reveal_path,
-            set_root,
             storage_info,
             pick_sync_folder,
             inspect_location,
@@ -1051,6 +1080,19 @@ mod tests {
         let root = PathBuf::from("/base");
         assert!(resolve(&root, "../secret").is_err());
         assert!(resolve(&root, "Maths/../../etc").is_err());
+    }
+
+    #[test]
+    fn refuse_la_racine_elle_meme() {
+        // C-19 : sinon remove_path("") effacerait tous les cahiers.
+        let root = PathBuf::from("/base");
+        for rel in ["", "/", "\\", ".", "./", "/.", "./.", "//"] {
+            assert!(resolve(&root, rel).is_err(), "« {rel} » doit etre refuse");
+        }
+        assert!(resolve(&root, "./Maths").unwrap().ends_with("Maths"));
+        // Lister la racine reste permis.
+        assert_eq!(resolve_dir(&root, "").unwrap(), root);
+        assert!(resolve_dir(&root, "..").is_err());
     }
 
     #[test]
