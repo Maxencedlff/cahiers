@@ -14,7 +14,7 @@ Rien ici ne remplace la spec (`CLAUDE.md`) : un point qui la contredit attend so
 - [x] Installation existante (root.txt présent, cas de Maxence, dossier ESEO) : gardée telle quelle, mode « dossier synchronisé ». Dossier de root.txt absent au lancement : espace privé pour la session, root.txt intact, avertissement dans les Réglages.
 - [x] Réglages « Emplacement des cahiers » : mode et chemin, « Passer à un dossier synchronisé… », « Ramener dans l'appli… », « Changer de dossier… », « Ouvrir l'emplacement ». Copie vérifiée (fichiers, pages, octets), jamais d'écrasement, l'ancien emplacement n'est jamais supprimé.
 - [x] Présence par PC et copies de conflit actives dans les deux modes. Spec mise à jour (section 1).
-- [ ] Mac App Store : « security-scoped bookmark » pour garder l'accès à un dossier choisi entre deux lancements, entitlements sandbox (`files.user-selected.read-write`). Non testable ici.
+- [x] Mac App Store : « security-scoped bookmark » créé au choix du dossier, rouvert au lancement (`sandbox.rs`), entitlements sandbox (`files.user-selected.read-write`, `files.bookmarks.app-scope`) ; bookmark illisible = espace privé + avertissement (18/10). Compilé en CI, jamais essayé sur un vrai Mac.
 - [ ] Essai réel dans l'exe : premier lancement sur un compte Windows neuf, puis bascule aller-retour avec un petit dossier de test (pas le dossier ESEO).
 
 ## 2. Saisie plus rapide
@@ -31,7 +31,9 @@ Rien ici ne remplace la spec (`CLAUDE.md`) : un point qui la contredit attend so
 - [x] Raccourcis sur Mac (17/10) : Option+touche lue sur la touche physique (Option+= « ≠ » = Alt+=), Cmd vaut Ctrl sauf Cmd+Q/H/W/M laissés à macOS (fermer l'onglet ⌃W, accueil ⌃M), libellés ⌘ ⌥ ⌃. Non essayé sur un vrai Mac.
 - [x] Bouton « Mettre à jour » (Tauri updater, 17/10) : vérification 5 s après le lancement, bandeau « Cahiers X.Y disponible » posé hors frappe, pages écrites avant l'installation, relance ; menu ⋯ et Réglages « Rechercher des mises à jour ». Release publique `Maxencedlff/cahiers-releases` + `latest.json` à chaque tag `v*` (mode d'emploi : `docs/PUBLIER.md`).
 - [ ] Premier vrai cycle : publier v0.2.0 (installée à la main), puis v0.2.1, et vérifier que la 0.2.0 propose et installe la 0.2.1 (Windows, puis Mac).
-- Microsoft Store (Windows, compte développeur particulier gratuit) et Mac App Store (sandbox, deux certificats en plus), une page de confidentialité commune.
+- [x] Mac App Store (18/10) : job `mas` (build sandboxée sans updater, `.pkg` signé, envoi App Store Connect à chaque tag), mode d'emploi dans `docs/PUBLIER.md`.
+- [ ] Mac App Store : essayer le build TestFlight sur un vrai Mac (premier lancement, dossier synchronisé choisi puis relance, export Word, MyScript), puis soumettre la version.
+- Microsoft Store (Windows, compte développeur particulier gratuit), même page de confidentialité.
 
 ## 4. Partage (bouche-à-oreille)
 

@@ -2,11 +2,13 @@
 //   node --experimental-strip-types scripts/release.ts check v0.2.1
 //     -> les trois numeros de version disent bien 0.2.1 (sinon echec) ;
 //   node --experimental-strip-types scripts/release.ts plan v0.2.1 <artefacts> <sortie>
-//     -> copie les fichiers a publier dans <sortie> + latest.json.
+//     -> copie les fichiers a publier dans <sortie> + latest.json ;
+//   node --experimental-strip-types scripts/release.ts mas-build <run> <tentative>
+//     -> CFBundleVersion de l'envoi Mac App Store (job « mas »).
 // La logique est dans src/core/release.ts (testee par vitest).
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { planRelease, versionMismatch, versionOfTag } from "../src/core/release.ts";
+import { masBuildNumber, planRelease, versionMismatch, versionOfTag } from "../src/core/release.ts";
 
 const RELEASES = "https://github.com/Maxencedlff/cahiers-releases/releases/download";
 
@@ -25,6 +27,12 @@ function walk(dir: string): string[] {
 }
 
 const [mode, tag, from, out] = process.argv.slice(2);
+if (mode === "mas-build") {
+  // Version de tauri.conf.json (= CFBundleShortVersionString), run, tentative.
+  const v = versions()["src-tauri/tauri.conf.json"];
+  console.log(masBuildNumber(v, Number(tag), Number(from ?? "1")));
+  process.exit(0);
+}
 const wrong = versionMismatch(tag ?? "", versions());
 if (wrong) {
   console.error(`::error::${wrong}. Changer la version aux trois endroits (docs/PUBLIER.md).`);
@@ -38,6 +46,6 @@ if (mode === "plan") {
   writeFileSync(join(out, "latest.json"), `${JSON.stringify(plan.latest, null, 2)}\n`);
   console.log(plan.assets.map((a) => a.name).concat("latest.json").join("\n"));
 } else if (mode !== "check") {
-  console.error("usage : release.ts check <tag> | plan <tag> <artefacts> <sortie>");
+  console.error("usage : release.ts check <tag> | plan <tag> <artefacts> <sortie> | mas-build <run> <tentative>");
   process.exit(2);
 }

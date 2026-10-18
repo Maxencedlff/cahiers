@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "category": "Education",
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "entitlements": "./appstore/Entitlements.plist",
+      "infoPlist": "./appstore/Info.plist",
+      "signingIdentity": "Apple Distribution: Maxence de La Fouchardiere (NMK739Z59B)",
+      "files": {
+        "embedded.provisionprofile": "./appstore/embedded.provisionprofile"
+      }
+    }
+  },
+  "plugins": {
+    "updater": null
+  }
+}

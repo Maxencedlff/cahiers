@@ -4,6 +4,7 @@ import { App } from "./ui/app";
 import { detectPlatform } from "./platform";
 import { el, toast, confirmDialog } from "./ui/dom";
 import { Updater } from "./ui/updater";
+import { selfUpdates } from "./core/distribution";
 
 /**
  * Fermeture de la fenetre (croix, Alt+F4) : on ecrit ce qui attend AVANT de
@@ -54,9 +55,11 @@ async function main() {
     if (platform.isTauri) await guardClose(app);
     await app.start();
 
-    // Mises a jour : seulement l'appli installee (jamais en mode navigateur),
-    // verification automatique hors developpement (tauri dev).
-    if (platform.isTauri) {
+    // Mises a jour : seulement l'appli installee hors App Store (jamais en
+    // mode navigateur ni dans la build Mac App Store : sans Updater, ni
+    // bandeau, ni menu ⋯, ni section des Reglages), verification
+    // automatique hors developpement (tauri dev).
+    if (selfUpdates(platform.distribution)) {
       const updater = new Updater(app);
       app.setUpdater(updater);
       if (!import.meta.env.DEV) updater.checkSoon();

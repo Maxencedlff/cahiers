@@ -3,6 +3,7 @@ import {
   isPresenceFile, othersPresent, parsePresence, presenceFileName, type OtherPresence,
 } from "./core/sync";
 import type { LocationApi, StorageInfo, Target } from "./core/storage/location";
+import { parseDistribution, type Distribution } from "./core/distribution";
 
 /**
  * Couche plateforme. L'application tourne dans deux contextes :
@@ -33,6 +34,8 @@ export interface Platform {
   saveKeys: ((applicationKey: string, hmacKey: string) => Promise<void>) | null;
   /** Emplacement des cahiers (dans l'appli / dossier synchronise). */
   location: LocationApi;
+  /** Installateur direct, Mac App Store ou navigateur (core/distribution.ts). */
+  distribution: Distribution;
 }
 
 function inTauri(): boolean {
@@ -55,6 +58,7 @@ export async function detectPlatform(): Promise<Platform> {
       keys: null,
       saveKeys: null,
       location: browserLocation(),
+      distribution: "browser",
     };
   }
 
@@ -63,6 +67,8 @@ export async function detectPlatform(): Promise<Platform> {
   // Le nom de la machine signe aussi les copies de conflit ecrites par Repo.
   const fs = new TauriFs(invoke as never, machine);
   const rootLabel = await fs.rootLabel();
+  // Ancien binaire sans la commande : installateur direct.
+  const distribution = parseDistribution(await invoke<string>("distribution").catch(() => null));
 
   let keys: { applicationKey: string; hmacKey: string } | null = null;
   try {
@@ -85,6 +91,7 @@ export async function detectPlatform(): Promise<Platform> {
     saveKeys: (applicationKey: string, hmacKey: string) =>
       invoke<void>("set_myscript_keys", { applicationKey, hmacKey }),
     location: tauriLocation(invoke as never),
+    distribution,
   };
 }
 

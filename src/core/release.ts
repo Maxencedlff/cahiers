@@ -57,6 +57,25 @@ export function versionMismatch(tag: string, versions: Record<string, string>): 
 }
 
 /**
+ * CFBundleVersion d'un envoi Mac App Store (job « mas ») : App Store Connect
+ * refuse un numero deja envoye et veut des numeros croissants. Apple :
+ * trois entiers au plus sur macOS. Donc la version codee (0.2.1 → 201,
+ * 1.4.0 → 10400 : croissante d'une version a l'autre), puis le numero du
+ * run GitHub (croissant a chaque lancement) et la tentative (relance du
+ * meme run). Ex. 0.2.0, run 57 → « 200.57.1 ».
+ */
+export function masBuildNumber(version: string, run: number, attempt = 1): string {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!m) throw new Error(`Version « ${version} » : attendu X.Y.Z`);
+  const [major, minor, patch] = m.slice(1).map(Number);
+  if (minor > 99 || patch > 99) throw new Error(`Version « ${version} » : mineure et correctif limités à 99`);
+  if (!Number.isInteger(run) || run < 1 || !Number.isInteger(attempt) || attempt < 1) {
+    throw new Error(`Run ${run}, tentative ${attempt} : entiers positifs attendus`);
+  }
+  return `${major * 10000 + minor * 100 + patch}.${run}.${attempt}`;
+}
+
+/**
  * Prepare la release. `files` : tous les fichiers telecharges ; `readSig`
  * lit une signature (.sig) ; `baseUrl` : adresse de telechargement des
  * assets de cette release (…/releases/download/vX.Y.Z). Une plateforme

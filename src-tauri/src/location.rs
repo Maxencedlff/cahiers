@@ -10,12 +10,12 @@
 //! ecraser), verifie le nombre de fichiers et d'octets, puis seulement
 //! change de racine. L'ancien emplacement reste tel quel.
 //!
-//! Sandbox Mac (a faire le jour du Mac App Store) : un dossier choisi par la
-//! boite de dialogue n'est accessible que pour la session ; le retrouver au
-//! lancement suivant demande un « security-scoped bookmark » (garde a cote
-//! de root.txt) et l'entitlement files.user-selected.read-write. Sans lui,
-//! le dossier est vu comme introuvable et l'appli s'ouvre dans son espace
-//! prive avec un avertissement, sans rien perdre.
+//! Sandbox Mac App Store (sandbox.rs) : un dossier choisi par la boite de
+//! dialogue n'est accessible que pour la session ; il est retrouve au
+//! lancement suivant par un « security-scoped bookmark » garde a cote de
+//! root.txt. Sans acces (`confine`), le dossier est vu comme introuvable et
+//! l'appli s'ouvre dans son espace prive avec un avertissement, sans rien
+//! perdre.
 
 use std::fs;
 use std::io::{self, Write};
@@ -128,6 +128,23 @@ pub fn choose_root(saved: Option<&str>, internal: &Path, candidates: &[PathBuf])
         }
     }
     Resolved { root: internal.to_path_buf(), save: true, missing: None }
+}
+
+/// Sandbox (build Mac App Store) : une racine hors de l'espace prive n'est
+/// gardee que si un bookmark en a rouvert l'acces (`granted` : le dossier
+/// ouvert, la racine peut etre dedans, ex. sous-dossier « Cahiers »). Sinon
+/// elle est traitee comme introuvable : espace prive pour la session,
+/// root.txt intact, avertissement dans les Reglages.
+pub fn confine(r: Resolved, internal: &Path, granted: Option<&Path>) -> Resolved {
+    if same_dir(&r.root, internal) {
+        return r;
+    }
+    if let Some(g) = granted {
+        if matches!(relation(g, &r.root), "same" | "inside") {
+            return r;
+        }
+    }
+    Resolved { root: internal.to_path_buf(), save: false, missing: Some(r.root) }
 }
 
 /// Chemin comparable : canonique s'il existe, sinon celui du parent + nom.
@@ -418,6 +435,29 @@ mod tests {
         fs::create_dir_all(random.join("Vrac")).unwrap();
         let r = choose_root(None, &internal, &[random.clone()]);
         assert_eq!(r, Resolved { root: random, save: true, missing: None });
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sandbox_garde_seulement_un_dossier_rouvert_par_bookmark() {
+        let base = tmp("confine");
+        let internal = base.join("interne");
+        let sync = base.join("iCloud");
+        let root = sync.join("Cahiers");
+        fs::create_dir_all(&root).unwrap();
+        let chosen = Resolved { root: root.clone(), save: false, missing: None };
+        // Bookmark du dossier choisi (la racine est dedans) : garde tel quel.
+        let kept = confine(chosen, &internal, Some(&sync));
+        assert_eq!(kept.root, root);
+        assert_eq!(kept.missing, None);
+        // Pas de bookmark, ou celui d'un autre dossier : introuvable, rien d'oublie.
+        for granted in [None, Some(base.join("autre"))] {
+            let r = confine(Resolved { root: root.clone(), save: false, missing: None }, &internal, granted.as_deref());
+            assert_eq!(r, Resolved { root: internal.clone(), save: false, missing: Some(root.clone()) });
+        }
+        // Espace prive : jamais touche.
+        let own = Resolved { root: internal.clone(), save: true, missing: None };
+        assert_eq!(confine(own, &internal, None), Resolved { root: internal.clone(), save: true, missing: None });
         let _ = fs::remove_dir_all(&base);
     }
 

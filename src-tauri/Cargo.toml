@@ -10,6 +10,13 @@ rust-version = "1.77"
 name = "cahiers_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Build Mac App Store (job « mas » de build.yml, tauri.appstore.conf.json) :
+# appli sandboxee, pas de mise a jour par l'appli (l'App Store s'en charge),
+# dossier synchronise retrouve par « security-scoped bookmark » (sandbox.rs).
+# Le .dmg Developer ID, Windows et Linux ne l'activent jamais.
+app-store = ["dep:objc2", "dep:objc2-foundation"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -26,6 +33,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 base64 = "0.22"
+
+# Security-scoped bookmarks (sandbox.rs), build Mac App Store seulement :
+# memes versions que celles que tauri tire deja (Cargo.lock).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSData",
+  "NSError",
+  "NSString",
+  "NSURL",
+] }
 
 # OCR local, fourni par Windows (section 6) : pas de service externe.
 [target.'cfg(windows)'.dependencies.windows]

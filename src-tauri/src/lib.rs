@@ -19,6 +19,7 @@ use std::time::Duration;
 use tauri::{Manager, State};
 
 mod location;
+mod sandbox;
 
 /// Racine des cahiers, resolue une fois au demarrage.
 struct Root(Mutex<PathBuf>);
@@ -32,6 +33,9 @@ struct Storage {
     internal: Mutex<PathBuf>,
     missing: Mutex<Option<PathBuf>>,
     picked: Mutex<Option<PathBuf>>,
+    /// Build Mac App Store : bookmark du dossier choisi, cree pendant que la
+    /// boite de dialogue en ouvre l'acces, ecrit a la bascule (sandbox.rs).
+    picked_bookmark: Mutex<Option<Vec<u8>>>,
 }
 
 /// Les erreurs remontent au frontend en clair : c'est ce qui s'affiche dans
@@ -66,6 +70,14 @@ fn root_of(state: &State<Root>) -> Res<PathBuf> {
 /* ------------------------------------------------------------------ */
 /* Commandes exposees au frontend                                      */
 /* ------------------------------------------------------------------ */
+
+/// Canal de distribution, lu par le frontend (core/distribution.ts) :
+/// « app-store » = build Mac App Store, sans mise a jour par l'appli ;
+/// « direct » = installateurs de cahiers-releases (bouton « Mettre a jour »).
+#[tauri::command]
+fn distribution() -> &'static str {
+    if cfg!(feature = "app-store") { "app-store" } else { "direct" }
+}
 
 #[tauri::command]
 fn root_path(state: State<Root>) -> Res<String> {
@@ -771,6 +783,14 @@ fn pick_sync_folder(app: tauri::AppHandle, st: State<'_, Storage>) -> Res<Option
         return Ok(None);
     };
     let path = picked.into_path().map_err(|e| fail(format!("chemin refuse : {e}")))?;
+    // Sandbox : l'acces ne vaut que pour cette session ; sans bookmark, le
+    // dossier serait perdu au prochain lancement. Mieux vaut le dire tout de suite.
+    let bookmark = if sandbox::ACTIVE {
+        Some(sandbox::create(&path).map_err(|e| fail(format!("accès au dossier impossible à retenir : {e}")))?)
+    } else {
+        None
+    };
+    *st.picked_bookmark.lock().map_err(|_| fail("etat indisponible"))? = bookmark;
     *st.picked.lock().map_err(|_| fail("etat indisponible"))? = Some(path.clone());
     Ok(Some(path.to_string_lossy().to_string()))
 }
@@ -821,10 +841,34 @@ fn switch_location(
     if !path.is_dir() {
         return Err(fail(format!("{} n'est pas un dossier", path.display())));
     }
+    if sandbox::ACTIVE {
+        keep_access(&st, &target)?;
+    }
     save_root_preference(&path);
     *root.0.lock().map_err(|_| fail("racine verrouillee"))? = path;
     *st.missing.lock().map_err(|_| fail("etat indisponible"))? = None;
     info_of(&root, &st)
+}
+
+/// Sandbox : le bookmark suit la racine. Vers le dossier choisi, il est ecrit
+/// AVANT root.txt (sans lui la bascule serait perdue au lancement suivant) ;
+/// retour dans l'espace prive, il n'a plus d'objet.
+fn keep_access(st: &State<Storage>, target: &str) -> Res<()> {
+    let Some(file) = preference_file().map(|p| sandbox::bookmark_file(&p)) else {
+        return Err(fail("emplacement de configuration introuvable"));
+    };
+    match target {
+        "picked" => {
+            let bytes = lock_of(&st.picked_bookmark)?.ok_or_else(|| fail("accès au dossier choisi non retenu"))?;
+            write_durable(&file, "root.bookmark", &bytes)
+        }
+        "internal" => {
+            let _ = fs::remove_file(&file);
+            Ok(())
+        }
+        // « current », « missing » : l'acces deja retenu reste celui-la.
+        _ => Ok(()),
+    }
 }
 
 /// Ouvre le dossier des cahiers dans l'explorateur Windows ou le Finder.
@@ -894,10 +938,20 @@ fn legacy_candidates() -> Vec<PathBuf> {
 
 /// Ou sont les cahiers ? Voir `location::choose_root` : root.txt d'abord,
 /// tel quel ; sinon un ancien dossier ESEO de cahiers ; sinon l'espace prive.
+///
+/// Sandbox (Mac App Store) : l'acces retenu par bookmark est rouvert AVANT
+/// de regarder root.txt (sinon son dossier paraitrait absent), aucun ancien
+/// dossier ESEO n'est cherche (hors du conteneur, invisible), et une racine
+/// sans acces est traitee comme introuvable (`location::confine`).
 fn resolve_root(app: &tauri::AppHandle) -> (PathBuf, PathBuf, Option<PathBuf>) {
     let internal = internal_dir(app);
+    let granted = if sandbox::ACTIVE { preference_file().and_then(|f| sandbox::restore(&f)) } else { None };
     let saved = preference_file().and_then(|f| fs::read_to_string(f).ok());
-    let r = location::choose_root(saved.as_deref(), &internal, &legacy_candidates());
+    let legacy = if sandbox::ACTIVE { Vec::new() } else { legacy_candidates() };
+    let mut r = location::choose_root(saved.as_deref(), &internal, &legacy);
+    if sandbox::ACTIVE {
+        r = location::confine(r, &internal, granted.as_deref());
+    }
     if location::same_dir(&r.root, &internal) {
         let _ = fs::create_dir_all(&internal);
     }
@@ -913,7 +967,7 @@ fn resolve_root(app: &tauri::AppHandle) -> (PathBuf, PathBuf, Option<PathBuf>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Instance unique : un second lancement ramene la fenetre existante
         // au premier plan au lieu d'ouvrir une deuxieme fenetre (section 1).
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -924,10 +978,13 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
-        // Bouton « Mettre a jour » (ui/updater.ts) : latest.json signe sur le
-        // depot public cahiers-releases, puis relance de l'appli.
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_process::init());
+    // Bouton « Mettre a jour » (ui/updater.ts) : latest.json signe sur le
+    // depot public cahiers-releases, puis relance de l'appli. Jamais dans la
+    // build Mac App Store : c'est l'App Store qui met l'appli a jour.
+    #[cfg(not(feature = "app-store"))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .manage(Root(Mutex::new(PathBuf::new())))
         .manage(Storage::default())
         .setup(|app| {
@@ -939,6 +996,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            distribution,
             root_path,
             machine_name,
             list_dirs,

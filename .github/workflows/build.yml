@@ -4,10 +4,18 @@
 # - Par un tag v* (git tag v0.2.1 && git push --tags, voir docs/PUBLIER.md) :
 #   meme build, puis release publique vX.Y.Z dans Maxencedlff/cahiers-releases
 #   avec latest.json, lu par le bouton « Mettre a jour » de l'appli.
+# - Job « mas » (meme declencheurs) : version Mac App Store, sandboxee, sans
+#   updater, .pkg signe envoye sur App Store Connect (docs/PUBLIER.md).
 # Un build Mac compte 10 fois sur le quota de minutes d'un depot prive.
 name: Installateurs
 on:
   workflow_dispatch:
+    inputs:
+      cible:
+        description: "tout = installateurs + Mac App Store ; mas = Mac App Store seul"
+        type: choice
+        options: [tout, mas]
+        default: tout
   push:
     tags: ["v*"]
 jobs:
@@ -25,8 +33,9 @@ jobs:
 
   build:
     needs: version
-    # Lancement a la main : « version » est sautee, le build part quand meme.
-    if: ${{ !failure() && !cancelled() }}
+    # Lancement a la main : « version » est sautee, le build part quand meme
+    # (sauf « Mac App Store seul »). Tag : `inputs.cible` est vide.
+    if: ${{ !failure() && !cancelled() && inputs.cible != 'mas' }}
     strategy:
       fail-fast: false
       matrix:
@@ -128,3 +137,130 @@ jobs:
 
           Installer : Windows \`Cahiers_${v}_x64-setup.exe\`, Mac \`Cahiers_${v}_universal.dmg\`, Linux \`.AppImage\` ou \`.deb\`.
           Déjà installé : l'appli propose « Mettre à jour » toute seule (ou menu ⋯ › Rechercher des mises à jour)."
+
+  # Mac App Store (doc Tauri v2 « App Store ») : a cote du .dmg Developer ID,
+  # qui ne change pas. Tag v* (apres le job « version ») ou lancement a la
+  # main. Ne bloque ni « build » ni « release ».
+  # - config fusionnee : src-tauri/tauri.appstore.conf.json (sandbox,
+  #   entitlements, profil embarque, pas d'updater) + feature Cargo app-store ;
+  # - signe « Apple Distribution », .pkg signe « 3rd Party Mac Developer
+  #   Installer », verifie, puis envoye sur App Store Connect (TestFlight).
+  mas:
+    needs: version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: macos-latest
+    env:
+      APP_SIGNING_IDENTITY: "Apple Distribution: Maxence de La Fouchardiere (NMK739Z59B)"
+      INSTALLER_SIGNING_IDENTITY: "3rd Party Mac Developer Installer: Maxence de La Fouchardiere (NMK739Z59B)"
+      # Fiche App Store Connect « Cahiers » (fr.mdlf.cahiers).
+      ASC_APP_ID: "6824238306"
+      BUNDLE_ID: fr.mdlf.cahiers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: mas
+      - run: npm ci || npm install
+      # Trousseau temporaire : les deux certificats (appli + installeur), plus
+      # les intermediaires Apple WWDR G3 pour une chaine complete.
+      - name: Certificats (trousseau temporaire)
+        env:
+          MAS_CERTIFICATE: ${{ secrets.MAS_CERTIFICATE }}
+          MAS_CERTIFICATE_PASSWORD: ${{ secrets.MAS_CERTIFICATE_PASSWORD }}
+          MAS_INSTALLER_CERTIFICATE: ${{ secrets.MAS_INSTALLER_CERTIFICATE }}
+          MAS_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.MAS_INSTALLER_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/mas.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+          echo "$MAS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/app.p12"
+          echo "$MAS_INSTALLER_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$kc" -P "$MAS_CERTIFICATE_PASSWORD" -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/security
+          security import "$RUNNER_TEMP/installer.p12" -k "$kc" -P "$MAS_INSTALLER_CERTIFICATE_PASSWORD" -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12"
+          curl -fsSL -o "$RUNNER_TEMP/wwdr.cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          security import "$RUNNER_TEMP/wwdr.cer" -k "$kc" || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild: -s -k "$KEYCHAIN_PASSWORD" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$kc" | grep -F "$APP_SIGNING_IDENTITY"
+          security find-identity -v "$kc" | grep -F "$INSTALLER_SIGNING_IDENTITY"
+      - name: Profil de provisioning
+        env:
+          MAS_PROVISION_PROFILE: ${{ secrets.MAS_PROVISION_PROFILE }}
+        run: echo "$MAS_PROVISION_PROFILE" | base64 --decode > src-tauri/appstore/embedded.provisionprofile
+      # CFBundleVersion unique et croissant a chaque envoi (src/core/release.ts).
+      - name: Numero de build
+        id: num
+        run: |
+          echo "build=$(node --experimental-strip-types scripts/release.ts mas-build "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+      # Pas de variables APPLE_API_* ici : Tauri ne notarise pas (inutile et
+      # refuse pour une signature Apple Distribution).
+      - name: Build Mac App Store (signe Apple Distribution)
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APP_SIGNING_IDENTITY }}
+        run: |
+          npx tauri build --target universal-apple-darwin --bundles app --features app-store \
+            --config src-tauri/tauri.appstore.conf.json \
+            --config '{"bundle":{"macOS":{"bundleVersion":"${{ steps.num.outputs.build }}"}}}'
+      - name: Paquet .pkg signe
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/universal-apple-darwin/release/bundle/macos/Cahiers.app"
+          mkdir -p mas
+          xcrun productbuild --sign "$INSTALLER_SIGNING_IDENTITY" --component "$app" /Applications mas/Cahiers.pkg
+      - name: Verifications (signatures, entitlements, profil, Info.plist)
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/universal-apple-darwin/release/bundle/macos/Cahiers.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dvv --entitlements - "$app" 2>&1 | tee mas/codesign.txt
+          grep -F "Authority=Apple Distribution" mas/codesign.txt
+          grep -F "com.apple.security.app-sandbox" mas/codesign.txt
+          grep -F "com.apple.security.files.bookmarks.app-scope" mas/codesign.txt
+          grep -F "NMK739Z59B.fr.mdlf.cahiers" mas/codesign.txt
+          test -f "$app/Contents/embedded.provisionprofile"
+          plist="$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "${{ steps.num.outputs.build }}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$plist")" = "false"
+          /usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$plist"
+          lipo -archs "$app/Contents/MacOS/cahiers"
+          pkgutil --check-signature mas/Cahiers.pkg | tee mas/pkgutil.txt
+          grep -F "3rd Party Mac Developer Installer" mas/pkgutil.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cahiers-mas
+          path: mas/
+      # Envoi sur App Store Connect avec la cle d'API (celle de la
+      # notarisation). altool la cherche dans ~/.appstoreconnect/private_keys.
+      - name: Envoi sur App Store Connect
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s\n' "$APPLE_API_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_${APPLE_API_KEY}.p8
+          xcrun altool --upload-package mas/Cahiers.pkg --type macos \
+            --apple-id "$ASC_APP_ID" --bundle-id "$BUNDLE_ID" \
+            --bundle-version "${{ steps.num.outputs.build }}" \
+            --bundle-short-version-string "${{ steps.num.outputs.version }}" \
+            --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER" \
+            --output-format normal
+      - name: Nettoyage du trousseau
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/mas.keychain-db" || true

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planRelease, versionMismatch, versionOfTag } from "../core/release";
+import { masBuildNumber, planRelease, versionMismatch, versionOfTag } from "../core/release";
 
 const BASE = "https://github.com/Maxencedlff/cahiers-releases/releases/download/v0.2.0";
 const FILES = [
@@ -55,5 +55,31 @@ describe("latest.json", () => {
     expect(() => planRelease(FILES.filter((f) => !f.endsWith(".dmg")), "0.2.0", BASE, sig)).toThrow(/Mac/);
     expect(() => planRelease(FILES.filter((f) => !f.endsWith("setup.exe.sig")), "0.2.0", BASE, sig)).toThrow(/signature/);
     expect(() => planRelease(FILES.filter((f) => !f.includes("AppImage")), "0.2.0", BASE, sig)).toThrow(/Linux/);
+  });
+});
+
+describe("numero de build Mac App Store", () => {
+  it("version codee, run, tentative", () => {
+    expect(masBuildNumber("0.2.0", 57)).toBe("200.57.1");
+    expect(masBuildNumber("0.2.1", 58, 2)).toBe("201.58.2");
+    expect(masBuildNumber("1.4.0", 3)).toBe("10400.3.1");
+  });
+  it("toujours croissant : nouvelle version, nouveau run, relance", () => {
+    const num = (s: string) => s.split(".").map(Number);
+    const after = (a: string, b: string) => {
+      const [x, y] = [num(a), num(b)];
+      for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+      return false;
+    };
+    expect(after(masBuildNumber("0.2.0", 58), masBuildNumber("0.2.0", 57))).toBe(true);
+    expect(after(masBuildNumber("0.2.0", 57, 2), masBuildNumber("0.2.0", 57, 1))).toBe(true);
+    expect(after(masBuildNumber("0.2.1", 1), masBuildNumber("0.2.0", 999))).toBe(true);
+    expect(after(masBuildNumber("0.10.0", 1), masBuildNumber("0.9.99", 999))).toBe(true);
+  });
+  it("refuse ce qui ne se code pas", () => {
+    expect(() => masBuildNumber("0.2", 1)).toThrow();
+    expect(() => masBuildNumber("0.2.0-beta", 1)).toThrow();
+    expect(() => masBuildNumber("0.100.0", 1)).toThrow();
+    expect(() => masBuildNumber("0.2.0", 0)).toThrow();
   });
 });

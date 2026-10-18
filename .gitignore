@@ -8,3 +8,6 @@ src-tauri/gen/
 *.local
 .DS_Store
 demo-data
+
+# Profil Mac App Store, ecrit par le job « mas » (secret MAS_PROVISION_PROFILE).
+src-tauri/appstore/embedded.provisionprofile
