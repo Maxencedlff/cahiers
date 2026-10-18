@@ -427,13 +427,15 @@ export type FieldsCheck = (values: Record<string, string>) =>
 /**
  * Dialogue de saisie. Remplace window.prompt, qui n'existe pas dans une
  * WebView Tauri et qui ne serait de toute facon pas utilisable au doigt.
+ * `intro` : phrase au-dessus des champs (ce que deviennent les valeurs).
  */
 export function askFields(
-  title: string, fields: DialogField[], okLabel = "Valider", check?: FieldsCheck,
+  title: string, fields: DialogField[], okLabel = "Valider", check?: FieldsCheck, intro?: string,
 ): Promise<Record<string, string> | null> {
   return new Promise((resolve) => {
     const inputs: Record<string, HTMLInputElement | HTMLTextAreaElement> = {};
     const content = el("div", { class: "content" });
+    if (intro) content.append(el("p", { class: "small muted" }, intro));
 
     for (const f of fields) {
       const input = f.multiline

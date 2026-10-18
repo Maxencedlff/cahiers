@@ -4,10 +4,11 @@ import {
 } from "./core/sync";
 import type { LocationApi, StorageInfo, Target } from "./core/storage/location";
 import { parseDistribution, type Distribution } from "./core/distribution";
+import { PRIVACY_URL } from "./core/privacy";
 
 /**
  * Couche plateforme. L'application tourne dans deux contextes :
- *  - Tauri : l'application installee, qui lit le vrai dossier ESEO ;
+ *  - Tauri : l'application installee, qui lit le vrai dossier des cahiers ;
  *  - navigateur : `npm run dev`, pour developper et verifier l'interface.
  *
  * Le reste du code ne sait pas dans lequel il se trouve.
@@ -27,7 +28,7 @@ export interface Platform {
   rootLabel: string;
   presence: Presence | null;
   isTauri: boolean;
-  /** OCR local fourni par Windows. Absent en mode navigateur. */
+  /** OCR local fourni par Windows. Absent en mode navigateur, sur Mac et Linux. */
   ocr: ((dataUrl: string) => Promise<string>) | null;
   /** Cles MyScript retenues par la machine, si elles ont ete enregistrees. */
   keys: { applicationKey: string; hmacKey: string } | null;
@@ -36,6 +37,8 @@ export interface Platform {
   location: LocationApi;
   /** Installateur direct, Mac App Store ou navigateur (core/distribution.ts). */
   distribution: Distribution;
+  /** Ouvre la politique de confidentialite dans le navigateur du systeme. */
+  openPrivacy: () => Promise<void>;
 }
 
 function inTauri(): boolean {
@@ -59,6 +62,7 @@ export async function detectPlatform(): Promise<Platform> {
       saveKeys: null,
       location: browserLocation(),
       distribution: "browser",
+      openPrivacy: async () => { window.open(PRIVACY_URL, "_blank", "noopener"); },
     };
   }
 
@@ -69,6 +73,9 @@ export async function detectPlatform(): Promise<Platform> {
   const rootLabel = await fs.rootLabel();
   // Ancien binaire sans la commande : installateur direct.
   const distribution = parseDistribution(await invoke<string>("distribution").catch(() => null));
+  // OCR de Windows seulement : ailleurs, ni lecture du texte des photos ni
+  // avertissement « indisponible » a chaque import.
+  const hasOcr = await invoke<boolean>("ocr_available").catch(() => false);
 
   let keys: { applicationKey: string; hmacKey: string } | null = null;
   try {
@@ -83,15 +90,20 @@ export async function detectPlatform(): Promise<Platform> {
     rootLabel,
     isTauri: true,
     presence: buildPresence(fs, machine),
-    ocr: async (dataUrl: string) => {
-      const { base64 } = splitDataUrl(dataUrl);
-      return invoke<string>("ocr_image", { base64 });
-    },
+    ocr: hasOcr
+      ? async (dataUrl: string) => {
+        const { base64 } = splitDataUrl(dataUrl);
+        return invoke<string>("ocr_image", { base64 });
+      }
+      : null,
     keys,
     saveKeys: (applicationKey: string, hmacKey: string) =>
       invoke<void>("set_myscript_keys", { applicationKey, hmacKey }),
     location: tauriLocation(invoke as never),
     distribution,
+    // Adresse fixe cote Rust (shell.rs) : un lien <a> ou window.open
+    // s'ouvrirait dans la fenetre de l'appli, pas dans le navigateur.
+    openPrivacy: () => invoke<void>("open_privacy"),
   };
 }
 

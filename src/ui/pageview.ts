@@ -50,6 +50,7 @@ import { flagContext, fold, parseQuery } from "../core/text/find";
 import { DEFAULT_FLAG_NOTE } from "../core/storage/search";
 import { PageHistory, applyStrokeCommand, restoreBlocks } from "../core/history";
 import { planPrint, type Span } from "../core/print";
+import { printAndWait } from "../core/printwait";
 import type { ImportResult } from "./image-import";
 import { FINAL_MAX, JPEG_QUALITY, fitRatio, unreadableMessage } from "../core/image/photo";
 import { paperOf, type PaperKind } from "../core/paper";
@@ -1231,7 +1232,7 @@ export class PageView {
     if (this.locked()) return;
     const ok = await confirmDialog(
       "Supprimer la copie",
-      `La copie venue de ${c.label} (${c.file}) part à la corbeille (dossier ESEO/.corbeille). `
+      `La copie venue de ${c.label} (${c.file}) part à la corbeille de Cahiers. `
         + (c.orphan ? "" : this.merged.has(c.file)
           ? "Son encre est déjà sur ta page. "
           : "Ta page n'est pas touchée : si la copie contient de l'encre à garder, fusionne-la d'abord. "),
@@ -2143,7 +2144,7 @@ export class PageView {
       }, used * LINE, 0, uuid);
       const nextId = next.id;
       // R3 : `from`, avec la suite dedans, est ecrite AVANT que la suite parte
-      // a la corbeille (ESEO/.corbeille) ; si l'ecriture echoue, on defait tout.
+      // a la corbeille (.corbeille a la racine) ; si l'ecriture echoue, on defait tout.
       setPageText(from.page, text.split(CARET_MARK).join(""));
       const done = await commitPull({
         writeFrom: () => this.serial(async () => {
@@ -2919,7 +2920,7 @@ export class PageView {
       }
       toast("Document rétabli");
     } catch (e) {
-      toast(`Annulation incomplète : ${errorText(e)}. Les pages retirées sont dans ESEO/.corbeille.`, "err", 8000);
+      toast(`Annulation incomplète : ${errorText(e)}. Les pages retirées sont dans la corbeille de Cahiers.`, "err", 8000);
     } finally {
       this.flowing = false;
     }
@@ -5222,7 +5223,7 @@ export class PageView {
   }
 
   /**
-   * La page part a la corbeille (ESEO/.corbeille), jamais effacee. En
+   * La page part a la corbeille (.corbeille a la racine), jamais effacee. En
    * defilement, c'est la page en vue qui est visee : la confirmation la nomme.
    */
   async deleteCurrentPage(): Promise<void> {
@@ -5278,7 +5279,7 @@ export class PageView {
         return at;
       });
     } catch (e) {
-      toast(`Restauration impossible : ${errorText(e)}. La page reste dans ESEO/.corbeille.`, "err", 8000);
+      toast(`Restauration impossible : ${errorText(e)}. La page reste dans la corbeille de Cahiers.`, "err", 8000);
       return;
     }
     this.current = n;
@@ -5594,9 +5595,10 @@ export class PageView {
         ? `${this.notebook} - ${this.divider.replace(/\//g, " - ")} p. ${prevPage}`
         : `${this.notebook} - ${this.divider.replace(/\//g, " - ")}`;
       document.body.classList.add("printing");
-      const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
-      window.print();
-      await done;
+      await printAndWait(window, () => window.print());
+    } catch (e) {
+      // Impression refusee (Mac : commande native) : on le dit, la vue revient.
+      toast(`Export PDF impossible : ${errorText(e)}`, "err", 6000);
     } finally {
       document.body.classList.remove("printing");
       this.resizeObserver.observe(this.root);

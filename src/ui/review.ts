@@ -14,6 +14,7 @@ import { PALETTE, colorOf, labelOf } from "../core/palette";
 import { PAGE_W } from "../core/ink/sheet";
 import { widthAt, type Bounds } from "../core/ink/stroke";
 import { REVIEW_COLORS, whereLabel, type ReviewItem, type ReviewResult } from "../core/review";
+import { printAndWait } from "../core/printwait";
 import { collectReview } from "../core/storage/search";
 import type { Repo } from "../core/storage/repo";
 import type { ColorKey, InkPoint, Stroke } from "../core/types";
@@ -501,9 +502,7 @@ async function printReview(result: ReviewResult, title: string, showNotebook: bo
     await Promise.all([...hostEl.querySelectorAll("img")].map((img) => img.decode().catch(() => undefined)));
     document.title = title.replace(/[\\/:*?"<>|·]+/g, "-").replace(/\s*-\s*/g, " - ");
     document.body.classList.add("printing");
-    const done = new Promise<void>((r) => window.addEventListener("afterprint", () => r(), { once: true }));
-    window.print();
-    await done;
+    await printAndWait(window, () => window.print());
   } catch (e) {
     toast(`Export impossible : ${(e as Error).message}`, "err", 5000);
   } finally {

@@ -1157,6 +1157,9 @@ kbd { color: var(--text-2); }
 .set-row:last-child { border-bottom: none; }
 .set-label { flex: 1 1 200px; display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: var(--fs); }
 .set-hint { font-size: var(--fs-xs); color: var(--muted); }
+/* Phrase sous un reglage (ce qui sort de la machine, par exemple). */
+.set-row:has(+ .set-note) { border-bottom: none; padding-bottom: 2px; }
+.set-note { margin: 0; padding: 4px 0 8px; font-size: var(--fs-xs); color: var(--muted); border-bottom: 1px solid var(--border); }
 .set-control { flex: 0 1 340px; display: flex; justify-content: flex-end; min-width: 0; }
 .set-control .seg { flex: 1; }
 .set-root { margin-top: 12px; font-size: var(--fs-xs); color: var(--text-2); overflow-wrap: anywhere; }

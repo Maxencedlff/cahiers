@@ -10,7 +10,9 @@
   - files.bookmarks.app-scope : retrouver ce dossier au lancement suivant
     (security-scoped bookmark, src-tauri/src/sandbox.rs) ;
   - network.client : reconnaissance d'ecriture MyScript (cloud.myscript.com,
-    seulement si l'utilisateur a enregistre ses cles). Rien d'autre ne sort.
+    seulement si l'utilisateur a enregistre ses cles). Rien d'autre ne sort ;
+  - print : export PDF (window.print, que Tauri passe a l'impression native
+    de macOS, permission core:webview:allow-print de la capability).
 -->
 <plist version="1.0">
 <dict>
@@ -25,6 +27,8 @@
 	<key>com.apple.security.files.bookmarks.app-scope</key>
 	<true/>
 	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.print</key>
 	<true/>
 </dict>
 </plist>
