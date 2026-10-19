@@ -45,6 +45,9 @@ export interface LineFormat {
  * Jeton `line` : toujours en debut de ligne (debut du texte ou juste apres
  * un `br`), il met en forme toute la ligne jusqu'au `br` suivant.
  */
+/** Type du presse-papiers interne : un morceau de page au format du document (formules en $LaTeX$). */
+export const DOC_CLIP_TYPE = "application/x-cahiers-doc";
+
 export type DocToken =
   | { kind: "text"; text: string; bold?: boolean; italic?: boolean; code?: boolean; color?: ColorKey; size?: number }
   | { kind: "math"; latex: string; color?: ColorKey; size?: number }

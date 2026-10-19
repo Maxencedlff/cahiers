@@ -18,6 +18,7 @@ import {
   pasteGoesToSolve,
 } from "../../core/calc/screen";
 import { KEYPAD, FAMILY_CLASS, mapKey, acceptText, type Key } from "./keys";
+import { clipboardToCalc, droppedMessage, looksLikeTex, pastedToCalc, type CalcText } from "../../core/calc/texinput";
 
 /**
  * Calculatrice flottante (section 7). Fenetre deplacable, positionnable
@@ -162,10 +163,12 @@ export class Calculator {
     document.addEventListener("focusin", (e) => {
       if (!this.root.contains(e.target as Node)) this.armed = false;
     });
-    // Ctrl+V dans l'ecran Calcul : une expression copiee (avec Ω, µ...).
+    // Ctrl+V dans l'ecran Calcul : une expression copiee (avec Ω, µ...) ou une
+    // formule (page, editeur de formule, LaTeX d'ailleurs) reecrite comme au pave.
     document.addEventListener("paste", (e) => {
-      if (!this.capturesText(e.target)) return;
-      const text = e.clipboardData?.getData("text/plain").replace(/\s+/g, " ").trim();
+      if (!this.capturesText(e.target) || !e.clipboardData) return;
+      const pasted = this.readPaste(e.clipboardData);
+      const text = pasted.expr.replace(/\s+/g, " ").trim();
       if (!text) return;
       e.preventDefault();
       // Calcul copie de la page avec une inconnue (« 2μ + 3 = 13 », elements
@@ -176,7 +179,21 @@ export class Calculator {
         this.body.querySelector<HTMLButtonElement>("button.primary")?.click();
         return;
       }
-      this.typeText(text);
+      // Formule convertie : deja dans l'alphabet du moteur (τ, √, ·), posee telle quelle.
+      if (pasted.converted) this.type(text);
+      else this.typeText(text);
+    });
+    // Champs des autres onglets (Résoudre, Littéral, Courbes...) : une formule
+    // collee y arrive lisible, jamais en LaTeX ; un texte ordinaire colle normalement.
+    this.root.addEventListener("paste", (e) => {
+      const field = e.target as HTMLInputElement | HTMLTextAreaElement;
+      if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) || !e.clipboardData) return;
+      const pasted = this.readPaste(e.clipboardData);
+      if (!pasted.converted) return;
+      e.preventDefault();
+      const text = field instanceof HTMLInputElement ? pasted.expr.replace(/\s+/g, " ") : pasted.expr;
+      field.setRangeText(text, field.selectionStart ?? field.value.length, field.selectionEnd ?? field.value.length, "end");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
     });
     // Texte qui arrive sans keydown utilisable (voir `sink`) : repris avant
     // toute insertion. textInput (Chromium, WebView2) precede l'insertion et
@@ -390,9 +407,20 @@ export class Calculator {
     );
   }
 
+  /**
+   * Presse-papiers lu pour la calculatrice (morceau de page, LaTeX, texte) ;
+   * ce qui ne se calcule pas est signale.
+   */
+  private readPaste(data: DataTransfer): CalcText & { converted: boolean } {
+    const pasted = clipboardToCalc((type) => data.getData(type));
+    const note = droppedMessage(pasted.dropped);
+    if (note) toast(note, "warn");
+    return pasted;
+  }
+
   /** Calcul venu de la page (Ctrl+J) : onglet Résoudre, résolu tout de suite. */
   solveText(text: string): void {
-    this.state.resoudre.eq = text;
+    this.state.resoudre.eq = asTyped(text);
     this.show();
     this.selectTab("resoudre");
     this.body.querySelector<HTMLButtonElement>("button.primary")?.click();
@@ -476,7 +504,8 @@ export class Calculator {
   editCalc(spec: CalcSpec, update: (c: CalcSpec) => boolean): void {
     this.editing = { kind: "calc", update };
     this.engine.angleMode = spec.angle;
-    this.edit = { input: spec.expr, caret: spec.expr.length };
+    const expr = asTyped(spec.expr);
+    this.edit = { input: expr, caret: expr.length };
     this.lastError = null;
     this.recall.reset();
     this.second = false;
@@ -491,7 +520,7 @@ export class Calculator {
     const n = (v: number) => String(round4(v)).replace(".", ",");
     const h = dbUnwrap(spec.fn);
     this.state.courbes = {
-      fn: h ?? spec.fn, from: spec.logX ? engInput(spec.domain[0]) : n(spec.domain[0]),
+      fn: asTyped(h ?? spec.fn), from: spec.logX ? engInput(spec.domain[0]) : n(spec.domain[0]),
       to: spec.logX ? engInput(spec.domain[1]) : n(spec.domain[1]),
       ymin: spec.range ? n(spec.range[0]) : "", ymax: spec.range ? n(spec.range[1]) : "",
       logX: !!spec.logX, db: h !== null,
@@ -1444,6 +1473,11 @@ function multName(m: number): string {
 }
 
 /** Arbre des regles de derivation, replie par defaut au dela du premier niveau. */
+/** Expression qui contiendrait encore du LaTeX (ancien bloc, source externe) : reecrite comme au pave. */
+function asTyped(expr: string): string {
+  return looksLikeTex(expr) ? pastedToCalc(expr).expr : expr;
+}
+
 /** Nom d'inconnue en LaTeX : lettre grecque comprise (μ -> \\mu). */
 function greekLatex(name: string): string {
   const g: Record<string, string> = {

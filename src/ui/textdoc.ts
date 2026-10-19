@@ -6,9 +6,10 @@ import { inkCssColor } from "../core/theme";
 import type { ColorKey } from "../core/types";
 import {
   docClipboardLines, docClipboardText, emptyTable, frenchSpaceAtEnd, pastedMath, docLines, listNumbers, markerStyle, FONT_SIZES, MAX_LIST_LEVEL, NORMAL_SIZE, normalizeTokens, parseDoc, serializeDoc,
-  texToPlain, trailingOperand, type DocToken, type LineFormat, type LineStyle,
+  texToPlain, trailingOperand, DOC_CLIP_TYPE, type DocToken, type LineFormat, type LineStyle,
 } from "../core/text/doc";
 import { foldChar, occurrences, OPS as FOLD_OPS, skipBlank } from "../core/text/find";
+import { texToCalc } from "../core/calc/texinput";
 import {
   LIVE_CARET, balanceParens, dateAfterWord, toggleBox, cleanMathLive, findFormulas, forceFormula, glueDen, greekWordAtEnd, liveCaretFormula, liveComplete, liveFormula, liveSplit, mathTail, mathWordsAtEnd, planLine,
   slashOpensFraction, subscriptVars, symbolAtEnd, type FoundFormula, type LinePart, type ScanMode,
@@ -283,7 +284,7 @@ export function setTypingColor(color: ColorKey | null): void {
 }
 
 /** Presse-papiers interne : le morceau copie, formules et couleurs comprises. */
-const CLIP_TYPE = "application/x-cahiers-doc";
+const CLIP_TYPE = DOC_CLIP_TYPE;
 
 /**
  * Symboles du ruban poses directement dans le texte, sans formule a
@@ -505,10 +506,11 @@ export class TextDoc {
   /**
    * Calcul a envoyer a la calculatrice (Ctrl+J) : la formule en cours
    * d'edition entiere, sinon la ligne du curseur, de sa premiere a sa
-   * derniere formule (« donc » et la ponctuation autour restent), en clair.
+   * derniere formule (« donc » et la ponctuation autour restent), ecrite
+   * comme au pave de la calculatrice (texToCalc : « 1/(2π·R·C) », « e^(-t/τ) »).
    */
   calcSource(): string | null {
-    if (this.field) return texToPlain(this.field.getValue("latex")) || null;
+    if (this.field) return texToCalc(this.field.getValue("latex")).expr || null;
     const sel = document.getSelection();
     const r = sel?.rangeCount && this.owns(sel.getRangeAt(0).startContainer) ? sel.getRangeAt(0) : this.savedRange;
     if (!r || !this.owns(r.startContainer)) return null;
@@ -521,7 +523,7 @@ export class TextDoc {
     const toks = line.tokens;
     const first = toks.findIndex((t) => t.kind === "math"), last = toks.map((t) => t.kind).lastIndexOf("math");
     const part = first >= 0 ? toks.slice(first, last + 1) : toks;
-    const text = part.map((t) => (t.kind === "text" ? t.text : t.kind === "math" ? texToPlain(t.latex) : "")).join("").trim();
+    const text = part.map((t) => (t.kind === "text" ? t.text : t.kind === "math" ? texToCalc(t.latex).expr : "")).join("").trim();
     return text || null;
   }
 
