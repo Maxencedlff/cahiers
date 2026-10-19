@@ -16,6 +16,7 @@ import {
 } from "../core/text/automath";
 import { PALETTE } from "../core/palette";
 import { recordLatex } from "../core/symbols";
+import { symbolChar } from "../core/mathcatalog";
 import { appAltKey } from "../core/templates";
 import { linesToReach, TEXT_LEFT, TEXT_RIGHT } from "../core/textlayout";
 import { PAGE_W } from "../core/ink/sheet";
@@ -285,19 +286,6 @@ export function setTypingColor(color: ColorKey | null): void {
 
 /** Presse-papiers interne : le morceau copie, formules et couleurs comprises. */
 const CLIP_TYPE = DOC_CLIP_TYPE;
-
-/**
- * Symboles du ruban poses directement dans le texte, sans formule a
- * remplir : la frappe continue en texte ("l'angle α vaut 30"), et le
- * caractere se relit dans les formules tapees ensuite.
- */
-const SYMBOL_CHARS: Record<string, string> = {
-  "\\alpha": "α", "\\beta": "β", "\\lambda": "λ", "\\pi": "π", "\\theta": "θ",
-  "\\omega": "ω", "\\Delta": "Δ", "\\infty": "∞", "\\to": "→", "\\Rightarrow": "⇒",
-  "\\Leftrightarrow": "⇔", "\\leq": "≤", "\\geq": "≥", "\\neq": "≠", "\\approx": "≈",
-  "\\in": "∈", "\\forall": "∀", "\\exists": "∃", "\\mathbb{R}": "ℝ", "\\times": "×",
-  "\\pm": "±", "\\partial": "∂", "\\Omega": "Ω", "\\eta": "η", "\\varepsilon": "ε",
-};
 
 
 /**
@@ -3417,7 +3405,10 @@ export class TextDoc {
     // formule restee ouverte.
     if (template && !template.includes("#?") && !template.includes("#@")) {
       this.lastAuto = null;
-      const char = SYMBOL_CHARS[template];
+      // Symbole du volet qui a un caractere : il se pose dans le texte et la
+      // frappe continue en texte (« l'angle α vaut 30 »), le caractere se
+      // relit dans les formules tapees ensuite.
+      const char = symbolChar(template);
       if (char) {
         this.insertTextAtCaret(char);
       } else {

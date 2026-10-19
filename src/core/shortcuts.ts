@@ -323,8 +323,6 @@ export interface EscapeState {
   handled: boolean;
   /** Fenetre de dialogue ouverte : elle prend son Echap. */
   dialog: boolean;
-  /** Ruban Maths ouvert en volet par-dessus la page. */
-  popover: boolean;
   /** Le clavier est dans la calculatrice (bouton, champ, recepteur arme). */
   calc: boolean;
   /** Champ de saisie hors de la page (INPUT, TEXTAREA). */
@@ -336,7 +334,7 @@ export interface EscapeState {
 }
 
 export type EscapeAction =
-  | "ignore" | "close-popover" | "release-calc" | "leave-field" | "clear-selection" | "menu" | "leave-text" | "to-text";
+  | "ignore" | "release-calc" | "leave-field" | "clear-selection" | "menu" | "leave-text" | "to-text";
 
 /**
  * Un Echap, sur l'ecran cahier. Il ferme d'abord ce qui est ouvert, rend le
@@ -346,7 +344,6 @@ export type EscapeAction =
  */
 export function escapeAction(s: EscapeState): EscapeAction {
   if (s.handled || s.dialog) return "ignore";
-  if (s.popover) return "close-popover";
   if (s.calc) return "release-calc";
   if (s.field) return "leave-field";
   if (s.selection) return "clear-selection";

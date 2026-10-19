@@ -3,7 +3,7 @@ import {
   effectiveTheme, effectiveSheet, nextThemePref, inkDisplayColor, contrastRatio, isThemePref, isSheetTone, isSheetPref,
 } from "../core/theme";
 import {
-  mathPanelMode, toastsToDrop, toastPlacement, MAX_TOASTS, TOAST_ZONE,
+  formulaPlacement, clampFormulaSplit, toastsToDrop, toastPlacement, MAX_TOASTS, TOAST_ZONE,
   sidebarMode, calcPlacement, paletteCompact, SIDEBAR_DOCK_MIN, PHONE_MAX, CALC_PANEL_W,
 } from "../core/chrome";
 import { statusSummary, type StatusInput } from "../core/status";
@@ -73,10 +73,19 @@ describe("encre a l'affichage", () => {
 });
 
 describe("volet des formules (Σ)", () => {
-  it("ferme par defaut, popover sous Σ une fois ouvert ; epingle, il reste", () => {
-    expect(mathPanelMode({ open: false, pinned: false })).toBe("closed");
-    expect(mathPanelMode({ open: true, pinned: false })).toBe("popover");
-    expect(mathPanelMode({ open: false, pinned: true })).toBe("popover");
+  it("ancre dans la colonne de droite (jamais sur la page) ; en bas au telephone", () => {
+    expect(formulaPlacement({ open: false, width: 1920 })).toBe("closed");
+    expect(formulaPlacement({ open: true, width: 1280 })).toBe("dock");
+    expect(formulaPlacement({ open: true, width: PHONE_MAX })).toBe("dock");
+    expect(formulaPlacement({ open: true, width: PHONE_MAX - 1 })).toBe("sheet");
+  });
+  it("partage avec la calculatrice borne : chacun garde de quoi servir", () => {
+    expect(clampFormulaSplit(0.5)).toBe(0.5);
+    expect(clampFormulaSplit(0)).toBe(0.2);
+    expect(clampFormulaSplit(1)).toBe(0.8);
+    expect(clampFormulaSplit(Number.NaN)).toBeNull();
+    expect(clampFormulaSplit(null)).toBeNull();
+    expect(clampFormulaSplit("0.5")).toBeNull();
   });
 });
 

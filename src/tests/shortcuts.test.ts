@@ -198,7 +198,8 @@ describe("reglages de disposition", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     const s = loadSettings();
     expect(s.calcOpen).toBe(false);
-    expect(s.mathPinned).toBe(false);
+    expect(s.formulasOpen).toBe(false);
+    expect(s.formulasSplit).toBeNull();
     expect(s.theme).toBe("system");
     expect(s.sheet).toBe("auto");
     expect(s.sidebar).toBe(true);
@@ -226,15 +227,20 @@ describe("reglages de disposition", () => {
     expect(loadSettings().calcOpen).toBe(true);
   });
 
-  it("ruban epingle, theme et feuille retenus ; valeurs inconnues ramenees au defaut", () => {
+  it("ancien volet epingle = volet ouvert, theme et feuille retenus ; valeurs inconnues ramenees au defaut", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     store.set("cahiers.settings.v1", JSON.stringify({ mathOpen: true, mathPinned: true, theme: "dark", sheet: "sepia", layout: 2 }));
     const s = loadSettings();
-    expect(s.mathPinned).toBe(true);
+    expect(s.formulasOpen).toBe(true);
+    expect("mathPinned" in s).toBe(false);
     expect(s.theme).toBe("dark");
     expect(s.sheet).toBe("sepia");
     // L'ancien « ruban deplie » ne survit pas (remplace par l'epingle).
     expect("mathOpen" in s).toBe(false);
+    // Le choix du volet ouvert tient ensuite, part bornee.
+    store.set("cahiers.settings.v1", JSON.stringify({ formulasOpen: false, mathPinned: true, formulasSplit: 5 }));
+    expect(loadSettings().formulasOpen).toBe(false);
+    expect(loadSettings().formulasSplit).toBe(0.8);
     store.set("cahiers.settings.v1", JSON.stringify({ theme: "noir", sheet: 3, layout: 2 }));
     expect(loadSettings().theme).toBe("system");
     expect(loadSettings().sheet).toBe("auto");
@@ -278,7 +284,7 @@ describe("nouvel intercalaire au clavier", () => {
 
 describe("Echap sur l'ecran cahier (deux fois pour le menu)", () => {
   const st = (over: Partial<EscapeState> = {}): EscapeState => ({
-    again: false, handled: false, dialog: false, popover: false, calc: false,
+    again: false, handled: false, dialog: false, calc: false,
     field: false, selection: false, inText: false, ...over,
   });
 
@@ -297,8 +303,7 @@ describe("Echap sur l'ecran cahier (deux fois pour le menu)", () => {
     expect(escapeAction(st({ calc: true, again: true }))).toBe("release-calc");
   });
 
-  it("ferme d'abord ce qui est ouvert : volet, selection du lasso", () => {
-    expect(escapeAction(st({ popover: true, again: true }))).toBe("close-popover");
+  it("ferme d'abord ce qui est ouvert : selection du lasso (le volet des formules, ancre, reste)", () => {
     expect(escapeAction(st({ selection: true, again: true }))).toBe("clear-selection");
   });
 

@@ -1,5 +1,6 @@
 import type { ColorKey, InkColor, ToolKind } from "./types";
 import { isSheetPref, isThemePref, type SheetPref, type ThemePref } from "./theme";
+import { clampFormulaSplit } from "./chrome";
 
 /**
  * Reglages locaux a la machine. Ils ne vont JAMAIS dans le dossier
@@ -25,11 +26,13 @@ export interface Settings {
   /** Calculatrice ouverte (colonne de droite, ou flottante sur un petit ecran). */
   calcOpen: boolean;
   /**
-   * Ruban Maths epingle : il reste ouvert (colonne a cote du rail sur un
-   * ecran d'au moins 1600 px, sinon volet flottant). Non epingle, il
-   * s'ouvre en volet d'un appui et se referme seul.
+   * Volet des formules (Σ) ouvert : panneau ancre a droite, au-dessus de la
+   * calculatrice si elle y est aussi (core/chrome.ts, formulaPlacement).
+   * Remplace l'ancien « volet epingle » (`mathPinned`, repris une fois).
    */
-  mathPinned: boolean;
+  formulasOpen: boolean;
+  /** Part de la colonne de droite pour le volet quand la calculatrice est dessous (null = automatique). */
+  formulasSplit: number | null;
   /** Theme du chrome : clair, sombre ou celui de Windows. */
   theme: ThemePref;
   /** Teinte de la feuille ; « auto » (defaut) = sombre en theme sombre. */
@@ -64,7 +67,8 @@ const DEFAULTS: Settings = {
   eraserMode: "stroke",
   autoConvert: false,
   calcOpen: false,
-  mathPinned: false,
+  formulasOpen: false,
+  formulasSplit: null,
   theme: "system",
   sheet: "auto",
   sidebar: true,
@@ -96,7 +100,11 @@ export function loadSettings(): Settings {
     if (!isSheetPref(out.sheet)) out.sheet = DEFAULTS.sheet;
     out.sidebar = out.sidebar !== false;
     out.calcDetached = out.calcDetached === true;
-    out.mathPinned = out.mathPinned === true;
+    // Ancien volet flottant « epingle » = on le voulait toujours ouvert.
+    const legacy = parsed as Partial<Settings> & { mathPinned?: unknown };
+    out.formulasOpen = (parsed.formulasOpen ?? legacy.mathPinned) === true;
+    out.formulasSplit = clampFormulaSplit(parsed.formulasSplit);
+    delete (out as Partial<Settings> & { mathPinned?: unknown }).mathPinned;
     out.touchWrites = out.touchWrites === true;
     out.shortcutHints = out.shortcutHints !== false;
     // Ancienne detection du stylet (Ctrl+D l'oubliait) : retiree.

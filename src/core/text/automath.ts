@@ -46,9 +46,9 @@ const GREEK_NAMES: Record<string, string> = {
   epsilon: "\\varepsilon", eps: "\\varepsilon", eta: "\\eta", theta: "\\theta", lambda: "\\lambda",
   mu: "\\mu", nu: "\\nu", xi: "\\xi", kappa: "\\kappa", zeta: "\\zeta", chi: "\\chi", psi: "\\psi",
   pi: "\\pi", rho: "\\rho", sigma: "\\sigma", tau: "\\tau",
-  phi: "\\varphi", omega: "\\omega",
+  phi: "\\varphi", omega: "\\omega", upsilon: "\\upsilon",
   Gamma: "\\Gamma", Delta: "\\Delta", Theta: "\\Theta", Lambda: "\\Lambda",
-  Sigma: "\\Sigma", Phi: "\\Phi", Omega: "\\Omega",
+  Sigma: "\\Sigma", Phi: "\\Phi", Psi: "\\Psi", Omega: "\\Omega",
 };
 
 const GREEK_CHARS: Record<string, string> = {
@@ -58,6 +58,9 @@ const GREEK_CHARS: Record<string, string> = {
   "ρ": "\\rho", "σ": "\\sigma", "τ": "\\tau", "φ": "\\varphi", "ω": "\\omega",
   "Γ": "\\Gamma", "Δ": "\\Delta", "Θ": "\\Theta", "Λ": "\\Lambda", "Π": "\\Pi",
   "Σ": "\\Sigma", "Φ": "\\Phi", "Ω": "\\Omega",
+  // Poses par le volet des formules (mathcatalog.ts), sans nom tape.
+  "ι": "\\iota", "υ": "\\upsilon", "ϵ": "\\epsilon", "ϑ": "\\vartheta", "ϕ": "\\phi",
+  "Ξ": "\\Xi", "Υ": "\\Upsilon", "Ψ": "\\Psi",
   // Repere du curseur d'une formule en cours (liveCaretFormula), jamais tape.
   "ϖ": "\\liveCaret",
 };
@@ -1714,8 +1717,9 @@ export const GREEK_WORDS: Readonly<Record<string, string>> = {
   alpha: "α", beta: "β", gamma: "γ", delta: "δ", eps: "ε", epsilon: "ε",
   eta: "η", theta: "θ", lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", kappa: "κ", zeta: "ζ", chi: "χ", psi: "ψ",
   pi: "π", rho: "ρ", sigma: "σ",
-  tau: "τ", phi: "φ", omega: "ω", Gamma: "Γ", Delta: "Δ", Theta: "Θ",
-  Lambda: "Λ", Sigma: "Σ", Phi: "Φ", Omega: "Ω",
+  tau: "τ", phi: "φ", omega: "ω", upsilon: "υ", Gamma: "Γ", Delta: "Δ", Theta: "Θ",
+  // Pas de « Pi » ni « Xi » : P_i (puissance d'entree) et X_i sont des grandeurs.
+  Lambda: "Λ", Sigma: "Σ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
 };
 
 /**

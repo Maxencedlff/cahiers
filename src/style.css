@@ -1199,26 +1199,51 @@ kbd {
   border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
 }
 
-/* Volet des formules (Σ) : popover ancre sous la barre du haut, sections titrees. */
-.math-pop {
-  position: fixed; z-index: 60; width: 300px; max-height: calc(100vh - 80px); display: flex; flex-direction: column;
-  background: var(--blur-bg); backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-3);
-  animation: fly-in var(--dur) var(--ease);
-}
+/* Volet des formules (Σ) : panneau ancre dans la colonne de droite (.inspector),
+   au-dessus de la calculatrice si elle y est aussi ; il pousse la page, il ne
+   la couvre jamais (core/chrome.ts, formulaPlacement ; ui/formuladock.ts). */
+.formula-dock { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; position: relative; background: var(--surface); }
+/* Avec la calculatrice : elle garde sa hauteur naturelle (tout le pave), le
+   volet le reste mais jamais moins que la recherche et quelques lignes ;
+   part fixee au separateur : `.split` + `--fp-split`. */
+.inspector.both > .formula-dock { flex: 1 1 0; min-height: 200px; border-bottom: 1px solid var(--border); }
+.inspector.both > .calc.docked { flex: 0 1 auto; }
+.inspector.both.split > .formula-dock { flex: 0 0 calc(var(--fp-split) * 100%); min-height: 0; }
+.inspector.both.split > .calc.docked { flex: 1 1 0; }
 .math-head { display: flex; align-items: center; gap: 2px; padding: 2px 4px 2px 14px; flex: none; border-bottom: 1px solid var(--border); min-height: 44px; }
 .math-title { font-weight: 600; font-size: var(--fs); color: var(--text); }
 .small-icon { width: 36px !important; min-width: 36px !important; height: 36px; min-height: 36px; }
-.formula-panel { overflow-y: auto; padding: 4px 10px 10px; scrollbar-width: thin; }
-.fp-section { margin-top: 6px; }
-.fp-title { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); margin: 6px 2px 4px; }
-.fp-keys { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+/* Separateur avec la calculatrice : seulement quand les deux partagent la colonne. */
+.fp-split { display: none; position: absolute; left: 0; right: 0; bottom: -4px; height: 8px; cursor: row-resize; z-index: 2; touch-action: none; }
+.inspector.both .fp-split { display: block; }
+.fp-split::after { content: ""; position: absolute; left: 50%; top: 2px; width: 36px; height: 4px; margin-left: -18px; border-radius: 2px; background: var(--border); }
+.fp-split:hover::after, .fp-split.dragging::after { background: var(--accent); }
+/* Telephone : en bas sur toute la largeur, la page remonte au-dessus. */
+.formula-dock.at-bottom {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 46vh; z-index: 60;
+  border-top: 1px solid var(--border); border-radius: 14px 14px 0 0; box-shadow: var(--shadow-3);
+}
+.formulas-under .pages { padding-bottom: 50vh; }
+
+.formula-panel { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.fp-find { flex: none; padding: 8px 10px 4px; }
+.fp-search {
+  width: 100%; min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font: inherit; font-size: var(--fs-sm);
+}
+.fp-search:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+.fp-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 10px 10px; scrollbar-width: thin; }
+.fp-section { margin-top: 4px; }
+.fp-title { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); margin: 8px 2px 4px; }
+.fp-keys { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 4px; }
+.fp-empty { color: var(--muted); font-size: var(--fs-sm); margin: 12px 2px; }
 .formula-panel .mathkey {
-  min-width: 0; min-height: 40px; padding: 0 2px; font-size: 16px; border: 1px solid var(--border);
-  border-radius: var(--radius-sm); background: var(--surface); color: var(--text);
+  min-width: 0; min-height: 38px; padding: 0 2px; font-size: 16px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface); color: var(--text); overflow: hidden;
 }
 .formula-panel .mathkey:hover { border-color: var(--accent); background: var(--accent-soft); }
 .formula-panel .mathkey.eq { grid-column: span 2; font-size: var(--fs-sm); font-weight: 600; color: var(--accent-text); }
+.formula-panel .mathkey.wide { grid-column: span 2; font-size: 13px; }
 .formula-panel .mathkey .katex { font-size: 1em; }
 @media (pointer: coarse) { .formula-panel .mathkey { min-height: var(--touch); } }
 

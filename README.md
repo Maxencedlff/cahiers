@@ -129,8 +129,14 @@ les deux PC.
   en bas a droite de chaque panneau. Le point d'etat est vert quand tout va
   bien, orange ou rouge avec un mot (« Non enregistré », « Hors ligne »,
   « Lecture seule ») sinon ; un appui donne le detail et les cles MyScript.
-- Ruban Maths : bouton ∑ du rail ou `Ctrl+Maj+M`, volet a cote du rail ;
-  l'epingle le garde ouvert (en colonne sur un ecran d'au moins 1600 px).
+- Volet des formules : bouton Σ de la barre du haut ou `Ctrl+Maj+M`, panneau
+  ancre a droite (il retrecit la page, il ne la couvre jamais), au-dessus de la
+  calculatrice quand elle est ouverte (separateur deplacable, double-clic :
+  automatique). Recherche (« omega », « fleche », « norme » ; Entree pose la
+  premiere touche), ligne « Récents », environ 160 touches en sections
+  (modeles, calcul, grec, operateurs, relations, fleches, logique et
+  ensembles, vecteurs et matrices, physique et electronique). Ouvert ou ferme :
+  retenu sur la machine.
 - Apparence (menu « ⋯ ») : theme Clair, Sombre ou Systeme (`Ctrl+Maj+T`),
   feuille Claire, Sepia ou Sombre ; la feuille sombre montre l'encre noire en
   clair a l'ecran seulement, l'export PDF et Word reste blanc a encre noire.

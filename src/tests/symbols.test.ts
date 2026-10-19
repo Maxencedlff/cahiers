@@ -18,7 +18,7 @@ describe("symboles par usage", () => {
     const t = Date.now();
     recordSymbol("\\eta", t); recordSymbol("\\eta", t); recordSymbol("\\Omega", t);
     const o = orderedSymbols(t).map((s) => s[1]);
-    expect(o.slice(0, 3)).toEqual(["\\eta", "\\Omega", "\\alpha"]);
+    expect(o.slice(0, 3)).toEqual(["\\eta", "\\Omega", SYMBOLS[0][1]]);
   });
   it("un vieil usage s'efface devant un usage recent", () => {
     const now = Date.now(), old = now - 90 * 24 * 3600 * 1000;
@@ -31,7 +31,7 @@ describe("symboles par usage", () => {
     recordLatex("x \\to \\infty", "", t);
     const o = orderedSymbols(t).map((s) => s[1]);
     expect(o.slice(0, 2).sort()).toEqual(["\\infty", "\\to"].sort());
-    expect(o.indexOf("\\in")).toBe(SYMBOLS.findIndex((s) => s[1] === "\\in"));
+    expect(JSON.parse(store.get("cahiers.symbols.v1")!)["\\in"]).toBeUndefined();
     recordLatex("\\beta \\cdot R_u \\gg R", "\\beta \\cdot R_u", t);
     const u = JSON.parse(store.get("cahiers.symbols.v1")!);
     expect(u["\\beta"]).toBeUndefined();

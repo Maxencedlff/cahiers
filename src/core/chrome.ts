@@ -59,15 +59,32 @@ export function paletteCompact(stageWidth: number): boolean {
 
 /* ---------------- volet des formules (Σ) ---------------- */
 
-export type MathPanelMode = "closed" | "popover";
+export type FormulaPlacement = "closed" | "dock" | "sheet";
 
 /**
- * Volet des formules : popover ancre sous Σ dans la barre du haut. Ferme
- * par defaut ; ouvert d'un appui (Echap ou un appui a cote le ferme) ;
- * epingle, il reste ouvert.
+ * Volet des formules : un panneau ancre dans la colonne de droite, comme
+ * la calculatrice, qui retrecit la zone des pages au lieu de flotter
+ * dessus (il ne couvre jamais le texte). Au telephone, en bas sur toute
+ * la largeur : la page peut remonter au-dessus.
  */
-export function mathPanelMode(o: { open: boolean; pinned: boolean }): MathPanelMode {
-  return o.open || o.pinned ? "popover" : "closed";
+export function formulaPlacement(o: { open: boolean; width: number }): FormulaPlacement {
+  if (!o.open) return "closed";
+  return o.width < PHONE_MAX ? "sheet" : "dock";
+}
+
+/**
+ * Part de la colonne de droite laissee au volet des formules quand la
+ * calculatrice y est ancree en dessous (separateur deplacable). null =
+ * automatique : la calculatrice a sa hauteur naturelle (tout le pave
+ * visible), le volet le reste, jamais moins que de quoi chercher et
+ * voir quelques lignes (CSS). Bornee : chacun garde de quoi servir.
+ */
+const FORMULA_SPLIT_MIN = 0.2;
+const FORMULA_SPLIT_MAX = 0.8;
+
+export function clampFormulaSplit(ratio: unknown): number | null {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio)) return null;
+  return Math.min(FORMULA_SPLIT_MAX, Math.max(FORMULA_SPLIT_MIN, ratio));
 }
 
 /* ---------------- messages ephemeres ---------------- */
