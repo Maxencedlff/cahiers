@@ -3,8 +3,8 @@ import {
   effectiveTheme, effectiveSheet, nextThemePref, inkDisplayColor, contrastRatio, isThemePref, isSheetTone, isSheetPref,
 } from "../core/theme";
 import {
-  formulaPlacement, clampFormulaSplit, toastsToDrop, toastPlacement, MAX_TOASTS, TOAST_ZONE,
-  sidebarMode, calcPlacement, paletteCompact, SIDEBAR_DOCK_MIN, PHONE_MAX, CALC_PANEL_W,
+  ribbonHalf, ribbonColumns, ribbonCapacity, RIBBON_MIN_W, RIBBON_KEY_MIN, RIBBON_KEY_GAP, RIBBON_PAD, toastsToDrop, toastPlacement, MAX_TOASTS, TOAST_ZONE,
+  sidebarMode, calcPlacement, calcFloatTop, CALC_MIN_H, paletteCompact, SIDEBAR_DOCK_MIN, PHONE_MAX, CALC_PANEL_W,
 } from "../core/chrome";
 import { statusSummary, type StatusInput } from "../core/status";
 import { colorOf, PALETTE, NOTEBOOK_COLORS, NOTEBOOK_COLOR_NAMES, isSemanticColor } from "../core/palette";
@@ -72,20 +72,30 @@ describe("encre a l'affichage", () => {
   });
 });
 
-describe("volet des formules (Σ)", () => {
-  it("ancre dans la colonne de droite (jamais sur la page) ; en bas au telephone", () => {
-    expect(formulaPlacement({ open: false, width: 1920 })).toBe("closed");
-    expect(formulaPlacement({ open: true, width: 1280 })).toBe("dock");
-    expect(formulaPlacement({ open: true, width: PHONE_MAX })).toBe("dock");
-    expect(formulaPlacement({ open: true, width: PHONE_MAX - 1 })).toBe("sheet");
+describe("ruban des formules (Σ)", () => {
+  it("deux rangees au plus : la moitie des touches, arrondie au-dessus", () => {
+    expect(ribbonHalf(0)).toBe(1);
+    expect(ribbonHalf(1)).toBe(1);
+    expect(ribbonHalf(26)).toBe(13);
+    expect(ribbonHalf(27)).toBe(14);
   });
-  it("partage avec la calculatrice borne : chacun garde de quoi servir", () => {
-    expect(clampFormulaSplit(0.5)).toBe(0.5);
-    expect(clampFormulaSplit(0)).toBe(0.2);
-    expect(clampFormulaSplit(1)).toBe(0.8);
-    expect(clampFormulaSplit(Number.NaN)).toBeNull();
-    expect(clampFormulaSplit(null)).toBeNull();
-    expect(clampFormulaSplit("0.5")).toBeNull();
+  it("colonnes : une rangee pleine si tout tient, sinon deux rangees equilibrees", () => {
+    // 928 px : 18 touches de 46 px par rangee.
+    expect(ribbonColumns(928, 12)).toBe(18);
+    expect(ribbonColumns(928, 18)).toBe(18);
+    expect(ribbonColumns(928, 27)).toBe(14);
+    expect(ribbonColumns(928, 19)).toBe(10);
+    expect(ribbonColumns(0, 3)).toBe(2);
+  });
+  it("capacite : touches d'au moins 34 px sur deux rangees, marges comprises", () => {
+    // 1536 x 864 a 125 %, barre laterale et calculatrice ancrees : 928 px.
+    expect(ribbonCapacity(928)).toBe(2 * 24);
+    expect(ribbonCapacity(RIBBON_MIN_W)).toBe(2 * 14);
+    for (const w of [RIBBON_MIN_W, 672, 928, 1288]) {
+      const cols = ribbonCapacity(w) / 2;
+      expect(cols * RIBBON_KEY_MIN + (cols - 1) * RIBBON_KEY_GAP).toBeLessThanOrEqual(w - RIBBON_PAD);
+    }
+    expect(ribbonCapacity(0)).toBe(2);
   });
 });
 
@@ -110,6 +120,14 @@ describe("disposition : barre laterale, calculatrice, palette", () => {
     expect(calcPlacement({ width: 900, height: 600, stage: 900, detached: false })).toBe("float");
     expect(calcPlacement({ width: 720, height: 1280, stage: 720, detached: true })).toBe("float");
     expect(CALC_PANEL_W).toBe(360);
+  });
+  it("flottante : sous le ruban s'il lui laisse la place d'etre entiere, sinon sous la barre", () => {
+    expect(calcFloatTop({ bar: 52, ribbon: null, height: 780 })).toBe(60);
+    // 1536 x 864 a 125 % : 780 px utiles, ruban jusqu'a 161.
+    expect(calcFloatTop({ bar: 52, ribbon: 161, height: 780 })).toBe(169);
+    // 1280 x 720 : pas la place sous le ruban.
+    expect(calcFloatTop({ bar: 52, ribbon: 161, height: 720 })).toBe(60);
+    expect(calcFloatTop({ bar: 52, ribbon: 161, height: 161 + 16 + CALC_MIN_H })).toBe(169);
   });
 
   it("palette : les six pastilles se replient en un bouton quand la zone est etroite", () => {

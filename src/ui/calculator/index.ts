@@ -244,10 +244,15 @@ export class Calculator {
   /** Haut minimal de la fenetre flottante : jamais sur la barre du haut. */
   private minTop = 8;
 
-  /** L'appli donne le bas de sa barre du haut : la fenetre reste dessous. */
+  /**
+   * L'appli donne le bas de sa barre du haut (et du ruban des formules
+   * ouvert) : la fenetre reste dessous, descendue s'il le faut.
+   */
   setMinTop(px: number): void {
     this.minTop = Math.max(8, Math.round(px));
     this.root.style.setProperty("--calc-top", `${this.minTop}px`);
+    if (!this.visible || this.root.classList.contains("docked")) return;
+    if (this.root.getBoundingClientRect().top < this.minTop) this.root.style.top = `${this.minTop}px`;
   }
 
   /* ---------------- fenetre ---------------- */

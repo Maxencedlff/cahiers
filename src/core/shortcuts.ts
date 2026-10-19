@@ -222,7 +222,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: "Alt+=", label: "Mettre en formule ce qu'on vient de taper (ou la sélection) ; sinon nouvelle formule", group: "Formules", essential: true },
   { keys: "Alt+Maj+=", label: "Remettre en texte la formule avant le curseur", group: "Formules" },
   { keys: "Ctrl+Maj+B", label: "Encadrer la formule avant le curseur (ou sélectionnée), sinon toute la ligne (conclusion) ; encore : retirer le cadre", group: "Formules" },
-  ctrl("m", true, "maths", "Formules : ouvrir ou fermer le volet des symboles (Σ)", "Formules"),
+  ctrl("m", true, "maths", "Formules : ouvrir ou fermer le ruban des symboles (Σ)", "Formules"),
   ...MATH_TEMPLATES.filter((t) => t.key).map((t): Shortcut => ({
     keys: `Alt+${t.key!.toUpperCase()}`, label: t.title, group: "Formules",
   })),

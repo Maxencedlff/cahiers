@@ -64,7 +64,7 @@ export function recordLatex(latex: string, before = "", now = Date.now()): void 
     const added = (latex.match(re)?.length ?? 0) - (before.match(re)?.length ?? 0);
     for (let k = 0; k < added; k++) { bump(u, insert, now); changed = true; }
   }
-  // Une seule ecriture (et un seul reordonnancement du volet) par formule.
+  // Une seule ecriture (et un seul reordonnancement du ruban) par formule.
   if (changed) save(u);
 }
 

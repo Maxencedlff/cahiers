@@ -194,12 +194,12 @@ describe("reglages de disposition", () => {
   };
   afterEach(() => { store.clear(); delete (globalThis as { localStorage?: unknown }).localStorage; });
 
-  it("calculatrice fermee, volet des formules non epingle, theme systeme et feuille Auto par defaut", () => {
+  it("calculatrice fermee, ruban des formules ferme, theme systeme et feuille Auto par defaut", () => {
     (globalThis as { localStorage?: unknown }).localStorage = ls;
     const s = loadSettings();
     expect(s.calcOpen).toBe(false);
     expect(s.formulasOpen).toBe(false);
-    expect(s.formulasSplit).toBeNull();
+    expect(s.formulasTab).toBeNull();
     expect(s.theme).toBe("system");
     expect(s.sheet).toBe("auto");
     expect(s.sidebar).toBe(true);
@@ -237,10 +237,14 @@ describe("reglages de disposition", () => {
     expect(s.sheet).toBe("sepia");
     // L'ancien « ruban deplie » ne survit pas (remplace par l'epingle).
     expect("mathOpen" in s).toBe(false);
-    // Le choix du volet ouvert tient ensuite, part bornee.
-    store.set("cahiers.settings.v1", JSON.stringify({ formulasOpen: false, mathPinned: true, formulasSplit: 5 }));
+    // Le choix du ruban ouvert tient ensuite, onglet retenu ; l'ancienne
+    // part du volet ancre a droite disparait.
+    store.set("cahiers.settings.v1", JSON.stringify({ formulasOpen: false, mathPinned: true, formulasSplit: 0.5, formulasTab: "greek" }));
     expect(loadSettings().formulasOpen).toBe(false);
-    expect(loadSettings().formulasSplit).toBe(0.8);
+    expect(loadSettings().formulasTab).toBe("greek");
+    expect("formulasSplit" in loadSettings()).toBe(false);
+    store.set("cahiers.settings.v1", JSON.stringify({ formulasTab: 3 }));
+    expect(loadSettings().formulasTab).toBeNull();
     store.set("cahiers.settings.v1", JSON.stringify({ theme: "noir", sheet: 3, layout: 2 }));
     expect(loadSettings().theme).toBe("system");
     expect(loadSettings().sheet).toBe("auto");
@@ -303,7 +307,7 @@ describe("Echap sur l'ecran cahier (deux fois pour le menu)", () => {
     expect(escapeAction(st({ calc: true, again: true }))).toBe("release-calc");
   });
 
-  it("ferme d'abord ce qui est ouvert : selection du lasso (le volet des formules, ancre, reste)", () => {
+  it("ferme d'abord ce qui est ouvert : selection du lasso (le ruban des formules reste)", () => {
     expect(escapeAction(st({ selection: true, again: true }))).toBe("clear-selection");
   });
 

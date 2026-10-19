@@ -1,6 +1,5 @@
 import type { ColorKey, InkColor, ToolKind } from "./types";
 import { isSheetPref, isThemePref, type SheetPref, type ThemePref } from "./theme";
-import { clampFormulaSplit } from "./chrome";
 
 /**
  * Reglages locaux a la machine. Ils ne vont JAMAIS dans le dossier
@@ -26,13 +25,13 @@ export interface Settings {
   /** Calculatrice ouverte (colonne de droite, ou flottante sur un petit ecran). */
   calcOpen: boolean;
   /**
-   * Volet des formules (Σ) ouvert : panneau ancre a droite, au-dessus de la
-   * calculatrice si elle y est aussi (core/chrome.ts, formulaPlacement).
-   * Remplace l'ancien « volet epingle » (`mathPinned`, repris une fois).
+   * Ruban des formules (Σ) ouvert : bande sous la barre du haut, au-dessus
+   * des pages (ui/mathbar.ts). Remplace l'ancien « volet epingle »
+   * (`mathPinned`, repris une fois).
    */
   formulasOpen: boolean;
-  /** Part de la colonne de droite pour le volet quand la calculatrice est dessous (null = automatique). */
-  formulasSplit: number | null;
+  /** Onglet du ruban (section de core/mathcatalog.ts ou « recent ») ; null = Récents s'il y en a. */
+  formulasTab: string | null;
   /** Theme du chrome : clair, sombre ou celui de Windows. */
   theme: ThemePref;
   /** Teinte de la feuille ; « auto » (defaut) = sombre en theme sombre. */
@@ -68,7 +67,7 @@ const DEFAULTS: Settings = {
   autoConvert: false,
   calcOpen: false,
   formulasOpen: false,
-  formulasSplit: null,
+  formulasTab: null,
   theme: "system",
   sheet: "auto",
   sidebar: true,
@@ -103,7 +102,9 @@ export function loadSettings(): Settings {
     // Ancien volet flottant « epingle » = on le voulait toujours ouvert.
     const legacy = parsed as Partial<Settings> & { mathPinned?: unknown };
     out.formulasOpen = (parsed.formulasOpen ?? legacy.mathPinned) === true;
-    out.formulasSplit = clampFormulaSplit(parsed.formulasSplit);
+    out.formulasTab = typeof parsed.formulasTab === "string" ? parsed.formulasTab : null;
+    // Part du volet ancre a droite (19/10/2026) : remplace par le ruban.
+    delete (out as Partial<Settings> & { formulasSplit?: unknown }).formulasSplit;
     delete (out as Partial<Settings> & { mathPinned?: unknown }).mathPinned;
     out.touchWrites = out.touchWrites === true;
     out.shortcutHints = out.shortcutHints !== false;

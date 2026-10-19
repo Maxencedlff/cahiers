@@ -1,6 +1,6 @@
 /**
  * Disposition du chrome (logique pure) : barre laterale, calculatrice,
- * palette d'outils, volet des formules et placement des messages
+ * palette d'outils, ruban des formules et placement des messages
  * ephemeres (toasts).
  */
 
@@ -48,6 +48,24 @@ export function calcPlacement(o: { width: number; stage: number; detached: boole
   return o.height !== undefined && o.height > o.width ? "sheet" : "float";
 }
 
+/**
+ * Hauteur sous laquelle la calculatrice ne tient plus entiere : pave a
+ * 34 px par touche, ecran d'historique reduit a deux lignes (style.css,
+ * `.calc-body.is-calcul`). Verifie par le banc scripts/banc-ruban.py.
+ */
+export const CALC_MIN_H = 572;
+const FLOAT_MARGIN = 8;
+
+/**
+ * Haut minimal de la calculatrice flottante : sous le ruban des formules
+ * ouvert s'il lui reste la place d'y tenir entiere, sinon sous la barre du
+ * haut (elle passe alors sur le ruban, comme sur la page : on la deplace).
+ */
+export function calcFloatTop(o: { bar: number; ribbon: number | null; height: number }): number {
+  if (o.ribbon !== null && o.height - o.ribbon - 2 * FLOAT_MARGIN >= CALC_MIN_H) return o.ribbon + FLOAT_MARGIN;
+  return o.bar + FLOAT_MARGIN;
+}
+
 /* ---------------- palette d'outils ---------------- */
 
 /** Sous cette largeur de zone, les six pastilles se replient en un bouton. */
@@ -57,34 +75,45 @@ export function paletteCompact(stageWidth: number): boolean {
   return stageWidth < PALETTE_COMPACT_MAX;
 }
 
-/* ---------------- volet des formules (Σ) ---------------- */
-
-export type FormulaPlacement = "closed" | "dock" | "sheet";
+/* ---------------- ruban des formules (Σ) ---------------- */
 
 /**
- * Volet des formules : un panneau ancre dans la colonne de droite, comme
- * la calculatrice, qui retrecit la zone des pages au lieu de flotter
- * dessus (il ne couvre jamais le texte). Au telephone, en bas sur toute
- * la largeur : la page peut remonter au-dessus.
+ * Ruban des formules : une bande sous la barre du haut, sur toute la
+ * largeur de la zone des pages (pas sous la calculatrice), comme l'onglet
+ * Equation de Word. Une rangee d'onglets, puis au plus DEUX rangees de
+ * touches, jamais de defilement a la souris : le nombre de colonnes suit
+ * le nombre de touches (`ribbonColumns`), leur largeur reste entre
+ * `RIBBON_KEY_MIN` et `RIBBON_KEY_MAX`. Au doigt et au telephone, une
+ * rangee qui defile.
  */
-export function formulaPlacement(o: { open: boolean; width: number }): FormulaPlacement {
-  if (!o.open) return "closed";
-  return o.width < PHONE_MAX ? "sheet" : "dock";
+export const RIBBON_KEY_MIN = 34;
+export const RIBBON_KEY_MAX = 46;
+export const RIBBON_KEY_GAP = 4;
+/** Marges laterales de la rangee de touches (8 px de chaque cote). */
+export const RIBBON_PAD = 16;
+/** Zone des pages la plus etroite a la souris : calculatrice ancree a cote. */
+export const RIBBON_MIN_W = CALC_MIN_STAGE;
+
+/** Colonnes de la premiere rangee : la moitie des unites (touche large = 2), arrondie au-dessus. */
+export function ribbonHalf(units: number): number {
+  return Math.max(1, Math.ceil(units / 2));
 }
 
 /**
- * Part de la colonne de droite laissee au volet des formules quand la
- * calculatrice y est ancree en dessous (separateur deplacable). null =
- * automatique : la calculatrice a sa hauteur naturelle (tout le pave
- * visible), le volet le reste, jamais moins que de quoi chercher et
- * voir quelques lignes (CSS). Bornee : chacun garde de quoi servir.
+ * Colonnes de la grille des touches : une rangee pleine si tout y tient a
+ * la taille normale, sinon deux rangees equilibrees (14 + 13 plutot que
+ * 25 + 2), quitte a retrecir les touches.
  */
-const FORMULA_SPLIT_MIN = 0.2;
-const FORMULA_SPLIT_MAX = 0.8;
+export function ribbonColumns(width: number, units: number): number {
+  const inner = Math.max(0, width - RIBBON_PAD);
+  const perRow = Math.max(1, Math.floor((inner + RIBBON_KEY_GAP) / (RIBBON_KEY_MAX + RIBBON_KEY_GAP)));
+  return units <= perRow ? perRow : ribbonHalf(units);
+}
 
-export function clampFormulaSplit(ratio: unknown): number | null {
-  if (typeof ratio !== "number" || !Number.isFinite(ratio)) return null;
-  return Math.min(FORMULA_SPLIT_MAX, Math.max(FORMULA_SPLIT_MIN, ratio));
+/** Unites qui tiennent sur deux rangees dans une zone de `width` px, touches d'au moins RIBBON_KEY_MIN. */
+export function ribbonCapacity(width: number): number {
+  const inner = Math.max(0, width - RIBBON_PAD);
+  return 2 * Math.max(1, Math.floor((inner + RIBBON_KEY_GAP) / (RIBBON_KEY_MIN + RIBBON_KEY_GAP)));
 }
 
 /* ---------------- messages ephemeres ---------------- */

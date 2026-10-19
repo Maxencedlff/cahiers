@@ -1,11 +1,14 @@
 /**
- * Catalogue du volet des formules (Σ) : chaque touche, sa section, son nom
+ * Catalogue du ruban des formules (Σ) : chaque touche, sa section, son nom
  * en francais et ce qu'elle insere. Donnees pures, sans interface : le
- * volet (ui/mathbar.ts), la frecence (symbols.ts) et la saisie
+ * ruban (ui/mathbar.ts), la frecence (symbols.ts) et la saisie
  * (textdoc.ts, caractere pose dans le texte) lisent tous cette table.
  *
  * Ordre : les sections les plus utiles d'abord (modeles, calcul, grec),
- * et dans chaque section l'ordre d'un cours. La frecence fait ensuite
+ * et dans chaque section l'ordre d'un cours. Une section = un onglet du
+ * ruban : elle doit tenir sur deux rangees dans la zone des pages la plus
+ * etroite (verifie par les tests, core/chrome.ts ribbonCapacity) ; le grec
+ * majuscule est la bascule Maj de l'onglet Grec (`SHIFTED`). La frecence fait ensuite
  * passer devant, dans leur section, les touches deja utilisees.
  *
  * `insert` : LaTeX insere par MathLive (#@ = mot pris avant le curseur,
@@ -37,7 +40,12 @@ export interface MathKey {
 
 export interface MathSection {
   id: string;
+  /** Nom complet (infobulle de l'onglet, recherche par section). */
   title: string;
+  /** Libelle court de l'onglet du ruban. */
+  tab: string;
+  /** Apercu KaTeX de l'onglet quand le ruban est trop etroit pour les mots. */
+  glyph: string;
   keys: MathKey[];
 }
 
@@ -54,6 +62,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "models",
     title: "Modèles",
+    tab: "Modèles", glyph: "\\frac{a}{b}",
     keys: MATH_TEMPLATES.map((t) => ({
       insert: t.insert, label: t.label, name: t.title, altKey: t.key,
       typed: t.typed, wide: t.label.includes("\\begin"),
@@ -62,6 +71,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "calculus",
     title: "Calcul",
+    tab: "Calcul", glyph: "\\int",
     keys: [
       tpl("\\frac{\\partial f}{\\partial x}", "\\frac{\\partial #?}{\\partial #?}", "Dérivée partielle"),
       tpl("\\frac{\\mathrm{d}}{\\mathrm{d}t}", "\\frac{\\mathrm{d}}{\\mathrm{d}t}", "Dérivée par rapport au temps (d/dt)", { words: "derivee temps operateur" }),
@@ -86,6 +96,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "greek",
     title: "Grec",
+    tab: "Grec", glyph: "\\alpha",
     keys: rows([
       ["\\alpha", "alpha", "α", "alpha"], ["\\beta", "bêta", "β", "beta"], ["\\gamma", "gamma", "γ", "gamma"],
       ["\\delta", "delta", "δ", "delta"], ["\\varepsilon", "epsilon", "ε", "eps"], ["\\epsilon", "epsilon (variante)", "ϵ"],
@@ -101,6 +112,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "greek-upper",
     title: "Grec majuscule",
+    tab: "Grec maj.", glyph: "\\Omega",
     keys: rows([
       ["\\Gamma", "Gamma majuscule", "Γ", "Gamma"], ["\\Delta", "Delta majuscule", "Δ", "Delta"],
       ["\\Theta", "Thêta majuscule", "Θ", "Theta"], ["\\Lambda", "Lambda majuscule", "Λ", "Lambda"],
@@ -113,6 +125,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "operators",
     title: "Opérateurs",
+    tab: "Opérateurs", glyph: "\\pm",
     keys: rows([
       ["\\times", "multiplié par", "×"], ["\\cdot", "point (produit scalaire)"], ["\\div", "divisé par", "÷"],
       ["\\pm", "plus ou moins", "±"], ["\\mp", "moins ou plus", "∓"], ["\\circ", "rond (composition)", "∘"],
@@ -124,6 +137,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "relations",
     title: "Relations",
+    tab: "Relations", glyph: "\\leq",
     keys: rows([
       ["\\neq", "différent de", "≠", "!="], ["\\approx", "environ égal", "≈", "~="],
       ["\\leq", "inférieur ou égal", "≤", "<="], ["\\geq", "supérieur ou égal", "≥", ">="],
@@ -137,6 +151,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "arrows",
     title: "Flèches",
+    tab: "Flèches", glyph: "\\to",
     keys: [
       ...rows([
         ["\\to", "flèche, tend vers", "→", "->"], ["\\Rightarrow", "implique", "⇒", "=>"],
@@ -153,6 +168,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "sets",
     title: "Logique et ensembles",
+    tab: "Ensembles", glyph: "\\in",
     keys: [
       ...rows([
         ["\\forall", "pour tout", "∀", "forall"], ["\\exists", "il existe", "∃", "exists"],
@@ -173,6 +189,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "notations",
     title: "Vecteurs et matrices",
+    tab: "Vecteurs", glyph: "\\vec{u}",
     keys: [
       tpl("\\overrightarrow{AB}", "\\overrightarrow{#?}", "Vecteur AB (flèche longue)"),
       tpl("\\hat{x}", "\\hat{#@}", "Chapeau (vecteur unitaire, estimation)"),
@@ -193,6 +210,7 @@ export const CATALOG: MathSection[] = [
   {
     id: "physics",
     title: "Physique et électronique",
+    tab: "Physique", glyph: "\\angle",
     keys: [
       ...rows([
         ["^{\\circ}", "degré", "°", undefined, "angle"], ["{}^{\\circ}\\mathrm{C}", "degré Celsius", "°C", undefined, "temperature"],
@@ -248,16 +266,55 @@ function wordStarts(text: string, q: string): boolean {
 }
 
 /**
- * Recherche du volet : « omega » → ω et Ω, « fl » → la section Flèches et
- * les touches dont un mot commence par « fl ». Plie casse, accents et grec
- * (« ω » trouve oméga). Vide : tout le catalogue.
+ * Onglet bascule : Maj sur l'onglet Grec montre les majuscules. La section
+ * basculee n'a pas d'onglet a elle.
  */
-export function filterCatalog(query: string): MathSection[] {
+export const SHIFTED: Readonly<Record<string, string>> = { greek: "greek-upper" };
+const SHIFT_BACK = new Map(Object.entries(SHIFTED).map(([a, b]) => [b, a]));
+
+/** Onglets du ruban, dans l'ordre du catalogue (sans les sections basculees). */
+export const RIBBON_TABS: readonly MathSection[] = CATALOG.filter((s) => !SHIFT_BACK.has(s.id));
+
+/** Onglet qui montre cette section (le grec pour le grec majuscule). */
+export function tabOf(sectionId: string): string {
+  return SHIFT_BACK.get(sectionId) ?? sectionId;
+}
+
+/** L'autre casse de cette section (Maj), s'il y en a une. */
+export function shiftOf(sectionId: string): string | undefined {
+  return SHIFTED[sectionId] ?? SHIFT_BACK.get(sectionId);
+}
+
+export function sectionById(id: string): MathSection | undefined {
+  return CATALOG.find((s) => s.id === id);
+}
+
+/** Place prise dans une rangee : 2 pour un apercu large (matrice), 1 sinon. */
+export function keyUnits(keys: readonly Pick<MathKey, "wide">[]): number {
+  return keys.reduce((n, k) => n + (k.wide ? 2 : 1), 0);
+}
+
+/**
+ * Recherche du ruban, toutes sections : « omega » → ω et Ω, « fl » → les
+ * fleches (et le flux Φ apres elles). Plie casse, accents et grec (« ω »
+ * trouve omega). Rang : nom qui commence par la recherche, puis un mot du
+ * nom, puis le reste (raccourci, mots, section) ; a rang egal, `score`
+ * (usage) puis l'ordre du catalogue. Entree pose le premier : ce doit etre
+ * le plus probable. Vide : aucune touche.
+ */
+export function searchKeys(query: string, score: (insert: string) => number = () => 0): MathKey[] {
   const q = normalize(query);
-  if (!q) return CATALOG;
+  if (!q) return [];
   const terms = q.split(" ").filter(Boolean);
   const hits = (text: string) => terms.every((t) => wordStarts(text, t));
-  return CATALOG
-    .map((s) => (hits(normalize(s.title)) ? s : { ...s, keys: s.keys.filter((k) => hits(HAY.get(k)!)) }))
-    .filter((s) => s.keys.length > 0);
+  const found: { k: MathKey; rank: number; s: number; i: number }[] = [];
+  CATALOG.forEach((sec) => {
+    const inTitle = hits(normalize(sec.title));
+    for (const k of sec.keys) {
+      const name = normalize(k.name);
+      const rank = name.startsWith(q) ? 0 : hits(name) ? 1 : hits(HAY.get(k)!) || inTitle ? 2 : -1;
+      if (rank >= 0) found.push({ k, rank, s: score(k.insert), i: found.length });
+    }
+  });
+  return found.sort((a, b) => a.rank - b.rank || b.s - a.s || a.i - b.i).map((x) => x.k);
 }

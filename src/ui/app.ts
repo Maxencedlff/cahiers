@@ -13,8 +13,7 @@ import { buildReviewView, markRect, type ReviewState, type ReviewWhere } from ".
 import { REVIEW_COLORS, focusQuery, type ReviewItem } from "../core/review";
 import type { Bounds } from "../core/ink/stroke";
 import { PageView, type ViewMode, type RenderMode, type ViewNotice } from "./pageview";
-import { MATH_TEMPLATES } from "./mathbar";
-import { buildFormulaDock } from "./formuladock";
+import { MATH_TEMPLATES, buildFormulaRibbon } from "./mathbar";
 import { currentTypingSize, insertMathTemplate, isEditingDoc, lastCalcSource, setAutoMath, setShortcutHints, setSpellcheck, setTypingColor, setTypingSize } from "./textdoc";
 import { FONT_SIZES, NORMAL_SIZE } from "../core/text/doc";
 import type { Calculator } from "./calculator/index";
@@ -68,7 +67,7 @@ import { icon, widthIcon, type IconName } from "./icons";
 import { applyAppearance, installTooltips, onSystemThemeChange } from "./tooltip";
 import { retoneSurfaces } from "./canvas";
 import {
-  formulaPlacement, sidebarMode, calcPlacement, PHONE_MAX, type SidebarMode,
+  sidebarMode, calcPlacement, calcFloatTop, PHONE_MAX, type SidebarMode,
 } from "../core/chrome";
 import { statusSummary } from "../core/status";
 import { parseTableSize } from "../core/text/table";
@@ -177,8 +176,8 @@ export class App {
    * deux : le suivant va au menu (escapeAction).
    */
   private lastEsc = false;
-  /** Volet des formules (Σ), construit a la premiere ouverture puis garde. */
-  private formulaDock: HTMLElement | null = null;
+  /** Ruban des formules (Σ), construit a la premiere ouverture puis garde. */
+  private formulaRibbon: HTMLElement | null = null;
 
   private tool: Tool = "pen";
   /**
@@ -237,7 +236,7 @@ export class App {
   /** Indicateur « p. 4 / 12 » de chaque panneau, mis a jour sur place. */
   private pageLabels = new WeakMap<PageView, HTMLElement>();
   /** Ou poser la calculatrice sur l'ecran cahier : colonne ou zone de travail. */
-  private calcSlot: { side: HTMLElement; work: HTMLElement } | null = null;
+  private calcSlot: { side: HTMLElement; work: HTMLElement; stage: HTMLElement } | null = null;
   /** Envois a MyScript ce mois-ci, sur cette machine (quota, reco-3). */
   private usage: Usage = currentUsage(null, new Date());
   /** Cahiers ouverts dans un onglet et leur presence (section 11). */
@@ -460,7 +459,7 @@ export class App {
     const calc = await this.loadCalculator();
     this.placeCalculator(calc);
     calc.toggle();
-    // Le panneau pousse la page : la palette et le volet suivent.
+    // Le panneau pousse la page : la palette et le ruban suivent.
     this.placeCalculator(calc);
     this.paintMath();
   }
@@ -481,42 +480,33 @@ export class App {
     if (where === "panel") {
       if (!calc.isIn(slot.side)) calc.dock(slot.side);
     } else if (!calc.isIn(slot.work) || calc.isDocked) {
-      calc.setMinTop(this.tabbar.getBoundingClientRect().bottom + 8);
+      calc.setMinTop(this.floatTop());
       calc.float(slot.work);
       // Ouverte, elle est ramenee dans l'ecran (show la recale).
       if (calc.isVisible) calc.show();
     }
     calc.root.classList.toggle("sheet", where === "sheet");
     slot.work.classList.toggle("calc-under", where === "sheet" && calc.isVisible);
-    // Flottante, elle ne recouvre jamais la barre du haut.
-    calc.setMinTop(where === "float" ? this.tabbar.getBoundingClientRect().bottom + 8 : 8);
+    // Flottante, elle ne recouvre jamais la barre du haut ni le ruban.
+    calc.setMinTop(where === "float" ? this.floatTop() : 8);
     calc.setDetachable(where !== "sheet", where === "float" && this.settings.calcDetached);
     this.layoutInspector();
   }
 
-  /**
-   * Colonne de droite : volet des formules en haut, calculatrice ancree en
-   * dessous. Fermee si aucun des deux n'y est ; `both` : la calculatrice a
-   * sa hauteur naturelle, sauf part choisie au separateur (`split`).
-   */
+  /** Haut minimal de la calculatrice flottante (core/chrome.ts, calcFloatTop). */
+  private floatTop(): number {
+    return calcFloatTop({
+      bar: this.tabbar.getBoundingClientRect().bottom,
+      ribbon: this.formulaRibbon?.isConnected ? this.formulaRibbon.getBoundingClientRect().bottom : null,
+      height: window.innerHeight,
+    });
+  }
+
+  /** Colonne de droite : la calculatrice ancree, seule ; fermee sinon. */
   private layoutInspector(): void {
     const side = this.calcSlot?.side;
     if (!side) return;
-    const formulas = !!this.formulaDock && this.formulaDock.parentElement === side;
-    const calc = !!this.calculator?.isVisible && this.calculator.isDocked && this.calculator.isIn(side);
-    side.classList.toggle("closed", !formulas && !calc);
-    side.classList.toggle("both", formulas && calc);
-    const ratio = this.settings.formulasSplit;
-    side.classList.toggle("split", ratio !== null);
-    if (ratio === null) side.style.removeProperty("--fp-split");
-    else side.style.setProperty("--fp-split", String(ratio));
-    // Calculatrice detachee : jamais posee sur la colonne des formules.
-    const calcRoot = this.calculator?.root;
-    if (formulas && calcRoot && this.calculator?.isVisible && !this.calculator.isDocked) {
-      const edge = side.getBoundingClientRect().left;
-      const r = calcRoot.getBoundingClientRect();
-      if (r.right > edge + 1) calcRoot.style.left = `${Math.max(8, Math.round(edge - r.width - 16))}px`;
-    }
+    side.classList.toggle("closed", !this.calculator?.isVisible || !this.calculator.isDocked || !this.calculator.isIn(side));
   }
 
   /** Branche les mises a jour : menu ⋯ et Reglages les proposent ensuite. */
@@ -1414,7 +1404,7 @@ export class App {
     const stage = el("div", { class: "stage" });
     const work = el("div", { class: "work" }, stage, inspector);
     this.main.append(work);
-    this.calcSlot = { side: inspector, work };
+    this.calcSlot = { side: inspector, work, stage };
     // Fermee par defaut (D6) : mathjs n'est charge qu'au premier Ctrl+L.
     if (this.settings.calcOpen || this.calculator) {
       void this.loadCalculator().then((calc) => {
@@ -2122,7 +2112,7 @@ export class App {
     return pal;
   }
 
-  /** Bouton Σ ou Ctrl+Maj+M : ouvre le volet des formules, ou le ferme (retenu sur la machine). */
+  /** Bouton Σ ou Ctrl+Maj+M : ouvre le ruban des formules, ou le ferme (retenu sur la machine). */
   private toggleMaths(): void {
     this.settings.formulasOpen = !this.settings.formulasOpen;
     saveSettings(this.settings);
@@ -2130,39 +2120,33 @@ export class App {
   }
 
   /**
-   * Volet des formules : panneau ancre dans la colonne de droite, au-dessus
-   * de la calculatrice (core/chrome.ts, formulaPlacement). Il retrecit la
-   * zone des pages au lieu de la couvrir ; au telephone, en bas de l'ecran
-   * et la page peut remonter au-dessus. Construit une fois : la recherche
-   * et le defilement survivent a une fermeture.
+   * Ruban des formules : bande en tete de la zone des pages (`.stage`), sur
+   * toute sa largeur ; il pousse les pages vers le bas, ne les couvre
+   * jamais, et laisse a la calculatrice toute la hauteur de sa colonne.
+   * Construit une fois : onglet et recherche survivent a une fermeture.
    */
   private paintMath(): void {
-    const where = formulaPlacement({
-      open: this.settings.formulasOpen && this.screen === "notebook",
-      width: window.innerWidth,
-    });
+    const open = this.settings.formulasOpen && this.screen === "notebook";
     const btn = this.tabbar.querySelector<HTMLElement>(".maths-btn");
-    btn?.classList.toggle("on", where !== "closed");
-    btn?.setAttribute("aria-pressed", String(where !== "closed"));
-    const slot = this.calcSlot;
-    if (where === "closed" || !slot?.side.isConnected) {
-      this.formulaDock?.remove();
-    } else {
-      this.formulaDock ??= buildFormulaDock({
-        getDoc: () => this.focusedTab()?.view?.activeDoc,
-        actions: [this.iconButton("close", "Fermer", keysOf("maths"), () => this.toggleMaths(), { cls: "small-icon", keep: true, side: "bottom" })],
-        onSplit: (ratio) => {
-          this.settings.formulasSplit = ratio;
-          saveSettings(this.settings);
-          this.layoutInspector();
-        },
-      });
-      const host = where === "sheet" ? slot.work : slot.side;
-      if (this.formulaDock.parentElement !== host) host.prepend(this.formulaDock);
-      this.formulaDock.classList.toggle("at-bottom", where === "sheet");
-    }
-    slot?.work.classList.toggle("formulas-under", where === "sheet");
-    this.layoutInspector();
+    btn?.classList.toggle("on", open);
+    btn?.setAttribute("aria-pressed", String(open));
+    const stage = this.calcSlot?.stage;
+    if (!open || !stage?.isConnected) this.formulaRibbon?.remove();
+    else this.showRibbon(stage);
+    // Calculatrice flottante : sous le ruban s'il vient de s'ouvrir.
+    if (this.calculator) this.placeCalculator(this.calculator);
+  }
+
+  private showRibbon(stage: HTMLElement): void {
+    this.formulaRibbon ??= buildFormulaRibbon({
+      getDoc: () => this.focusedTab()?.view?.activeDoc,
+      tab: this.settings.formulasTab,
+      onTab: (id) => {
+        this.settings.formulasTab = id;
+        saveSettings(this.settings);
+      },
+    });
+    if (this.formulaRibbon.parentElement !== stage) stage.prepend(this.formulaRibbon);
   }
 
   /* ---------------- volets du chrome ---------------- */

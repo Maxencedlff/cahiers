@@ -58,7 +58,7 @@ const GREEK_CHARS: Record<string, string> = {
   "ρ": "\\rho", "σ": "\\sigma", "τ": "\\tau", "φ": "\\varphi", "ω": "\\omega",
   "Γ": "\\Gamma", "Δ": "\\Delta", "Θ": "\\Theta", "Λ": "\\Lambda", "Π": "\\Pi",
   "Σ": "\\Sigma", "Φ": "\\Phi", "Ω": "\\Omega",
-  // Poses par le volet des formules (mathcatalog.ts), sans nom tape.
+  // Poses par le ruban des formules (mathcatalog.ts), sans nom tape.
   "ι": "\\iota", "υ": "\\upsilon", "ϵ": "\\epsilon", "ϑ": "\\vartheta", "ϕ": "\\phi",
   "Ξ": "\\Xi", "Υ": "\\Upsilon", "Ψ": "\\Psi",
   // Repere du curseur d'une formule en cours (liveCaretFormula), jamais tape.

@@ -3405,7 +3405,7 @@ export class TextDoc {
     // formule restee ouverte.
     if (template && !template.includes("#?") && !template.includes("#@")) {
       this.lastAuto = null;
-      // Symbole du volet qui a un caractere : il se pose dans le texte et la
+      // Symbole du ruban qui a un caractere : il se pose dans le texte et la
       // frappe continue en texte (« l'angle α vaut 30 »), le caractere se
       // relit dans les formules tapees ensuite.
       const char = symbolChar(template);

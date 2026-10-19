@@ -129,14 +129,15 @@ les deux PC.
   en bas a droite de chaque panneau. Le point d'etat est vert quand tout va
   bien, orange ou rouge avec un mot (« Non enregistré », « Hors ligne »,
   « Lecture seule ») sinon ; un appui donne le detail et les cles MyScript.
-- Volet des formules : bouton Σ de la barre du haut ou `Ctrl+Maj+M`, panneau
-  ancre a droite (il retrecit la page, il ne la couvre jamais), au-dessus de la
-  calculatrice quand elle est ouverte (separateur deplacable, double-clic :
-  automatique). Recherche (« omega », « fleche », « norme » ; Entree pose la
-  premiere touche), ligne « Récents », environ 160 touches en sections
-  (modeles, calcul, grec, operateurs, relations, fleches, logique et
-  ensembles, vecteurs et matrices, physique et electronique). Ouvert ou ferme :
-  retenu sur la machine.
+- Ruban des formules (facon onglet Equation de Word) : bouton Σ de la barre du
+  haut ou `Ctrl+Maj+M`, bande sous la barre du haut sur toute la largeur de la
+  zone des pages (elle pousse la page vers le bas, la calculatrice garde toute
+  sa colonne). Onglets Récents (par defaut s'il y en a), Modèles, Calcul, Grec
+  (Maj : majuscules), Opérateurs, Relations, Flèches, Ensembles, Vecteurs,
+  Physique, et la recherche a droite (« omega », « fl », « norme » ; Entree
+  pose la premiere touche et rend le clavier au texte). Une ou deux rangees de
+  touches, jamais de defilement a la souris (une rangee qui defile au doigt et
+  au telephone). Ouverture et onglet retenus sur la machine.
 - Apparence (menu « ⋯ ») : theme Clair, Sombre ou Systeme (`Ctrl+Maj+T`),
   feuille Claire, Sepia ou Sombre ; la feuille sombre montre l'encre noire en
   clair a l'ecran seulement, l'export PDF et Word reste blanc a encre noire.
@@ -166,7 +167,7 @@ src/
 │   ├── shortcuts.ts      table unique des raccourcis (clavier, aide F1)
 │   ├── templates.ts      modeles du ruban Maths
 │   ├── theme.ts          theme, teinte de feuille, encre a l'affichage, contraste
-│   ├── chrome.ts         ruban Maths (volet/colonne), placement des messages
+│   ├── chrome.ts         disposition : barre laterale, calculatrice, ruban Σ, messages
 │   ├── status.ts         indicateur d'etat compact
 │   ├── sync.ts           OneDrive : copies de conflit, fusion d'encre, presence
 │   ├── calc/             mathjs : evaluation, derivation, primitives,
@@ -392,7 +393,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Ctrl+M` | accueil, et retour au meme endroit |
 | `Ctrl+Maj+S` | barre laterale : afficher ou masquer |
 | `Ctrl+,` | reglages |
-| `Ctrl+Maj+M` | volet des formules (Σ) : ouvrir ou fermer |
+| `Ctrl+Maj+M` | ruban des formules (Σ) : ouvrir ou fermer |
 | `Ctrl+Maj+T` | theme : clair, sombre, celui de Windows |
 | `Ctrl+F` (ou `Ctrl+K`) | recherche dans tous les cahiers, en panneau par-dessus la page |
 | `Ctrl+Maj+K` | reviser : extraits d'une couleur (theoremes, definitions...) par matiere, export PDF |
@@ -411,7 +412,7 @@ tous par Ctrl ou Alt, et marchent aussi pendant la frappe.
 | `Alt+Z` `Alt+T` | zone math, zone texte (deux fois : verrou) |
 | `Alt+0` a `Alt+5` | noir, puis les 5 couleurs de la palette (avec une sélection au lasso : la recolore) |
 | `Alt+=` | nouvelle formule ; `Alt+F P I R B` : fraction, puissance, indice, racine, barre (les autres modeles sont dans le ruban Maths ; touche physique, Option sur Mac) |
-| `Echap` | fermer ce qui est ouvert (ruban en volet, sélection du lasso), rendre le clavier de la calculatrice à la page (elle reste ouverte), quitter le texte ou y revenir depuis un bouton ; un second `Echap` de suite : retour au menu (jamais celui qui termine une saisie) |
+| `Echap` | fermer ce qui est ouvert (sélection du lasso), rendre le clavier de la calculatrice à la page (elle reste ouverte), quitter le texte ou y revenir depuis un bouton ; un second `Echap` de suite : retour au menu (jamais celui qui termine une saisie) |
 | `#` `##` `###` puis Espace | en debut de ligne : titre, sous-titre, niveau 3 ; `-` ou `*` : puce ; `1.` ou `1)` : liste numerotee (Entree continue, Entree sur un element vide en sort, Tab / Maj+Tab : retrait, Retour arriere au debut : texte normal, Ctrl+Z juste apres : le marqueur revient) |
 | `F1` | fiche des raccourcis |
 
