@@ -239,7 +239,7 @@ function chainSolve(members: string[]): { text: string; values: Map<string, stri
     const root = cdiv({ re: -d0.re, im: -d0.im }, a);
     const dp = cpoly(dDen, root);
     if (Math.hypot(dp.re, dp.im) < 1e-12 || Math.hypot(cpoly(den, root).re, cpoly(den, root).im) > 1e-7) return null;
-    let k = cmul(a, cdiv(cpoly(num, root), dp));
+    const k = cmul(a, cdiv(cpoly(num, root), dp));
     // k = coefficient de 1/den ; le terme ecrit « signe × inconnue / den » : inconnue = signe × k.
     values.set(strip(n.args[0]).name, valueText(t.sign < 0 ? { re: -k.re, im: -k.im } : k));
     out += `${out ? " + " : ""}${coefOver(k, denText(n.args[1]))}`;
@@ -315,7 +315,7 @@ const letterIndex = (k: string): number => [...k].reduce((a, c) => a * 26 + (c.c
  * l'argument) reste un produit.
  */
 function protect(src: string): { text: string; fns: string[] } {
-  let s = src.replace(/\\?[dt]frac/g, "frac").replace(/\bgamma\s*\(/g, "γ(").replace(/γ\s+\(/g, "γ(")
+  const s = src.replace(/\\?[dt]frac/g, "frac").replace(/\bgamma\s*\(/g, "γ(").replace(/γ\s+\(/g, "γ(")
     .replace(/(?<![\d\s])\.(?![\d\s])|(?<=\d)\.(?=[^\d\s])|(?<=[^\d\s])\.(?=\d)/g, "*")
     .replace(/\b(sin|cos|tan|exp|ln|log|sqrt)\s+(-?\d+(?:[.,]\d+)?|[A-Za-zα-ω])(?![\w(])/g, "$1($2)");
   const fns: string[] = [];

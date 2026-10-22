@@ -42,6 +42,7 @@ jobs:
       # Failles connues (niveau high et plus) dans ce qui part dans l'appli.
       - run: npm audit --omit=dev --audit-level=high
       - run: npx tsc --noEmit -p .
+      - run: npm run lint
       - run: npx vitest run
       - run: npx vite build
 

@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:build": "tauri build",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@tauri-apps/api": "~2.12.0",
@@ -30,10 +31,14 @@
     "pdfjs-dist": "^6.3.289"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@tauri-apps/cli": "^2.1.0",
     "@types/katex": "^0.16.7",
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "typescript-eslint": "^8.72.0",
+    "vite": "^6.4.5",
+    "vitest": "^4.1.12"
   }
 }

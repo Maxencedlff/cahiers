@@ -4890,9 +4890,13 @@ function caretRect(r: Range, root: HTMLElement): DOMRect | null {
   if (node.nodeType === Node.TEXT_NODE) {
     const len = node.textContent?.length ?? 0;
     const probe = document.createRange();
-    if (r.startOffset > 0) probe.setStart(node, r.startOffset - 1), probe.setEnd(node, r.startOffset);
-    else if (len) probe.setStart(node, 0), probe.setEnd(node, 1);
-    else probe.selectNode(node);
+    if (r.startOffset > 0) {
+      probe.setStart(node, r.startOffset - 1);
+      probe.setEnd(node, r.startOffset);
+    } else if (len) {
+      probe.setStart(node, 0);
+      probe.setEnd(node, 1);
+    } else probe.selectNode(node);
     const rect = probe.getClientRects()[0] ?? probe.getBoundingClientRect();
     if (ok(rect)) return rect;
   }

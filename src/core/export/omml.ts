@@ -90,7 +90,6 @@ export interface OmmlStyle { color?: string }
 export function escapeXml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;"))
     // Caracteres interdits en XML 1.0.
-    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
 }
 

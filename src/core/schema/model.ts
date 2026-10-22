@@ -648,7 +648,7 @@ export function stretchPart(s: SchemaBlock, id: string, w: number): { from: Pt; 
   const boxLo = (q: SchemaPart) => { const b = partBox(q); return Math.min(key({ x: b.x, y: b.y }), key({ x: b.x + b.w, y: b.y + b.h })); };
   const boxHi = (q: SchemaPart) => { const b = partBox(q); return Math.max(key({ x: b.x, y: b.y }), key({ x: b.x + b.w, y: b.y + b.h })); };
   // Une piece a cheval sur l'ancienne sortie : on ne peut pas inserer de colonnes proprement.
-  let room = !others.some((q) => boxLo(q) < edge - 1e-9 && partPorts(q).some((r) => beyond(r)));
+  const room = !others.some((q) => boxLo(q) < edge - 1e-9 && partPorts(q).some((r) => beyond(r)));
   if (delta < 0) {
     // Retrecir : rien entre la nouvelle et l'ancienne sortie.
     const lo = edge + delta;

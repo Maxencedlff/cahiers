@@ -423,7 +423,6 @@ export function reviewToParas(result: ReviewResult, title: string, showNotebook:
 
 /** Morceau de nom de fichier Windows sur (caracteres interdits retires). */
 export function safeFilePart(s: string): string {
-  // eslint-disable-next-line no-control-regex
   return s.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().replace(/[. ]+$/, "") || "Sans titre";
 }
 

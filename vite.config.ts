@@ -42,5 +42,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/tests/**/*.test.ts"],
+    // Calculs symboliques lourds (nextstep, racines) : 5 s par défaut ne
+    // suffisent pas quand toute la suite tourne en parallèle sur le portable.
+    testTimeout: 20000,
   },
 } as any);

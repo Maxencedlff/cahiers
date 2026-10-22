@@ -249,7 +249,8 @@ function quadraticExact(a: number, b: number, c: number): [string, string] | und
     return (-b - k) / (2 * a) <= (-b + k) / (2 * a) ? [lo, hi] : [hi, lo];
   }
   const g0 = gcd(gcd(b, k), 2 * a) || 1;
-  let p = -b / g0, r = k / g0, d = (2 * a) / g0;
+  let p = -b / g0, d = (2 * a) / g0;
+  const r = k / g0;
   if (d < 0) { p = -p; d = -d; }
   const rad = delta < 0
     ? `${r === 1 ? "" : r}${m === 1 ? "" : `\\sqrt{${m}}`}\\,i`.replace(/^\\,/, "")
@@ -1198,7 +1199,7 @@ function decompositionTex(R: string, K: string[], vals: number[], x: string): st
     let q = 1;
     for (const c of numC) { const nn = niceNumber(c); const m = /\/(\d+)$/.exec(nn.text); if (m) q = lcm(q, Number(m[1])); }
     let ints = numC.map((c) => Math.round(c * q));
-    let neg = ints[ints.length - 1] < 0;
+    const neg = ints[ints.length - 1] < 0;
     if (neg) ints = ints.map((c) => -c);
     const numTex = polyLatex(ints, x);
     const d = /[+-]/.test(denTex.replace(/^-/, "")) && q !== 1 ? `${q}\\left(${denTex}\\right)` : `${q !== 1 ? q : ""}${denTex}`;
