@@ -22,3 +22,4 @@ src-tauri/appstore/embedded.provisionprofile
 *.cer
 *.provisionprofile
 .env*
+scripts/__pycache__/
