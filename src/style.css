@@ -1007,7 +1007,6 @@ html[data-theme="dark"] .toast { background: #2a2e36; border-top: 1px solid #3a3
 .toast-action:hover { background: rgba(255, 255, 255, .1); }
 .toast-close { background: transparent; border-color: transparent; color: #b4bcc8; padding: 0; min-width: 40px; width: 40px; }
 .toast-close:hover { background: rgba(255, 255, 255, .1); color: #fff; }
-.toast-note { opacity: .75; font-size: var(--fs-sm); margin-left: 8px; }
 kbd { color: var(--text-2); }
 
 .hits { display: flex; flex-direction: column; gap: 6px; }

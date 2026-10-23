@@ -10,7 +10,6 @@
 export const SIDEBAR_DOCK_MIN = 1000;
 /** En dessous : telephone, navigation en pile (liste plein ecran, puis la page). */
 export const PHONE_MAX = 600;
-export const SIDEBAR_W = 248;
 
 export type SidebarMode = "docked" | "overlay" | "stack";
 

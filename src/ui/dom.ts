@@ -339,18 +339,6 @@ export function dismissToast(key: string): void {
 }
 
 /**
- * Ajoute une ligne discrete au message pose avec cette cle (rappel d'un
- * raccourci, par exemple). Rien si le message est deja parti.
- */
-export function appendToToast(key: string, text: string): void {
-  for (const t of [...(toastHost?.children ?? [])] as HTMLElement[]) {
-    if (t.dataset.key !== key || t.querySelector(".toast-note")) continue;
-    const note = el("span", { class: "toast-note" }, text);
-    (t.querySelector(".toast-text") ?? t).append(note);
-  }
-}
-
-/**
  * Prefixe de cle d'un message qui ne depend d'aucune page (matiere ou
  * intercalaire mis a la corbeille) : il survit au retour au menu.
  */

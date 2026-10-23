@@ -2,7 +2,7 @@ import { el } from "./dom";
 import { icon } from "./icons";
 import { keysOf } from "../core/shortcuts";
 import { dropIndex } from "../core/nav";
-import { MAX_DEPTH, depthOf, isUnder, type DividerNode } from "../core/dividers";
+import { isUnder, type DividerNode } from "../core/dividers";
 
 /**
  * Barre laterale (facon Notes), deux visages :
@@ -312,11 +312,6 @@ function wireRow(row: HTMLElement, list: HTMLElement, path: string, sibs: string
     end();
     host.dividerMenu(path, { x: e.clientX, y: e.clientY });
   });
-}
-
-/** « Nouvel intercalaire dans … » possible sous ce groupe. */
-export function canNest(path: string): boolean {
-  return depthOf(path) < MAX_DEPTH;
 }
 
 /* ---------------- accueil ---------------- */

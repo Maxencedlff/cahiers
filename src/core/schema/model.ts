@@ -12,7 +12,7 @@
  * dernier noeud, Tab choisit une borne libre et Entree la relie.
  */
 import type { SchemaBlock, SchemaNote, SchemaPart } from "../types";
-import { SYMBOLS, STRETCH, fitWidth, portsAt, symbolByLetter, symbolFor, type Port, type SymKey } from "./symbols";
+import { SYMBOLS, STRETCH, fitWidth, portsAt, symbolFor, type Port, type SymKey } from "./symbols";
 import { labelWidth } from "./label";
 
 export interface Pt { x: number; y: number }
@@ -937,11 +937,6 @@ export function turtlePlace(s: SchemaBlock, t: Turtle, sym: SymKey): SchemaPart 
     if (out) { t.at = { x: out.x, y: out.y }; t.dir = "right"; }
   }
   return part;
-}
-
-/** Lettre tapee : symbole correspondant (Maj : la variante), ou rien. */
-export function letterSymbol(key: string): SymKey | undefined {
-  return symbolByLetter(key)?.key;
 }
 
 /** « . » : retient le point du curseur comme noeud. */

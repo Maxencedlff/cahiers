@@ -107,12 +107,6 @@ async function loadOrWarn(file: File): Promise<HTMLImageElement | null> {
   return img;
 }
 
-/** Une seule photo (ancien chemin d'import). Un fichier illisible est signale. */
-export async function pickImage(): Promise<HTMLImageElement | null> {
-  const [file] = await pickFiles(false);
-  return file ? loadOrWarn(file) : null;
-}
-
 /* ------------------------------------------------------------------ */
 /* Flux complet : plusieurs photos, un dialogue par photo              */
 /* ------------------------------------------------------------------ */

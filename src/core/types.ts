@@ -416,10 +416,6 @@ export function parsePageNumber(fileName: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-export function refToString(r: PageRef): string {
-  return `${r.notebook}/${r.divider}/${String(r.number).padStart(4, "0")}`;
-}
-
 /**
  * Page ecrite par une version plus recente de l'application (sur l'autre
  * PC, mis a jour avant celui-ci). Elle s'ouvre en lecture seule : la

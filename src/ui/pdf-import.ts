@@ -41,18 +41,6 @@ export function pickPdf(): Promise<File | null> {
   });
 }
 
-/** Premier PDF d'un depot ou d'un presse-papiers, s'il y en a un. */
-export function pdfFiles(dt: DataTransfer | null): File[] {
-  if (!dt) return [];
-  return Array.from(dt.files ?? []).filter((f) => isPdfFile(f));
-}
-
-/** Le depot en cours contient-il un PDF ? (pendant dragover, seuls les types sont lisibles.) */
-export function dragHasPdf(dt: DataTransfer | null): boolean {
-  if (!dt) return false;
-  return Array.from(dt.items ?? []).some((i) => i.kind === "file" && i.type === "application/pdf");
-}
-
 function readAsDataUrl(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();

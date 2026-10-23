@@ -8,7 +8,7 @@ import {
 } from "../core/mathcatalog";
 import { ribbonCapacity, ribbonColumns } from "../core/chrome";
 
-export { MATH_TEMPLATES, type MathTemplate } from "../core/templates";
+export { MATH_TEMPLATES } from "../core/templates";
 
 /** Onglet des touches recemment utilisees (pas une section du catalogue). */
 const RECENT_TAB = "recent";
