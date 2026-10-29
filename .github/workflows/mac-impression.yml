@@ -37,7 +37,10 @@ jobs:
           key: mac-impression
       - name: Applis de debug (directe, App Store)
         run: |
-          npx tauri build --debug --bundles app
+          # Sans les fichiers de mise a jour (ils exigent la cle privee de
+          # l'updater, absente ici).
+          echo '{"bundle":{"createUpdaterArtifacts":false}}' > sans-maj.json
+          npx tauri build --debug --bundles app --config sans-maj.json
           mv src-tauri/target/debug/bundle/macos/Cahiers.app direct.app
           # Config MAS sans identite Apple ni profil (absents ici) : signee
           # ad hoc ensuite, avec la sandbox et les entitlements de l'App Store
