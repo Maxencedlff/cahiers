@@ -1,13 +1,14 @@
 # Essai a la main (Actions, « Essai impression Mac », Run workflow) ou a
-# chaque envoi sur une branche fix-impression-* : la
-# boite d'impression (export PDF) s'ouvre-t-elle sur un vrai Mac ?
-# Build de debug, lancee sur la machine de GitHub ; CAHIERS_TEST_EVAL lance
-# l'impression 15 s apres le demarrage (lib.rs, debug seulement), puis
-# capture d'ecran et liste des fenetres. Deux chemins compares :
+# chaque envoi sur une branche fix-impression-* : l'export PDF ouvre-t-il la
+# boite d'impression sur un vrai Mac ?
+# Applis de debug (.app), lancees sur la machine de GitHub ; CAHIERS_TEST_EVAL
+# rejoue 15 s apres le demarrage le parcours de .github/essai-export.js
+# (nouvelle matiere, une ligne, Partager, Exporter), puis captures d'ecran.
 #  - « nouveau » : window.print de l'appli (commande print_page, print.rs) ;
-#  - « ancien » : l'impression de Tauri (plugin:webview|print, wry).
-# Chacun en build directe et en build sandboxee (feature app-store, signee
-# ad hoc avec la sandbox et l'entitlement print, comme l'App Store).
+#  - « ancien » : l'impression de Tauri (plugin:webview|print, wry), celle
+#    de la 0.2.1 refusee par App Review.
+# Chacun en appli directe et en appli App Store (feature app-store, config
+# MAS, sandbox signee ad hoc avec les entitlements de l'App Store).
 name: Essai impression Mac
 on:
   workflow_dispatch:
@@ -34,42 +35,46 @@ jobs:
         with:
           workspaces: src-tauri
           key: mac-impression
-      - name: Builds de debug (directe, sandboxee)
+      - name: Applis de debug (directe, App Store)
         run: |
-          npx tauri build --debug --no-bundle
-          cp src-tauri/target/debug/cahiers cahiers-direct
-          npx tauri build --debug --no-bundle --features app-store
-          cp src-tauri/target/debug/cahiers cahiers-sandbox
-          cat > sandbox.plist <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>com.apple.security.app-sandbox</key><true/>
-          <key>com.apple.security.files.user-selected.read-write</key><true/>
-          <key>com.apple.security.network.client</key><true/>
-          <key>com.apple.security.print</key><true/>
-          </dict></plist>
-          PLIST
-          codesign --force -s - --entitlements sandbox.plist cahiers-sandbox
+          npx tauri build --debug --bundles app
+          mv src-tauri/target/debug/bundle/macos/Cahiers.app direct.app
+          # Config MAS sans identite Apple ni profil (absents ici) : signee
+          # ad hoc ensuite, avec la sandbox et les entitlements de l'App Store
+          # moins ceux qui exigent le profil (application/team identifier).
+          echo '{"bundle":{"macOS":{"signingIdentity":null,"files":null}}}' > sans-signature.json
+          npx tauri build --debug --bundles app --features app-store \
+            --config src-tauri/tauri.appstore.conf.json --config sans-signature.json
+          mv src-tauri/target/debug/bundle/macos/Cahiers.app appstore.app
+          plutil -remove com.apple.application-identifier -o sandbox.plist src-tauri/appstore/Entitlements.plist
+          plutil -remove com.apple.developer.team-identifier sandbox.plist
+          codesign --force --deep -s - --entitlements sandbox.plist appstore.app
+          codesign -d --entitlements - appstore.app
       - name: Essais
         run: |
           sw_vers | tee resultats.txt
           mkdir -p essais
-          for build in direct sandbox; do
+          parcours="$(cat .github/essai-export.js)"
+          ancien="window.print = () => window.__TAURI_INTERNALS__.invoke('plugin:webview|print');"
+          for build in direct appstore; do
             for chemin in nouveau ancien; do
-              if [ "$chemin" = nouveau ]; then js='window.print()'
-              else js="window.__TAURI_INTERNALS__.invoke('plugin:webview|print')"; fi
               nom="$build-$chemin"
-              CAHIERS_TEST_EVAL="$js" "./cahiers-$build" > "essais/$nom.log" 2>&1 &
+              if [ "$chemin" = nouveau ]; then js="$parcours"; else js="$ancien $parcours"; fi
+              CAHIERS_TEST_EVAL="$js" "./$build.app/Contents/MacOS/cahiers" > "essais/$nom.log" 2>&1 &
               pid=$!
-              sleep 35
-              screencapture -x "essais/$nom.png" || true
+              for t in 30 45 70; do
+                sleep $(( t == 30 ? 30 : t == 45 ? 15 : 25 ))
+                screencapture -x "essais/$nom-$t.png" || true
+              done
               {
                 echo "== $nom"
+                kill -0 "$pid" 2>/dev/null && echo "en vie" || echo "ARRETEE"
                 osascript -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to get {name of every window, count of sheets of every window}" 2>&1
               } | tee -a resultats.txt
               kill "$pid" 2>/dev/null || true
               sleep 3
+              log show --last 2m --style compact --predicate 'process == "cahiers"' 2>/dev/null | grep -iE "print|sandbox|deny|error|fault" | tail -40 > "essais/$nom-systeme.log" || true
+              rm -rf ~/Library/Application\ Support/fr.mdlf.cahiers ~/Library/Containers/fr.mdlf.cahiers ~/Library/WebKit/fr.mdlf.cahiers 2>/dev/null || true
             done
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
