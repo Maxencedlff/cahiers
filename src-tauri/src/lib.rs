@@ -1041,6 +1041,19 @@ pub fn run() {
             let st = app.state::<Storage>();
             if let Ok(mut g) = st.internal.lock() { *g = internal; }
             if let Ok(mut g) = st.missing.lock() { *g = missing; }
+            // Builds de debug seulement : script lance dans la page apres le
+            // demarrage (essai d'impression sur un Mac de GitHub,
+            // mac-impression.yml). Jamais compile dans une build publiee.
+            #[cfg(debug_assertions)]
+            if let Ok(js) = std::env::var("CAHIERS_TEST_EVAL") {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    if let Some(w) = handle.get_webview_window("main") {
+                        let _ = w.eval(&js);
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
