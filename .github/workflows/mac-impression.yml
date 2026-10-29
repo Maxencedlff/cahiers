@@ -22,7 +22,12 @@ permissions:
 
 jobs:
   impression:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # xcode-27 : image GitHub sous macOS 27, la version du Mac d'App Review.
+        os: [macos-latest, xcode-27]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -34,7 +39,7 @@ jobs:
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
-          key: mac-impression
+          key: mac-impression-${{ matrix.os }}
       - name: Applis de debug (directe, App Store)
         run: |
           # Sans les fichiers de mise a jour (ils exigent la cle privee de
@@ -84,7 +89,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: essai-impression-mac
+          name: essai-impression-${{ matrix.os }}
           path: |
             resultats.txt
             essais/
