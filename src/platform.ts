@@ -76,6 +76,10 @@ export async function detectPlatform(): Promise<Platform> {
   // OCR de Windows seulement : ailleurs, ni lecture du texte des photos ni
   // avertissement « indisponible » a chaque import.
   const hasOcr = await invoke<boolean>("ocr_available").catch(() => false);
+  // Mac : l'impression de Tauri n'ouvre plus de boite depuis macOS 26
+  // (src-tauri/src/print.rs). Meme contrat que celle de Tauri : une promesse,
+  // refusee si l'impression echoue (printAndWait la remonte en message).
+  if (/Mac/.test(navigator.platform)) window.print = (() => invoke<void>("print_page")) as () => void;
 
   let keys: { applicationKey: string; hmacKey: string } | null = null;
   try {

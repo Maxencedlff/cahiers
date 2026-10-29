@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # appli sandboxee, pas de mise a jour par l'appli (l'App Store s'en charge),
 # dossier synchronise retrouve par « security-scoped bookmark » (sandbox.rs).
 # Le .dmg Developer ID, Windows et Linux ne l'activent jamais.
-app-store = ["dep:objc2", "dep:objc2-foundation"]
+app-store = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -39,17 +39,33 @@ serde_json = "1"
 dirs = "5"
 base64 = "0.22"
 
-# Security-scoped bookmarks (sandbox.rs), build Mac App Store seulement :
-# memes versions que celles que tauri tire deja (Cargo.lock).
+# Mac : security-scoped bookmarks (sandbox.rs, build Mac App Store) et
+# impression de la page (print.rs, toutes les builds Mac). Memes versions
+# que celles que tauri tire deja (Cargo.lock).
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "0.6", optional = true }
-objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
   "NSArray",
   "NSData",
   "NSError",
+  "NSGeometry",
   "NSString",
   "NSURL",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "NSPrintInfo",
+  "NSPrintOperation",
+  "NSResponder",
+  "NSView",
+  "NSWindow",
+] }
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "objc2-app-kit",
+  "WKWebView",
 ] }
 
 # OCR local, fourni par Windows (section 6) : pas de service externe.

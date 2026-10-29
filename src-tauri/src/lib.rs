@@ -19,6 +19,7 @@ use std::time::Duration;
 use tauri::{Manager, State};
 
 mod location;
+mod print;
 mod sandbox;
 mod shell;
 
@@ -98,6 +99,13 @@ fn root_of(state: &State<Root>) -> Res<PathBuf> {
 #[tauri::command]
 fn distribution() -> &'static str {
     if cfg!(feature = "app-store") { "app-store" } else { "direct" }
+}
+
+/// Mac : boite d'impression de la page (export PDF), voir print.rs. Le
+/// frontend ne l'appelle que sur Mac ; ailleurs `window.print` suffit.
+#[tauri::command]
+fn print_page(webview: tauri::Webview) -> Res<()> {
+    print::print(&webview).map_err(|e| fail(format!("impression impossible : {e}")))
 }
 
 #[tauri::command]
@@ -1050,6 +1058,7 @@ pub fn run() {
             read_binary,
             write_binary,
             save_export,
+            print_page,
             ocr_image,
             ocr_available,
             myscript_keys,
