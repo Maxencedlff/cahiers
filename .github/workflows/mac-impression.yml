@@ -49,8 +49,9 @@ jobs:
           npx tauri build --debug --bundles app --features app-store \
             --config src-tauri/tauri.appstore.conf.json --config sans-signature.json
           mv src-tauri/target/debug/bundle/macos/Cahiers.app appstore.app
-          plutil -remove com.apple.application-identifier -o sandbox.plist src-tauri/appstore/Entitlements.plist
-          plutil -remove com.apple.developer.team-identifier sandbox.plist
+          cp src-tauri/appstore/Entitlements.plist sandbox.plist
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.application-identifier" sandbox.plist
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.team-identifier" sandbox.plist
           codesign --force --deep -s - --entitlements sandbox.plist appstore.app
           codesign -d --entitlements - appstore.app
       - name: Essais
